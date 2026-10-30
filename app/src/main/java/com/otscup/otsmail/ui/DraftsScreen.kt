@@ -26,6 +26,10 @@ import androidx.compose.ui.unit.dp
 import com.otscup.otsmail.data.Drafts
 import com.otscup.otsmail.ui.theme.OT
 import org.json.JSONObject
+import androidx.compose.material.icons.outlined.Edit
+import androidx.compose.foundation.layout.size
+import androidx.compose.material.icons.Icons
+import androidx.compose.material3.Icon
 
 /** 草稿箱：读本机 SharedPreferences（网页版的草稿在浏览器 IndexedDB，后端没有表）。 */
 @Composable
@@ -43,7 +47,7 @@ fun DraftsScreen(onBack: () -> Unit, onOpen: (JSONObject) -> Unit) {
                 Modifier.fillMaxSize().padding(top = 120.dp),
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
-                Text("✎", style = t.largeTitle, color = c.label3)
+                Icon(Icons.Outlined.Edit, null, tint = c.label3, modifier = Modifier.size(48.dp))
                 Spacer(Modifier.heightIn(min = 12.dp))
                 Text("还没有草稿", style = t.body, color = c.label)
                 Spacer(Modifier.heightIn(min = 4.dp))

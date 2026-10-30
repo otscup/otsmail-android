@@ -18,11 +18,17 @@ import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.graphicsLayer
 
 /**
- * iOS 寮忔寜涓嬪弽棣堬細鎸変笅鐬棿鏁村潡寰缉 + 鍘嬫繁锛屾姮璧锋墠鎻愪氦銆? *
- * 鍜?Material 娑熸吉鐨勫尯鍒細娑熸吉鏄€屾按闈㈡尝绾广€嶏紝鎸変笅鍙嶉鏄€岃繖鍧椾笢瑗胯浣犳寜杩涘幓浜嗐€嶃€? * 鍏虫帀 indication锛堟稛婕級鏄叧閿紝鍚﹀垯涓ゅ眰浼氬彔鍦ㄤ竴璧枫€? *
- * @param pressedColor 鎸変笅鏃跺彔鐨勯鑹诧紝娣辫壊閫氬父鏄櫧鑹蹭綆閫忔槑搴? * @param shape 鏈夊渾瑙掔殑鍙偣鍖哄煙蹇呴』浼狅紝鍚﹀垯鍘嬭壊浼氱洊浣忓渾瑙? */
+ * iOS 式按下反馈：按下瞬间整块微缩 + 压深，抬起才提交。
+ * 与 Material 涟漪的区别：涟漪是「水面波纹」，按下反馈是「这块东西被你按进去了」。
+ * 关掉 indication（涟漪）是关键，否则两层会叠在一起。
+ *
+ * @param pressedColor 按下时叠的颜色，深色通常是白色低透明度
+ * @param shape 有圆角的可点区域必须传，否则压色会盖住圆角
+ */
 /**
- * 瀵艰埅鏍忔寜閽紙杩斿洖 / 淇濆瓨 / 鍏抽棴锛夌敤杩欎釜锛氫笉鍋氱缉鏀撅紝鍛戒腑鍖轰笉闅忓姩鐢诲彉鍖栥€? * 缂╂斁浼氭妸鎸変笅鐬棿鐨勫懡涓煩褰㈠線閲屾敹锛?4dp 鐨勮竟缂樼偣浼氳鍚冩帀銆? */
+ * 导航栏按钮（返回 / 保存 / 关闭）用这个：不做缩放，命中区不随动画变化。
+ * 缩放会把按下瞬间的命中矩形往里收，34dp 的边缘点会被吃掉。
+ */
 @Composable
 fun Modifier.tapArea(onClick: () -> Unit): Modifier = this.clickable(
     interactionSource = remember { MutableInteractionSource() },
@@ -40,7 +46,7 @@ fun Modifier.pressable(
 ): Modifier {
     val source = remember { MutableInteractionSource() }
     val down by source.collectIsPressedAsState()
-    // 90ms锛氱煭鍒版劅瑙夋槸鐬椂鐨勶紝闀垮埌鑲夌溂鑳界湅瑙佽繃娓★紱涓嶈兘鐢?spring锛屾寜涓嬫€佽绔嬪埢鍒颁綅
+    // 90ms：短到感觉是瞬时的，长到肉眼能看见过渡；不能用 spring，按下态要立刻到位
     val t by animateFloatAsState(if (down) 1f else 0f, tween(90, easing = LinearEasing), label = "press")
 
     return this
