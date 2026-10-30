@@ -38,6 +38,10 @@ import com.otscup.otsmail.data.MailItem
 import com.otscup.otsmail.ui.theme.OT
 import kotlinx.coroutines.launch
 import org.json.JSONObject
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.ChevronRight
+import androidx.compose.material.icons.outlined.Check
+import androidx.compose.material3.Icon
 
 /** 管理区的通用内联导航栏（‹ + 标题 + 可选动作）。 */
 @Composable
@@ -247,7 +251,7 @@ fun RolesScreen(onBack: () -> Unit, onToast: (String) -> Unit) {
                                 style = t.caption1, color = c.label2,
                             )
                         }
-                        Text("›", style = t.body, color = c.label3)
+                        Icon(Icons.Outlined.ChevronRight, null, tint = c.label3, modifier = Modifier.size(20.dp))
                     }
                     HorizontalDivider(color = c.separator, modifier = Modifier.padding(start = d.sp4.dp))
                 }
@@ -269,7 +273,7 @@ fun RolesScreen(onBack: () -> Unit, onToast: (String) -> Unit) {
                                 p.optString("name", p.optString("permName", "权限 $id")),
                                 style = t.body, color = c.label, modifier = Modifier.weight(1f),
                             )
-                            if (on) Text("✓", style = t.body, color = c.blue)
+                            if (on) Icon(Icons.Outlined.Check, null, tint = c.blue, modifier = Modifier.size(20.dp))
                         }
                     }
                 }

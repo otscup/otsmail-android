@@ -37,6 +37,10 @@ import com.otscup.otsmail.data.Api
 import com.otscup.otsmail.data.MailDetail
 import com.otscup.otsmail.ui.theme.OT
 import kotlinx.coroutines.launch
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Delete
+import androidx.compose.material.icons.outlined.AttachFile
+import androidx.compose.material3.Icon
 
 @Composable
 fun DetailScreen(emailId: Long, onBack: () -> Unit, onReply: (MailDetail) -> Unit) {
@@ -83,7 +87,7 @@ fun DetailScreen(emailId: Long, onBack: () -> Unit, onReply: (MailDetail) -> Uni
                         scope.launch { runCatching { Api.trash(listOf(m.emailId)) }.onSuccess { onBack() } }
                     },
                     contentAlignment = Alignment.Center,
-                ) { Text("🗑", style = t.subhead, color = c.label2) }
+                ) { Icon(Icons.Outlined.Delete, null, tint = c.label2, modifier = Modifier.size(20.dp)) }
             }
         }
         if (error.isNotEmpty()) {
@@ -187,7 +191,7 @@ blockquote{margin:8px 0;padding-left:10px;border-left:3px solid $quote;color:$sy
                             Modifier.fillMaxWidth().height(48.dp).padding(horizontal = 16.dp),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
-                            Text("📎", style = t.subhead, color = c.label2)
+                            Icon(Icons.Outlined.AttachFile, null, tint = c.label2, modifier = Modifier.size(18.dp))
                             Spacer(Modifier.size(8.dp))
                             Text(att, style = t.subhead, color = c.label, maxLines = 1)
                         }

@@ -40,6 +40,9 @@ import com.otscup.otsmail.data.Api
 import com.otscup.otsmail.data.Session
 import com.otscup.otsmail.ui.theme.OT
 import kotlinx.coroutines.launch
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.ArrowUpward
+import androidx.compose.material3.Icon
 
 private data class Msg(
     val role: String,            // "me" | "ai"
@@ -152,7 +155,7 @@ fun AiScreen(session: Session, onBack: () -> Unit, onOpenCompose: () -> Unit) {
                     .background(if (busy || input.isBlank()) c.label3 else c.blue, CircleShape)
                     .pressable(scale = 0.9f, shape = CircleShape) { send(input) },
                 contentAlignment = Alignment.Center,
-            ) { Text("↑", style = t.body, color = androidx.compose.ui.graphics.Color.White) }
+            ) { Icon(Icons.Outlined.ArrowUpward, null, tint = androidx.compose.ui.graphics.Color.White, modifier = Modifier.size(18.dp)) }
         }
     }
 }

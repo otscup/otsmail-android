@@ -40,6 +40,7 @@ import com.otscup.otsmail.data.Api
 import com.otscup.otsmail.data.Session
 import com.otscup.otsmail.ui.theme.OT
 import kotlinx.coroutines.launch
+import androidx.compose.material.icons.outlined.Check
 
 /** 回车键行为三档（存服务端 sendOnEnter） */
 private val SEND_MODES = listOf(
@@ -156,7 +157,7 @@ fun SettingsScreen(
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         Text(mode.second, style = t.body, color = c.label, modifier = Modifier.weight(1f))
-                        if (sendOnEnter == mode.first) Text("✓", style = t.body, color = c.blue)
+                        if (sendOnEnter == mode.first) Icon(Icons.Outlined.Check, null, tint = c.blue, modifier = Modifier.size(20.dp))
                     }
                 }
             }
