@@ -41,6 +41,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.AttachFile
 import androidx.compose.material3.Icon
+import androidx.compose.material.icons.filled.Star
+import androidx.compose.material.icons.outlined.StarBorder
 
 @Composable
 fun DetailScreen(emailId: Long, onBack: () -> Unit, onReply: (MailDetail) -> Unit) {
@@ -81,7 +83,7 @@ fun DetailScreen(emailId: Long, onBack: () -> Unit, onReply: (MailDetail) -> Uni
                         }
                     },
                     contentAlignment = Alignment.Center,
-                ) { Text(if (m.starred) "★" else "☆", style = t.title3, color = if (m.starred) c.orange else c.label2) }
+                ) { Icon(if (m.starred) Icons.Filled.Star else Icons.Outlined.StarBorder, null, tint = if (m.starred) c.orange else c.label2, modifier = Modifier.size(22.dp)) }
                 Box(
                     Modifier.size(44.dp).clip(RoundedCornerShape(10.dp)).tapArea {
                         scope.launch { runCatching { Api.trash(listOf(m.emailId)) }.onSuccess { onBack() } }
