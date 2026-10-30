@@ -201,7 +201,7 @@ fun SysSettingsScreen(onBack: () -> Unit, onToast: (String) -> Unit) {
         ) {
             if (opened != null) {
                 Box(
-                    Modifier.height(44.dp).tapArea { commit() }.padding(horizontal = 8.dp),
+                    Modifier.height(OTSpace.s8).tapArea { commit() }.padding(horizontal = OTSpace.s2),
                     contentAlignment = Alignment.Center,
                 ) { Text(if (saving) "保存中" else "保存", style = t.subhead, color = if (saving) c.label3 else c.blue) }
             }
@@ -219,9 +219,9 @@ fun SysSettingsScreen(onBack: () -> Unit, onToast: (String) -> Unit) {
             val card = opened
             if (card == null) {
                 for ((i, one) in CARDS.withIndex()) {
-                    if (i == 0) GroupTitle("站点")
-                    if (i == 3) GroupTitle("存储与推送")
-                    if (i == 7) GroupTitle("AI")
+                    if (i == 0) OTGroupHeader("站点")
+                    if (i == 3) OTGroupHeader("存储与推送")
+                    if (i == 7) OTGroupHeader("AI")
                     Column(
                         Modifier
                             .fillMaxWidth()
@@ -232,7 +232,7 @@ fun SysSettingsScreen(onBack: () -> Unit, onToast: (String) -> Unit) {
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .pressable(pressedColor = c.bgInput) { opened = one }
-                                .padding(horizontal = d.sp4.dp, vertical = d.sp3.dp),
+                                .padding(horizontal = OTSpace.s4, vertical = OTSpace.s3),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
                             Text(one.title, style = t.body, color = c.label, modifier = Modifier.weight(1f))
@@ -246,7 +246,7 @@ fun SysSettingsScreen(onBack: () -> Unit, onToast: (String) -> Unit) {
                     style = t.footnote, color = c.label2,
                     modifier = Modifier.padding(horizontal = d.sp5.dp, vertical = d.sp3.dp),
                 )
-                Spacer(Modifier.height(d.sp6.dp))
+                Spacer(Modifier.height(OTSpace.s6))
             } else {
                 Column(
                     Modifier
@@ -264,7 +264,7 @@ fun SysSettingsScreen(onBack: () -> Unit, onToast: (String) -> Unit) {
                     style = t.footnote, color = c.label2,
                     modifier = Modifier.padding(horizontal = d.sp5.dp, vertical = d.sp2.dp),
                 )
-                Spacer(Modifier.height(d.sp6.dp))
+                Spacer(Modifier.height(OTSpace.s6))
             }
         }
     }
@@ -290,7 +290,7 @@ private fun FieldRow(f: Field, value: String, editing: String?, onChange: (Strin
                 .pressable(pressedColor = c.bgInput) {
                     onChange(if (isOn) f.offValue.toString() else f.onValue.toString())
                 }
-                .padding(horizontal = d.sp4.dp, vertical = d.sp3.dp),
+                .padding(horizontal = OTSpace.s4, vertical = OTSpace.s3),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Text(f.label, style = t.body, color = c.label, modifier = Modifier.weight(1f))
@@ -311,7 +311,7 @@ private fun FieldRow(f: Field, value: String, editing: String?, onChange: (Strin
         return
     }
 
-    Column(Modifier.padding(horizontal = d.sp4.dp, vertical = d.sp2.dp)) {
+    Column(Modifier.padding(horizontal = OTSpace.s4, vertical = OTSpace.s2)) {
         Text(f.label, style = t.caption1, color = c.label2)
         BasicTextField(
             value = editing ?: "",
