@@ -79,7 +79,7 @@ fun ContactsScreen(session: Session, onBack: () -> Unit, onWrite: (String) -> Un
             Text(
                 if (contacts.isEmpty()) "" else "${contacts.size}",
                 style = t.footnote, color = c.label2,
-                modifier = Modifier.padding(horizontal = 8.dp),
+                modifier = Modifier.padding(horizontal = OTSpace.s2),
             )
         }
 
@@ -106,9 +106,9 @@ fun ContactsScreen(session: Session, onBack: () -> Unit, onWrite: (String) -> Un
                                                 .fillMaxWidth()
                                                 .heightIn(min = 60.dp)
                                                 .tapArea { onWrite(ct.email) }
-                                                .padding(horizontal = 16.dp, vertical = 8.dp),
+                                                .padding(horizontal = OTSpace.s4, vertical = OTSpace.s2),
                                             verticalAlignment = Alignment.CenterVertically,
-                                            horizontalArrangement = Arrangement.spacedBy(12.dp),
+                                            horizontalArrangement = Arrangement.spacedBy(OTSpace.s3),
                                         ) {
                                             OTAvatar(ct.name, size = 36)
                                             Column(Modifier.weight(1f)) {

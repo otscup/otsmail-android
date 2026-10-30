@@ -96,7 +96,7 @@ fun AiScreen(session: Session, onBack: () -> Unit, onOpenCompose: () -> Unit) {
     ) {
         OTNavBar(title = "AI 助手", onLeading = onBack) {
             Box(
-                Modifier.height(44.dp).padding(horizontal = 8.dp).tapArea { onOpenCompose() },
+                Modifier.height(OTSpace.s8).padding(horizontal = OTSpace.s2).tapArea { onOpenCompose() },
                 contentAlignment = Alignment.Center,
             ) { Text("写邮件", style = t.footnote, color = c.blue) }
         }
@@ -120,7 +120,7 @@ fun AiScreen(session: Session, onBack: () -> Unit, onOpenCompose: () -> Unit) {
                     modifier = Modifier
                         .background(c.bgInput, RoundedCornerShape(50))
                         .pressable(shape = RoundedCornerShape(50)) { send(label) }
-                        .padding(horizontal = d.sp3.dp, vertical = 6.dp),
+                        .padding(horizontal = OTSpace.s3, vertical = OTSpace.s2),
                 ) { Text(label, style = t.caption1, color = c.label2) }
             }
         }
@@ -182,7 +182,7 @@ private fun Bubble(m: Msg) {
         m.actions.forEach { a ->
             Row(
                 modifier = Modifier
-                    .padding(top = 4.dp)
+                    .padding(top = OTSpace.s1)
                     .background(if (a.ok) c.bgInput else c.bgInput, RoundedCornerShape(6.dp))
                     .padding(horizontal = 6.dp, vertical = 2.dp),
                 verticalAlignment = Alignment.CenterVertically,
