@@ -45,6 +45,8 @@ import androidx.compose.material3.Icon
 import androidx.compose.material.icons.outlined.Person
 import androidx.compose.material.icons.outlined.PersonOff
 import androidx.compose.material.icons.outlined.VpnKey
+import androidx.compose.material.icons.outlined.VerifiedUser
+import androidx.compose.material.icons.outlined.Shield
 
 /** 管理区的通用内联导航栏（‹ + 标题 + 可选动作）。 */
 @Composable
@@ -235,22 +237,19 @@ fun RolesScreen(onBack: () -> Unit, onToast: (String) -> Unit) {
         if (opened == null) {
             LazyColumn(Modifier.fillMaxWidth()) {
                 items(roles, key = { it.optLong("roleId").toString() }) { r ->
-                    Row(
-                        Modifier.fillMaxWidth()
-                            .pressable(pressedColor = c.bgInput) { open(r) }
-                            .padding(horizontal = d.sp4.dp, vertical = d.sp3.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Column(Modifier.weight(1f)) {
-                            Text(r.optString("name"), style = t.body, color = c.label)
-                            Text(
-                                (if (r.optBoolean("isDefault")) "默认角色 · " else "") + "排序 ${r.optInt("sort")}",
-                                style = t.caption1, color = c.label2,
-                            )
-                        }
-                        Icon(Icons.Outlined.ChevronRight, null, tint = c.label3, modifier = Modifier.size(20.dp))
+                    val isDefault = r.optBoolean("isDefault")
+                    OTGroup(Modifier.padding(horizontal = d.sp4.dp, vertical = 4.dp)) {
+                        OTRow(
+                            title = r.optString("name"),
+                            subtitle = (if (isDefault) "默认角色 · " else "") + "排序 ${r.optInt("sort")}",
+                            icon = if (isDefault) Icons.Outlined.VerifiedUser else Icons.Outlined.Shield,
+                            iconTint = if (isDefault) c.green else c.purple,
+                            onClick = { open(r) },
+                            trailing = {
+                                Icon(Icons.Outlined.ChevronRight, null, tint = c.label3, modifier = Modifier.size(20.dp))
+                            },
+                        )
                     }
-                    HorizontalDivider(color = c.separator, modifier = Modifier.padding(start = d.sp4.dp))
                 }
             }
         } else {
