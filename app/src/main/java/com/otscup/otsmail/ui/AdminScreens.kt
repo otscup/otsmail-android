@@ -299,7 +299,7 @@ fun RolesScreen(onBack: () -> Unit, onToast: (String) -> Unit) {
                         }
                     }
                 }
-                item { Spacer(Modifier.height(d.sp6.dp)) }
+                item { Spacer(Modifier.height(OTSpace.s6)) }
             }
         }
     }
@@ -379,7 +379,7 @@ fun AnalysisScreen(onBack: () -> Unit) {
     Column(Modifier.fillMaxSize().background(c.bgGrouped).statusBarsPadding().navigationBarsPadding()) {
         AdminBar("分析", onBack = onBack)
         Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState())) {
-            GroupTitle("总览")
+            OTGroupHeader("总览")
             Row(Modifier.fillMaxWidth().padding(horizontal = d.sp4.dp), horizontalArrangement = Arrangement.spacedBy(d.sp2.dp)) {
                 Stat("收件", counts?.optInt("inbox") ?: 0, Modifier.weight(1f))
                 Stat("发件", counts?.optInt("sent") ?: 0, Modifier.weight(1f))
@@ -410,7 +410,7 @@ private fun Stat(label: String, value: Int, modifier: Modifier = Modifier) {
     val t = OT.type
     val d = OT.dimens
     Column(
-        modifier.background(c.bgCard, RoundedCornerShape(d.rMd.dp)).padding(d.sp3.dp),
+        modifier.background(c.bgCard, RoundedCornerShape(14.dp)).padding(d.sp3.dp),
     ) {
         Text(label, style = t.caption1, color = c.label2)
         Text("$value", style = t.title1, color = c.label)
