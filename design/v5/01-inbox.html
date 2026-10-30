@@ -1,0 +1,257 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>OTSMail v5 · 收件箱定稿</title>
+<style>
+  :root{
+    --blue:#0A6CFF; --blue-press:#0057D9; --ink:#0B0B0F; --ink2:#5B5B66; --ink3:#9A9AA5;
+    --bg:#F4F5F7; --card:#FFFFFF; --line:rgba(11,11,15,.10); --chip:#EEF1F6; --chip-ink:#5B5B66;
+    --star:#F5A623; --danger:#E5484D; --r-card:14px; --r-pill:999px;
+    --sp:4px;
+    --f: -apple-system,"SF Pro Text","Noto Sans SC","Roboto",sans-serif;
+  }
+  *{box-sizing:border-box;margin:0;padding:0;-webkit-font-smoothing:antialiased}
+  body{background:#DFE2E7;font-family:var(--f);padding:28px;display:flex;gap:28px;align-items:flex-start}
+  .phone{width:393px;height:852px;border-radius:28px;overflow:hidden;background:var(--bg);
+    box-shadow:0 18px 50px rgba(11,11,15,.18);position:relative;display:flex;flex-direction:column}
+  .phone.dark{--bg:#000;--card:#141418;--ink:#fff;--ink2:rgba(235,235,245,.64);--ink3:rgba(235,235,245,.34);
+    --line:rgba(255,255,255,.12);--chip:#22222A;--chip-ink:rgba(235,235,245,.64);--blue:#3B87FF;--blue-press:#2C6FDA}
+  .tag{position:absolute;top:-24px;left:2px;font-size:12px;color:#5B5B66;letter-spacing:.04em}
+  .wrap{position:relative}
+
+  /* 状态栏（真机由系统绘制，样张只示意） */
+  .status{height:44px;display:flex;align-items:center;justify-content:space-between;padding:0 22px;
+    font-size:13px;font-weight:600;color:var(--ink)}
+
+  /* 顶栏：36 头像 + 搜索胶囊 36 高 */
+  .top{display:flex;align-items:center;gap:8px;padding:6px 16px 4px}
+  .ava{width:36px;height:36px;border-radius:50%;background:var(--blue);color:#fff;font-size:15px;
+    font-weight:600;display:grid;place-items:center;flex:none}
+  .search{flex:1;height:36px;border-radius:10px;background:var(--dark-search,#EBEDF1);
+    display:flex;align-items:center;gap:6px;padding:0 4px 0 10px;color:var(--ink3);font-size:15px}
+  .dark .search{background:#1C1C22}
+  .search .ico{width:15px;height:15px;stroke:var(--ink3);fill:none;stroke-width:2}
+  .search .ph{flex:1}
+  .ai{width:28px;height:28px;border-radius:50%;background:var(--blue);color:#fff;display:grid;place-items:center;
+    font-size:13px;flex:none}
+
+  /* 大标题行 */
+  .title{display:flex;align-items:flex-end;gap:8px;padding:6px 16px 10px}
+  .title h1{font-size:34px;line-height:41px;letter-spacing:.2px;font-weight:700;color:var(--ink)}
+  .title .unread{margin-left:auto;font-size:13px;color:var(--blue);font-weight:500;padding-bottom:6px}
+
+  /* 列表：日期标题 + 卡片 */
+  .scroll{flex:1;overflow:hidden}
+  .day{font-size:13px;line-height:18px;color:var(--ink2);padding:14px 16px 8px}
+  .card{margin:0 16px;background:var(--card);border-radius:var(--r-card);overflow:hidden}
+  .row{display:flex;align-items:center;gap:10px;min-height:86px;height:auto;padding:11px 12px 11px 10px;position:relative}
+  .row + .row::before{content:"";position:absolute;left:58px;right:0;top:0;height:1px;
+    background:var(--line);transform:scaleY(.5);transform-origin:top}
+  .dot{width:8px;height:8px;border-radius:50%;background:var(--blue);flex:none}
+  .dot.off{background:transparent}
+  .av{width:34px;height:34px;border-radius:50%;display:grid;place-items:center;color:#fff;font-size:14px;
+    font-weight:600;flex:none}
+  .main{flex:1;min-width:0}
+  .l1{display:flex;align-items:center;gap:6px}
+  .from{font-size:15px;color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:150px}
+  .unread-row .from,.unread-row .subj{font-weight:600}
+  .chip{font-size:11px;line-height:1;color:var(--chip-ink);background:var(--chip);border-radius:var(--r-pill);
+    padding:4px 7px;flex:none}
+  .time{margin-left:auto;font-size:12px;color:var(--ink3);flex:none}
+  .subj{font-size:17px;line-height:22px;color:var(--ink);margin-top:2px;white-space:nowrap;overflow:hidden;
+    text-overflow:ellipsis}
+  .snip{font-size:15px;line-height:20px;color:var(--ink2);margin-top:1px;display:-webkit-box;
+    -webkit-line-clamp:1;-webkit-box-orient:vertical;overflow:hidden;white-space:nowrap}
+  .star{width:36px;height:36px;display:grid;place-items:center;font-size:19px;color:var(--ink3);flex:none}
+  .star.on{color:var(--star)}
+  .foot{text-align:center;font-size:13px;color:var(--ink2);padding:14px 0 6px}
+  .more{text-align:center;font-size:15px;color:var(--blue);padding-bottom:10px}
+  .fab{position:absolute;right:20px;bottom:34px;width:52px;height:52px;border-radius:50%;background:var(--blue);
+    color:#fff;display:grid;place-items:center;font-size:21px;box-shadow:0 6px 18px rgba(10,108,255,.35)}
+  .home{height:22px;display:grid;place-items:center}
+  .home i{width:134px;height:5px;border-radius:3px;background:var(--ink);opacity:.28}
+  /* 规格标注 */
+  .spec{font-size:11px;color:#8A8A95;line-height:1.5;max-width:300px;font-family:ui-monospace,monospace}
+</style>
+</head>
+<body>
+<!-- 亮色 -->
+<div class="wrap">
+  <div class="tag">亮色 · Light</div>
+  <div class="phone">
+    <div class="status"><span>9:41</span><span>◗◗ ▮</span></div>
+    <div class="top">
+      <div class="ava">O</div>
+      <div class="search">
+        <svg class="ico" viewBox="0 0 20 20"><circle cx="8.5" cy="8.5" r="5.5"/><path d="M13 13l4 4"/></svg>
+        <span class="ph">搜索邮件</span>
+        <div class="ai">✦</div>
+      </div>
+    </div>
+    <div class="title"><h1>收件箱</h1><span class="unread">12 未读</span></div>
+    <div class="scroll">
+      <div class="day">今天</div>
+      <div class="card">
+        <div class="row unread-row">
+          <span class="dot"></span>
+          <div class="av" style="background:#0A6CFF">O</div>
+          <div class="main">
+            <div class="l1"><span class="from">OTSCUP Security</span><span class="chip">主要</span><span class="time">09:12</span></div>
+            <div class="subj">New device signed in to your OTSCUP account</div>
+            <div class="snip">我们检测到一次新的登录，设备 Windows · 上海，如果这不是你本人操作，请立即修改密码。</div>
+          </div>
+          <div class="star">☆</div>
+        </div>
+        <div class="row unread-row">
+          <span class="dot"></span>
+          <div class="av" style="background:#E5484D">C</div>
+          <div class="main">
+            <div class="l1"><span class="from">Cloudflare</span><span class="chip">主要</span><span class="time">08:40</span></div>
+            <div class="subj">Workers 10 月用量月报：请求数 1.2M</div>
+            <div class="snip">你的 Workers 本月处理了 1,204,882 次请求，较上月增长 18%，其中 92% 命中缓存。</div>
+          </div>
+          <div class="star">☆</div>
+        </div>
+        <div class="row">
+          <span class="dot off"></span>
+          <div class="av" style="background:#F5A623">S</div>
+          <div class="main">
+            <div class="l1"><span class="from">少数派</span><span class="chip">推广</span><span class="time">昨天</span></div>
+            <div class="subj">本周值得关注的 7 个效率工具</div>
+            <div class="snip">从窗口管理到剪贴板同步，这些工具能让你的桌面安静下来。</div>
+          </div>
+          <div class="star on">★</div>
+        </div>
+      </div>
+      <div class="day">昨天</div>
+      <div class="card">
+        <div class="row">
+          <span class="dot off"></span>
+          <div class="av" style="background:#30A46C">V</div>
+          <div class="main">
+            <div class="l1"><span class="from">Vercel</span><span class="chip">动态</span><span class="time">21:06</span></div>
+            <div class="subj">Deployment ready: otsmail-web · dpl_7f2c9</div>
+            <div class="snip">Production 部署完成，构建耗时 46s，已在 12 个边缘节点就绪。</div>
+          </div>
+          <div class="star">☆</div>
+        </div>
+        <div class="row unread-row">
+          <span class="dot"></span>
+          <div class="av" style="background:#7C5CFF">D</div>
+          <div class="main">
+            <div class="l1"><span class="from">DeepSeek</span><span class="chip">主要</span><span class="time">20:31</span></div>
+            <div class="subj">你的本月账单已生成：¥18.60</div>
+            <div class="snip">账单周期 2026-10-01 至 2026-10-31，可在控制台下载发票。</div>
+          </div>
+          <div class="star">☆</div>
+        </div>
+        <div class="row">
+          <span class="dot off"></span>
+          <div class="av" style="background:#0A6CFF">T</div>
+          <div class="main">
+            <div class="l1"><span class="from">Telegram</span><span class="chip">社交</span><span class="time">19:02</span></div>
+            <div class="subj">你在「团队」中被提及了 2 次</div>
+            <div class="snip">@otscup 部署脚本要不要加个 dry-run 参数？</div>
+          </div>
+          <div class="star">☆</div>
+        </div>
+      </div>
+      <div class="foot">共 128 封 · 第 1 / 13 页</div>
+      <div class="more">加载更多（还有 108 封）</div>
+    </div>
+    <div class="fab">✎</div>
+    <div class="home"><i></i></div>
+  </div>
+</div>
+
+<!-- 暗色 -->
+<div class="wrap">
+  <div class="tag">暗色 · Dark</div>
+  <div class="phone dark">
+    <div class="status"><span>9:41</span><span>◗◗ ▮</span></div>
+    <div class="top">
+      <div class="ava">O</div>
+      <div class="search">
+        <svg class="ico" viewBox="0 0 20 20"><circle cx="8.5" cy="8.5" r="5.5"/><path d="M13 13l4 4"/></svg>
+        <span class="ph">搜索邮件</span>
+        <div class="ai">✦</div>
+      </div>
+    </div>
+    <div class="title"><h1>收件箱</h1><span class="unread">12 未读</span></div>
+    <div class="scroll">
+      <div class="day">今天</div>
+      <div class="card">
+        <div class="row unread-row">
+          <span class="dot"></span>
+          <div class="av" style="background:#0A6CFF">O</div>
+          <div class="main">
+            <div class="l1"><span class="from">OTSCUP Security</span><span class="chip">主要</span><span class="time">09:12</span></div>
+            <div class="subj">New device signed in to your OTSCUP account</div>
+            <div class="snip">我们检测到一次新的登录，设备 Windows · 上海，如果这不是你本人操作，请立即修改密码。</div>
+          </div>
+          <div class="star">☆</div>
+        </div>
+        <div class="row unread-row">
+          <span class="dot"></span>
+          <div class="av" style="background:#E5484D">C</div>
+          <div class="main">
+            <div class="l1"><span class="from">Cloudflare</span><span class="chip">主要</span><span class="time">08:40</span></div>
+            <div class="subj">Workers 10 月用量月报：请求数 1.2M</div>
+            <div class="snip">你的 Workers 本月处理了 1,204,882 次请求，较上月增长 18%，其中 92% 命中缓存。</div>
+          </div>
+          <div class="star">☆</div>
+        </div>
+        <div class="row">
+          <span class="dot off"></span>
+          <div class="av" style="background:#F5A623">S</div>
+          <div class="main">
+            <div class="l1"><span class="from">少数派</span><span class="chip">推广</span><span class="time">昨天</span></div>
+            <div class="subj">本周值得关注的 7 个效率工具</div>
+            <div class="snip">从窗口管理到剪贴板同步，这些工具能让你的桌面安静下来。</div>
+          </div>
+          <div class="star on">★</div>
+        </div>
+      </div>
+      <div class="day">昨天</div>
+      <div class="card">
+        <div class="row">
+          <span class="dot off"></span>
+          <div class="av" style="background:#30A46C">V</div>
+          <div class="main">
+            <div class="l1"><span class="from">Vercel</span><span class="chip">动态</span><span class="time">21:06</span></div>
+            <div class="subj">Deployment ready: otsmail-web · dpl_7f2c9</div>
+            <div class="snip">Production 部署完成，构建耗时 46s，已在 12 个边缘节点就绪。</div>
+          </div>
+          <div class="star">☆</div>
+        </div>
+        <div class="row unread-row">
+          <span class="dot"></span>
+          <div class="av" style="background:#7C5CFF">D</div>
+          <div class="main">
+            <div class="l1"><span class="from">DeepSeek</span><span class="chip">主要</span><span class="time">20:31</span></div>
+            <div class="subj">你的本月账单已生成：¥18.60</div>
+            <div class="snip">账单周期 2026-10-01 至 2026-10-31，可在控制台下载发票。</div>
+          </div>
+          <div class="star">☆</div>
+        </div>
+        <div class="row">
+          <span class="dot off"></span>
+          <div class="av" style="background:#0A6CFF">T</div>
+          <div class="main">
+            <div class="l1"><span class="from">Telegram</span><span class="chip">社交</span><span class="time">19:02</span></div>
+            <div class="subj">你在「团队」中被提及了 2 次</div>
+            <div class="snip">@otscup 部署脚本要不要加个 dry-run 参数？</div>
+          </div>
+          <div class="star">☆</div>
+        </div>
+      </div>
+      <div class="foot">共 128 封 · 第 1 / 13 页</div>
+      <div class="more">加载更多（还有 108 封）</div>
+    </div>
+    <div class="fab">✎</div>
+    <div class="home"><i></i></div>
+  </div>
+</div>
+</body>
+</html>
