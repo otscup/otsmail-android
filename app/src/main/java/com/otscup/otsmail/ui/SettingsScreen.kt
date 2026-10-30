@@ -169,21 +169,15 @@ fun SettingsScreen(
 
             OTGroupHeader("管理")
             OTGroup(Modifier.padding(horizontal = OTSpace.s4)) {
-                Row(
-                    Modifier.fillMaxWidth().heightIn(min = 48.dp).tapArea { onOpenSysSettings() }
-                        .padding(horizontal = 16.dp, vertical = 10.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(12.dp),
-                ) {
-                    Box(
-                        Modifier.size(30.dp).background(c.gray.copy(alpha = 0.14f), RoundedCornerShape(7.dp)),
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        Icon(Icons.Outlined.Settings, contentDescription = null, tint = c.gray, modifier = Modifier.size(18.dp))
-                    }
-                    Text("系统设置", style = t.body, color = c.label, modifier = Modifier.weight(1f))
-                    Icon(Icons.Outlined.ChevronRight, contentDescription = null, tint = c.label3, modifier = Modifier.size(20.dp))
-                }
+                OTRow(
+                    title = "系统设置",
+                    icon = Icons.Outlined.Settings,
+                    iconTint = c.gray,
+                    onClick = onOpenSysSettings,
+                    trailing = {
+                        Icon(Icons.Outlined.ChevronRight, contentDescription = null, tint = c.label3, modifier = Modifier.size(20.dp))
+                    },
+                )
             }
             Spacer(Modifier.size(8.dp))
             AdminLinks(onOpenAdmin)

@@ -40,7 +40,7 @@ fun OTRow(
     val t = OT.type
     val tint = iconTint ?: c.blue
     val base = if (onClick != null) {
-        modifier.fillMaxWidth().heightIn(min = 44.dp).tapArea { onClick() }
+        modifier.fillMaxWidth().heightIn(min = 44.dp).pressable(pressedColor = c.bgInput) { onClick() }
     } else {
         modifier.fillMaxWidth().heightIn(min = 44.dp)
     }

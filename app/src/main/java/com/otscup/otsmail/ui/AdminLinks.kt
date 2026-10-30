@@ -1,10 +1,7 @@
 package com.otscup.otsmail.ui
 
 import androidx.compose.foundation.background
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -19,9 +16,7 @@ import androidx.compose.material.icons.outlined.Shield
 import androidx.compose.material.icons.outlined.VpnKey
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
-import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -32,7 +27,6 @@ import com.otscup.otsmail.ui.theme.OT
 @Composable
 internal fun AdminLinks(onOpenAdmin: (String) -> Unit) {
     val c = OT.colors
-    val t = OT.type
     val d = OT.dimens
     // key to (图标, 同色底) —— 对应样张设置 App 的彩色图标块
     val rows: List<Triple<String, String, Pair<ImageVector, Color>>> = listOf(
@@ -51,25 +45,15 @@ internal fun AdminLinks(onOpenAdmin: (String) -> Unit) {
     ) {
         for ((i, row) in rows.withIndex()) {
             if (i > 0) HorizontalDivider(color = c.separator, modifier = Modifier.padding(start = 58.dp))
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .pressable(pressedColor = c.bgInput) { onOpenAdmin(row.first) }
-                    .padding(horizontal = d.sp4.dp, vertical = 11.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(12.dp),
-            ) {
-                Box(
-                    Modifier
-                        .size(30.dp)
-                        .background(row.third.second.copy(alpha = 0.14f), RoundedCornerShape(7.dp)),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Icon(row.third.first, contentDescription = null, tint = row.third.second, modifier = Modifier.size(18.dp))
-                }
-                Text(row.second, style = t.body, color = c.label, modifier = Modifier.weight(1f))
-                Icon(Icons.Outlined.ChevronRight, contentDescription = null, tint = c.label3, modifier = Modifier.size(20.dp))
-            }
+            OTRow(
+                title = row.second,
+                icon = row.third.first,
+                iconTint = row.third.second,
+                onClick = { onOpenAdmin(row.first) },
+                trailing = {
+                    Icon(Icons.Outlined.ChevronRight, contentDescription = null, tint = c.label3, modifier = Modifier.size(20.dp))
+                },
+            )
         }
     }
 }
