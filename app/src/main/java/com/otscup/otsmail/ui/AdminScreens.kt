@@ -47,6 +47,7 @@ import androidx.compose.material.icons.outlined.PersonOff
 import androidx.compose.material.icons.outlined.VpnKey
 import androidx.compose.material.icons.outlined.VerifiedUser
 import androidx.compose.material.icons.outlined.Shield
+import androidx.compose.material.icons.outlined.Mail
 
 /** 管理区的通用内联导航栏（‹ + 标题 + 可选动作）。 */
 @Composable
@@ -93,30 +94,27 @@ fun AllMailScreen(onBack: () -> Unit, onOpen: (Long) -> Unit, onToast: (String) 
                 )
             }
             items(items, key = { it.emailId }) { m ->
-                Row(
-                    Modifier.fillMaxWidth()
-                        .pressable(pressedColor = c.bgInput) { onOpen(m.emailId) }
-                        .padding(horizontal = d.sp4.dp, vertical = d.sp3.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Column(Modifier.weight(1f)) {
-                        Text(m.from, style = t.footnote, color = c.label2)
-                        Text(m.subject.ifEmpty { "(无主题)" }, style = t.body, color = c.label, maxLines = 1)
-                    }
-                    Text(m.time.takeLast(5), style = t.caption1, color = c.label3)
-                    Spacer(Modifier.size(d.sp2.dp))
-                    Text(
-                        "删", style = t.footnote, color = c.red,
-                        modifier = Modifier.pressable(scale = 0.94f, pressedColor = c.bgInput) {
-                            scope.launch {
-                                runCatching { Api.trash(listOf(m.emailId)) }
-                                    .onSuccess { items.remove(m); total -= 1; onToast("已移入已删除") }
-                                    .onFailure { onToast(it.message ?: "删除失败") }
-                            }
-                        }.padding(d.sp2.dp),
+                OTGroup(Modifier.padding(horizontal = d.sp4.dp, vertical = 4.dp)) {
+                    OTRow(
+                        title = m.subject.ifEmpty { "(无主题)" },
+                        subtitle = "${m.from} · ${m.time.takeLast(5)}",
+                        icon = Icons.Outlined.Mail,
+                        iconTint = c.blue,
+                        onClick = { onOpen(m.emailId) },
+                        trailing = {
+                            Text(
+                                "删", style = t.footnote, color = c.red,
+                                modifier = Modifier.pressable(scale = 0.94f, pressedColor = c.bgInput) {
+                                    scope.launch {
+                                        runCatching { Api.trash(listOf(m.emailId)) }
+                                            .onSuccess { items.remove(m); total -= 1; onToast("已移入已删除") }
+                                            .onFailure { onToast(it.message ?: "删除失败") }
+                                    }
+                                }.padding(d.sp2.dp),
+                            )
+                        },
                     )
                 }
-                HorizontalDivider(color = c.separator, modifier = Modifier.padding(start = d.sp4.dp))
             }
         }
     }
