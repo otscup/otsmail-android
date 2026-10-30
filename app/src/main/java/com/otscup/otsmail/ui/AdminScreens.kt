@@ -48,6 +48,7 @@ import androidx.compose.material.icons.outlined.VpnKey
 import androidx.compose.material.icons.outlined.VerifiedUser
 import androidx.compose.material.icons.outlined.Shield
 import androidx.compose.material.icons.outlined.Mail
+import androidx.compose.ui.text.style.TextAlign
 
 /** 管理区的通用内联导航栏（‹ + 标题 + 可选动作）。 */
 @Composable
@@ -75,12 +76,27 @@ fun AllMailScreen(onBack: () -> Unit, onOpen: (Long) -> Unit, onToast: (String) 
     val items = remember { mutableStateListOf<MailItem>() }
     var total by remember { mutableStateOf(0L) }
     var error by remember { mutableStateOf("") }
+    var page by remember { mutableStateOf(1) }
+    var busy by remember { mutableStateOf(false) }
 
-    LaunchedEffect(Unit) {
-        runCatching { Api.allEmails(1) }
-            .onSuccess { (list, n) -> items.clear(); items.addAll(list); total = n }
-            .onFailure { error = it.message ?: "读取失败"; onToast(error) }
+    fun load(next: Int) {
+        if (busy) return
+        busy = true
+        scope.launch {
+            runCatching { Api.allEmails(next) }
+                .onSuccess { (list, n) ->
+                    if (next == 1) items.clear()
+                    items.addAll(list.filter { row -> items.none { it.emailId == row.emailId } })
+                    total = n
+                    page = next
+                    error = ""
+                }
+                .onFailure { error = it.message ?: "读取失败"; onToast(error) }
+            busy = false
+        }
     }
+
+    LaunchedEffect(Unit) { load(1) }
 
     Column(Modifier.fillMaxSize().background(c.bgGrouped).statusBarsPadding().navigationBarsPadding()) {
         AdminBar("全部邮件", onBack = onBack)
@@ -115,6 +131,18 @@ fun AllMailScreen(onBack: () -> Unit, onOpen: (Long) -> Unit, onToast: (String) 
                         },
                     )
                 }
+            }
+            item {
+                Text(
+                    if (items.size < total) "加载更多（还有 ${total - items.size} 封）" else "已经到底了 · 共 $total 封",
+                    style = t.footnote,
+                    color = if (busy) c.label3 else c.blue,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .pressable(pressedColor = c.bgInput) { if (items.size < total) load(page + 1) }
+                        .padding(vertical = d.sp4.dp),
+                )
             }
         }
     }
