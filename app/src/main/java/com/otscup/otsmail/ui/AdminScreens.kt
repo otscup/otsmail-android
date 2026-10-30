@@ -44,6 +44,7 @@ import androidx.compose.material.icons.outlined.Check
 import androidx.compose.material3.Icon
 import androidx.compose.material.icons.outlined.Person
 import androidx.compose.material.icons.outlined.PersonOff
+import androidx.compose.material.icons.outlined.VpnKey
 
 /** 管理区的通用内联导航栏（‹ + 标题 + 可选动作）。 */
 @Composable
@@ -306,29 +307,27 @@ fun RegKeysScreen(onBack: () -> Unit, onToast: (String) -> Unit) {
             items(keys, key = { it.optLong("regKeyId").toString() }) { k ->
                 val used = k.optInt("usedCount")
                 val count = k.optInt("count")
-                Row(
-                    Modifier.fillMaxWidth().padding(horizontal = d.sp4.dp, vertical = d.sp3.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Column(Modifier.weight(1f)) {
-                        Text(k.optString("code"), style = t.body, color = c.label)
-                        Text(
-                            "$used / $count 次 · 到期 ${k.optString("expireTime").take(10)}",
-                            style = t.caption1, color = c.label2,
-                        )
-                    }
-                    Text(
-                        "删除", style = t.footnote, color = c.red,
-                        modifier = Modifier.pressable(scale = 0.94f, pressedColor = c.bgInput) {
-                            scope.launch {
-                                runCatching { Api.deleteRegKeys(listOf(k.optLong("regKeyId"))) }
-                                    .onSuccess { onToast("已删除"); load() }
-                                    .onFailure { onToast(it.message ?: "删除失败") }
-                            }
-                        }.padding(d.sp2.dp),
+                val expired = k.optInt("usedCount") >= k.optInt("count")
+                OTGroup(Modifier.padding(horizontal = d.sp4.dp, vertical = 4.dp)) {
+                    OTRow(
+                        title = k.optString("code"),
+                        subtitle = "$used / $count 次 · 到期 ${k.optString("expireTime").take(10)}",
+                        icon = Icons.Outlined.VpnKey,
+                        iconTint = if (expired) c.gray else c.orange,
+                        trailing = {
+                            Text(
+                                "删除", style = t.footnote, color = c.red,
+                                modifier = Modifier.pressable(scale = 0.94f, pressedColor = c.bgInput) {
+                                    scope.launch {
+                                        runCatching { Api.deleteRegKeys(listOf(k.optLong("regKeyId"))) }
+                                            .onSuccess { onToast("已删除"); load() }
+                                            .onFailure { onToast(it.message ?: "删除失败") }
+                                    }
+                                }.padding(d.sp2.dp),
+                            )
+                        },
                     )
                 }
-                HorizontalDivider(color = c.separator, modifier = Modifier.padding(start = d.sp4.dp))
             }
         }
     }
