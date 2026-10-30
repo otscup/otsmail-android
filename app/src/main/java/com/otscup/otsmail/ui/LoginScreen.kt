@@ -91,11 +91,11 @@ fun LoginScreen(
         ) {
             Text("O", style = t.title1, color = Color.White, fontWeight = FontWeight.Bold)
         }
-        Spacer(Modifier.height(16.dp))
+        Spacer(Modifier.height(OTSpace.s4))
         Text("OTSMail", style = t.title1, color = c.label)
         Spacer(Modifier.height(4.dp))
         Text("登录到你的邮箱", style = t.subhead, color = c.label2)
-        Spacer(Modifier.height(24.dp))
+        Spacer(Modifier.height(OTSpace.s6))
 
         OTGroup {
             OTFieldRow("服务器", base, { base = it }, hint = "https://example.com/api")
@@ -106,12 +106,12 @@ fun LoginScreen(
         }
 
         if (error.isNotEmpty()) {
-            Spacer(Modifier.height(12.dp))
+            Spacer(Modifier.height(OTSpace.s3))
             Text(error, style = t.footnote, color = c.red, modifier = Modifier.fillMaxWidth())
         }
-        Spacer(Modifier.height(20.dp))
+        Spacer(Modifier.height(OTSpace.s5))
         OTPrimaryButton(if (busy) "登录中…" else "登录", enabled = !busy) { submit() }
-        Spacer(Modifier.height(12.dp))
+        Spacer(Modifier.height(OTSpace.s3))
         Text(
             "服务器地址就是网页版在用的那台 Worker 的 /api 地址；换成你自己的域名即可。",
             style = t.caption1,

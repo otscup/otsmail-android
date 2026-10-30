@@ -51,7 +51,7 @@ fun DraftsScreen(onBack: () -> Unit, onOpen: (JSONObject) -> Unit) {
             }
         } else {
             Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState())) {
-                OTGroup(Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
+                OTGroup(Modifier.padding(horizontal = OTSpace.s4, vertical = OTSpace.cardGap)) {
                     list.forEachIndexed { i, dr ->
                         if (i > 0) OTDivider(inset = 16)
                         Row(

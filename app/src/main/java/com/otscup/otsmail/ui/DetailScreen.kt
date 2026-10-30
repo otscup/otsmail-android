@@ -108,7 +108,7 @@ fun DetailScreen(emailId: Long, onBack: () -> Unit, onReply: (MailDetail) -> Uni
                     style = t.title2,
                     color = c.label,
                 )
-                Spacer(Modifier.height(8.dp))
+                Spacer(Modifier.height(OTSpace.s2))
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     OTAvatar(m.name.ifEmpty { m.from }, size = 34)
                     Spacer(Modifier.size(10.dp))
@@ -161,7 +161,7 @@ blockquote{margin:8px 0;padding-left:10px;border-left:3px solid $quote;color:$sy
                     },
                 )
             }
-            OTGroup(Modifier.padding(horizontal = 16.dp)) {
+            OTGroup(Modifier.padding(horizontal = OTSpace.s4)) {
                 Row(
                     Modifier.fillMaxWidth().height(48.dp).tapArea {
                         if (busy) return@tapArea
@@ -183,8 +183,8 @@ blockquote{margin:8px 0;padding-left:10px;border-left:3px solid $quote;color:$sy
                 }
             }
             if (m.attachments.isNotEmpty()) {
-                Spacer(Modifier.height(12.dp))
-                OTGroup(Modifier.padding(horizontal = 16.dp)) {
+                Spacer(Modifier.height(OTSpace.s3))
+                OTGroup(Modifier.padding(horizontal = OTSpace.s4)) {
                     m.attachments.forEachIndexed { i, att ->
                         if (i > 0) OTDivider(inset = 16)
                         Row(
@@ -198,7 +198,7 @@ blockquote{margin:8px 0;padding-left:10px;border-left:3px solid $quote;color:$sy
                     }
                 }
             }
-            Spacer(Modifier.height(16.dp))
+            Spacer(Modifier.height(OTSpace.s4))
         }
 
         OTActionBar(

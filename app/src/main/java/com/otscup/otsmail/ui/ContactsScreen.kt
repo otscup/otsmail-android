@@ -98,7 +98,7 @@ fun ContactsScreen(session: Session, onBack: () -> Unit, onWrite: (String) -> Un
                         groups.forEach { (letter, rows) ->
                             item(key = "h-$letter") { OTGroupHeader(letter) }
                             item(key = "g-$letter") {
-                                OTGroup(Modifier.padding(horizontal = 16.dp)) {
+                                OTGroup(Modifier.padding(horizontal = OTSpace.s4)) {
                                     rows.forEachIndexed { i, ct ->
                                         if (i > 0) OTDivider(inset = 60)
                                         Row(
@@ -126,7 +126,7 @@ fun ContactsScreen(session: Session, onBack: () -> Unit, onWrite: (String) -> Un
                                 }
                             }
                         }
-                        item { Spacer(Modifier.height(24.dp)) }
+                        item { Spacer(Modifier.height(OTSpace.s6)) }
                     }
 
                     // 右侧字母索引（样张 .azindex）：点一下滚到该首字母的第一组

@@ -136,7 +136,7 @@ fun ComposeScreen(
                 )
             }
         }
-        OTGroup(Modifier.padding(horizontal = 16.dp)) {
+        OTGroup(Modifier.padding(horizontal = OTSpace.s4)) {
             Row(
                 Modifier.fillMaxWidth().height(48.dp).tapArea {
                     picker.launch(arrayOf("image/*", "application/pdf", "text/plain", "*/*"))
@@ -150,6 +150,6 @@ fun ComposeScreen(
                 Text("最多 10 个，单个 ≤5MB", style = t.caption1, color = c.label3)
             }
         }
-        Spacer(Modifier.height(12.dp))
+        Spacer(Modifier.height(OTSpace.s3))
     }
 }

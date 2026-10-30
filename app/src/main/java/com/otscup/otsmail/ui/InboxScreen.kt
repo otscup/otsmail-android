@@ -159,8 +159,8 @@ fun InboxScreen(
         drawerContent = {
             ModalDrawerSheet(drawerContainerColor = c.bgGrouped) {
                 Column(Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding()) {
-                    Spacer(Modifier.height(20.dp))
-                    Row(Modifier.padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Spacer(Modifier.height(OTSpace.s5))
+                    Row(Modifier.padding(horizontal = OTSpace.s4), verticalAlignment = Alignment.CenterVertically) {
                         Box(
                             Modifier.size(56.dp).clip(CircleShape).background(c.blue),
                             contentAlignment = Alignment.Center,
@@ -171,7 +171,7 @@ fun InboxScreen(
                             Text(session.email, style = t.footnote, color = c.label2)
                         }
                     }
-                    Spacer(Modifier.height(16.dp))
+                    Spacer(Modifier.height(OTSpace.s4))
                     OTGroupHeader("邮箱")
                     OTGroup {
                         mailboxes.forEachIndexed { i, box ->
@@ -193,7 +193,7 @@ Text(box.label, style = t.body, color = if (box == current) c.blue else c.label)
                             }
                         }
                     }
-                    Spacer(Modifier.height(16.dp))
+                    Spacer(Modifier.height(OTSpace.s4))
                     OTGroupHeader("其他")
                     OTGroup {
                         val labels = listOf("联系人", "AI 助手", "设置", "系统设置")
@@ -215,7 +215,7 @@ Text(box.label, style = t.body, color = if (box == current) c.blue else c.label)
 Text(label, style = t.body, color = c.label) }
                         }
                     }
-                    Spacer(Modifier.height(16.dp))
+                    Spacer(Modifier.height(OTSpace.s4))
                     OTGroup {
                         Row(
                             Modifier
@@ -272,7 +272,7 @@ Text(label, style = t.body, color = c.label) }
                         horizontalAlignment = Alignment.CenterHorizontally,
                     ) {
                         Icon(Icons.Outlined.Inbox, contentDescription = null, tint = c.label3, modifier = Modifier.size(48.dp))
-                        Spacer(Modifier.height(12.dp))
+                        Spacer(Modifier.height(OTSpace.s3))
                         Text("还没有邮件", style = t.body.copy(fontWeight = FontWeight.SemiBold), color = c.label)
                         Spacer(Modifier.height(4.dp))
                         Text("换个邮箱，或稍后再试", style = t.subhead, color = c.label2)
@@ -323,7 +323,7 @@ Text(label, style = t.body, color = c.label) }
                             ) {
                                 Text("共 $total 封 · 第 $page 页", style = t.footnote, color = c.label2)
                                 if (items.size < total) {
-                                    Spacer(Modifier.height(8.dp))
+                                    Spacer(Modifier.height(OTSpace.s2))
                                     Text(
                                         if (loading) "正在加载…" else "加载更多（还有 ${total - items.size} 封）",
                                         style = t.subhead,

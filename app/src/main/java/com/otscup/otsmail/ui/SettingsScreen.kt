@@ -108,7 +108,7 @@ fun SettingsScreen(
 
         Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState())) {
             // 账号抬头：头像 + 名称 + 邮箱
-            OTGroup(Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
+            OTGroup(Modifier.padding(horizontal = OTSpace.s4, vertical = OTSpace.cardGap)) {
                 Row(
                     Modifier.fillMaxWidth().padding(16.dp),
                     verticalAlignment = Alignment.CenterVertically,
@@ -131,7 +131,7 @@ fun SettingsScreen(
             }
 
             OTGroupHeader("签名")
-            OTGroup(Modifier.padding(horizontal = 16.dp)) {
+            OTGroup(Modifier.padding(horizontal = OTSpace.s4)) {
                 BasicTextField(
                     value = signature,
                     onValueChange = { if (it.length <= 2000) signature = it },
@@ -148,7 +148,7 @@ fun SettingsScreen(
             }
 
             OTGroupHeader("回车键发送")
-            OTGroup(Modifier.padding(horizontal = 16.dp)) {
+            OTGroup(Modifier.padding(horizontal = OTSpace.s4)) {
                 SEND_MODES.forEachIndexed { i, mode ->
                     if (i > 0) OTDivider(inset = 16)
                     Row(
@@ -168,7 +168,7 @@ fun SettingsScreen(
             )
 
             OTGroupHeader("管理")
-            OTGroup(Modifier.padding(horizontal = 16.dp)) {
+            OTGroup(Modifier.padding(horizontal = OTSpace.s4)) {
                 Row(
                     Modifier.fillMaxWidth().heightIn(min = 48.dp).tapArea { onOpenSysSettings() }
                         .padding(horizontal = 16.dp, vertical = 10.dp),
@@ -193,7 +193,7 @@ fun SettingsScreen(
                 modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp),
             )
 
-            OTGroup(Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
+            OTGroup(Modifier.padding(horizontal = OTSpace.s4, vertical = OTSpace.cardGap)) {
                 Row(
                     Modifier.fillMaxWidth().heightIn(min = 48.dp).tapArea {
                         session.clear()
