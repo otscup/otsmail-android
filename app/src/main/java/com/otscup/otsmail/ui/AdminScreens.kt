@@ -42,6 +42,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.ChevronRight
 import androidx.compose.material.icons.outlined.Check
 import androidx.compose.material3.Icon
+import androidx.compose.material.icons.outlined.Person
+import androidx.compose.material.icons.outlined.PersonOff
 
 /** 管理区的通用内联导航栏（‹ + 标题 + 可选动作）。 */
 @Composable
@@ -144,36 +146,30 @@ fun UsersScreen(onBack: () -> Unit, onToast: (String) -> Unit) {
         LazyColumn(Modifier.fillMaxWidth()) {
             items(users, key = { it.optLong("userId").toString() }) { u ->
                 val banned = u.optInt("status") == 1
-                Row(
-                    Modifier.fillMaxWidth()
-                        .padding(horizontal = d.sp4.dp, vertical = d.sp3.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Column(Modifier.weight(1f)) {
-                        Text(u.optString("email"), style = t.body, color = c.label, maxLines = 1)
-                        Text(
-                            "收 ${u.optInt("receiveEmailCount")} · 发 ${u.optInt("sendEmailCount")} · ${u.optInt("accountCount")} 个邮箱",
-                            style = t.caption1, color = c.label2,
-                        )
-                    }
-                    if (banned) Text("已封禁", style = t.caption1, color = c.red)
-                    Spacer(Modifier.size(d.sp2.dp))
-                    Text(
-                        text = if (banned) "解封" else "封禁",
-                        style = t.footnote, color = c.blue,
-                        modifier = Modifier.pressable(scale = 0.94f, pressedColor = c.bgInput) {
-                            if (busy) return@pressable
-                            busy = true
-                            scope.launch {
-                                runCatching { Api.setUserStatus(u.optLong("userId"), if (banned) 0 else 1) }
-                                    .onSuccess { onToast(if (banned) "已解封" else "已封禁"); load() }
-                                    .onFailure { onToast(it.message ?: "操作失败") }
-                                busy = false
-                            }
-                        }.padding(d.sp2.dp),
+                OTGroup(Modifier.padding(horizontal = d.sp4.dp, vertical = 4.dp)) {
+                    OTRow(
+                        title = u.optString("email"),
+                        subtitle = "收 ${u.optInt("receiveEmailCount")} · 发 ${u.optInt("sendEmailCount")} · ${u.optInt("accountCount")} 个邮箱",
+                        icon = if (banned) Icons.Outlined.PersonOff else Icons.Outlined.Person,
+                        iconTint = if (banned) c.red else c.blue,
+                        trailing = {
+                            Text(
+                                text = if (banned) "解封" else "封禁",
+                                style = t.footnote, color = c.blue,
+                                modifier = Modifier.pressable(scale = 0.94f, pressedColor = c.bgInput) {
+                                    if (busy) return@pressable
+                                    busy = true
+                                    scope.launch {
+                                        runCatching { Api.setUserStatus(u.optLong("userId"), if (banned) 0 else 1) }
+                                            .onSuccess { onToast(if (banned) "已解封" else "已封禁"); load() }
+                                            .onFailure { onToast(it.message ?: "操作失败") }
+                                        busy = false
+                                    }
+                                }.padding(d.sp2.dp),
+                            )
+                        },
                     )
                 }
-                HorizontalDivider(color = c.separator, modifier = Modifier.padding(start = d.sp4.dp))
             }
         }
     }
