@@ -43,6 +43,15 @@ $adb='E:\tools\android-sdk\platform-tools\adb.exe'
 5. 全部邮件翻页的尾页（`total` 与实际可取数可能不一致，可能多点一次「加载更多」）；
 6. 联系人 A–Z 索引的跳转位置。
 
+## 2026-10-31 真机回归结果
+
+- 15 屏全部出图，落在 `F:\Desktop\MFiles\otsmail-android-shots\acc\`；脚本 `tools/cap15.cjs` 每屏冷启动后再进，避免页面栈错乱。
+- 本轮修掉的三处：
+  1. 抽屉「其他」组（联系人/AI/设置/系统设置）在 1080×2280 上被裁到屏外、完全点不到 —— 抽屉根 `Column` 补 `.verticalScroll(...)`（`7e79820`）；
+  2. 启动时 `Session.apply()` 排在 `LaunchedEffect` 里，晚于首屏请求，导致首批接口带着空 token 出去（分析页收件/发件/已删除恒为 0）—— 改成 `remember { Session(context).also { it.apply() } }`（`170fb33`）；
+  3. 收件箱时间列用 `takeLast(5)` 取自 `yyyy-MM-dd HH:mm:ss`，拿到的是 `mm:ss`（真机显示 `32:38`）—— 改用 `clockOf()` 取 `HH:mm`。
+- 仍未验：长正文/宽表格邮件是否还右裁、暗色正文配色、全部邮件尾页、联系人索引跳转。
+
 ## 验收完要拍板的三件事
 
 - 视觉差异是否需要再修一轮（我会按截图逐条列）；

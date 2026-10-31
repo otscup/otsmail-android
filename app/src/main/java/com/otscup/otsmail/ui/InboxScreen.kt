@@ -82,7 +82,7 @@ internal fun fmtFull(raw: String): String = runCatching {
     String.format("%04d-%02d-%02d %02d:%02d", ldt.year, ldt.monthValue, ldt.dayOfMonth, ldt.hour, ldt.minute)
 }.getOrDefault(raw)
 
-private fun clock(raw: String): String = fmtFull(raw).takeLast(5)
+private fun clock(raw: String): String = clockOf(raw)
 
 /** 当天→今天，昨天→昨天，其余→MM月DD日（v5 定稿的日期分组写法） */
 private fun dayOf(raw: String): String {
