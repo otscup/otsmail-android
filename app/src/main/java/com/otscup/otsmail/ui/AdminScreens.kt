@@ -48,6 +48,7 @@ import androidx.compose.material.icons.outlined.VpnKey
 import androidx.compose.material.icons.outlined.VerifiedUser
 import androidx.compose.material.icons.outlined.Shield
 import androidx.compose.material.icons.outlined.Mail
+import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.ui.text.style.TextAlign
 
 /** 管理区的通用内联导航栏（‹ + 标题 + 可选动作）。 */
@@ -118,15 +119,15 @@ fun AllMailScreen(onBack: () -> Unit, onOpen: (Long) -> Unit, onToast: (String) 
                         iconTint = c.blue,
                         onClick = { onOpen(m.emailId) },
                         trailing = {
-                            Text(
-                                "删", style = t.footnote, color = c.red,
+                            Icon(
+                                Icons.Outlined.Delete, "删除", tint = c.red,
                                 modifier = Modifier.pressable(scale = 0.94f, pressedColor = c.bgInput) {
                                     scope.launch {
                                         runCatching { Api.trash(listOf(m.emailId)) }
                                             .onSuccess { items.remove(m); total -= 1; onToast("已移入已删除") }
                                             .onFailure { onToast(it.message ?: "删除失败") }
                                     }
-                                }.padding(d.sp2.dp),
+                                }.padding(d.sp2.dp).size(20.dp),
                             )
                         },
                     )
