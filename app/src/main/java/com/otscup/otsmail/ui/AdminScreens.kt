@@ -395,7 +395,7 @@ fun AnalysisScreen(onBack: () -> Unit) {
                 Stat("垃圾", counts?.optInt("spam") ?: 0, Modifier.weight(1f))
             }
             Text(
-                "数字来自 /email/menu-counts、/user/list、/email/list 的 total；网页版分析页的图表（增长趋势/今日发送）依赖 /analysis 缓存表，本轮没接。",
+                "统计口径：收件/已删除/垃圾取邮件计数，用户取账号数，全部邮件取列表 total。增长趋势与今日发送来自服务端分析缓存，暂未接入。",
                 style = t.footnote, color = c.label2,
                 modifier = Modifier.padding(horizontal = d.sp5.dp, vertical = d.sp3.dp),
             )

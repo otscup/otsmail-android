@@ -38,12 +38,10 @@ private sealed interface Route {
 @Composable
 fun OtsApp() {
     val context = LocalContext.current
-    val session = remember { Session(context) }
+    val session = remember { Session(context).also { it.apply() } }
     var route by remember { mutableStateOf<Route>(if (session.token.isEmpty()) Route.Login else Route.Inbox) }
     val snackbar = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
-
-    LaunchedEffect(Unit) { session.apply() }
 
     OTTheme {
         androidx.compose.foundation.layout.Box(Modifier.fillMaxSize().background(OT.colors.bgGrouped)) {
