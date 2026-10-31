@@ -52,4 +52,11 @@
 3. **草稿跨端同步：选「本地持久化」，不建后端草稿表**。理由：① `mail-worker` 目前全无 draft 概念（`grep draft src/` 空），要做得新增表 + 两个接口 + 冲突合并策略（同草稿多端编辑谁赢），这是 v1 之外的一整块；② 现有 `data/Drafts.kt`（SharedPreferences `otsmail_draft`，`list/save/remove` 以 `at` 毫秒作主键）已经满足「退出重进不丢」。真机实证：写信页填 `ops@example.com / draft-check-2230 / local` 后返回，Toast「已处理」，`run-as cat shared_prefs/otsmail_draft.xml` 拿到 `{"to":"ops@example.com","subject":"draft-check-2230","text":"local","at":1793457045823}`。跨端同步留到 v1.1，届时加 `draft` 表 + `GET/PUT /my/draft`，用 `updatedAt` 后写覆盖。
 4. 质量闸门：`node tools/local-audit.cjs` → files 27，encoding 0 / hardColor 0 / glyph 0；`assembleDebug` 通过。
 
+## 2026-10-31 第三轮：虚线分隔落地 + VIP 取舍结论
+
+1. **虚分隔已落地**（提交 `47e008c`）：新增 `OTDash()`（`OTComponents.kt`，`Canvas` + `PathEffect.dashPathEffect(3f,3f)`，1.5dp 高、左右 18dp、颜色 `separator`），插在抽屉「帐户」组之后与「分类」组之后，对齐样张 `.drawer__dash`（`otsmail-ios-v2/ui.css:712`）。真机截图 `acc/03f-drawer-dash.png`：帐户组（admin 带橙色 18 胶囊 + ops 绿圈）→ 虚线 → 邮箱组（收件箱 18 / 未读邮件选中 / 已标星 / 已删除 2 / 垃圾邮件）→ 分类组 → 虚线。
+2. **VIP 行取舍：v1 不做**。样张的 `drawer__vip`（`01-inbox.html:564`，固定 21px 宽蓝色 `VIP` 标签，对应「重要联系人」）只是视觉占位：`mail-worker` 全库没有 VIP/重要联系人的表或字段，联系人页也只有「加入 VIP」按钮（`06-contacts.html:168`）。做它得先加表与接口，属 v1 外。**落地时机**：等后端有 `vip` 标记后，在 `OTRow`/抽屉行复用同一 21dp 尾部槽位即可，不需要新组件。
+3. **已知数据缺口**：`/star/list` 不返回 `category`，所以「已标星」列表不显示分类 chip（收件箱显示）。要么后端补字段，要么客户端在星标视图隐藏 chip——v1 保持现状，记录在案。
+4. 质量闸门：`node tools/local-audit.cjs` → files 27，encoding / hardColor / glyph 全 0；`assembleDebug` 通过。
+
 `otsmail/mail-worker` 已有未提交改动：7 个 bug 修复（星标列表 500、站内图不入附件行、`/attachments` 只读 KV、read/unread 入参、jwt 未登录堆栈、附件 mimeType、CORS 本地白名单）与两个新接口（`POST /my/uploadImage`、`PUT /my/setting`）。上线前：`npm run check` → 本地 8789 + `npm run smoke:mobile`（21 项）→ 确认 `git status` 里他人未提交改动 → deploy → 验星标页与图片。清单另见 `docs/BACKEND-DEPLOY.md`。
