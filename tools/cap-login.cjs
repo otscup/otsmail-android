@@ -59,9 +59,8 @@ sh('shell input keyevent 61');
 sleep(600);
 sh('shell input text "123456"');
 sleep(600);
-sh('shell input keyevent 111');
-sleep(800);
 tapText('登录', 1);
-sleep(4500);
+sleep(4000);
+if (onLogin()) { tapText('登录', 1); sleep(4500); }
 shot('01b-after-login');
 console.log(texts().slice(0, 6).map((n) => n.text).join(' | '));
