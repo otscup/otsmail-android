@@ -89,4 +89,15 @@
 7. **踩坑复述**：用 PowerShell `Get-Content`/`WriteAllLines` 改含中文的 `.kt` 会双重编码（本次把 `SysSettingsScreen.kt` 写成乱码，`git checkout --` 复原后改用 edit 工具）；`adb shell input text` 遇空格只输入第一个词（签名被打成 `Sent`），多词要用 `%s`。
 8. 质量闸门：`node tools/local-audit.cjs` → files 27，encoding / hardColor / glyph 全 0；`assembleDebug` 通过。
 
+## 2026-11-01 第七轮：联系人接真通讯录、写邮件补发件人/抄送密送
+
+1. **联系人原来不用后端通讯录**（提交 `0aa2d6b`）：`ui/ContactsScreen.kt` 注释写着「后端暂时没有通讯录接口」，实际 `mail-worker/src/api/contact-api.js` 有 `GET /contact/list` 与 `POST /contact/add|set|delete`，表 `src/entity/contact.js` 字段 `contactId/userId/name/email/groupName/remark/createTime/isDel`。改为新增 `data/Api.kt` 的 `contacts()` 读 `/contact/list?page=1&size=200`，通讯录为空才退回「从收件箱抽发件人」。
+2. **行内信息补齐**：副标题按样张 `email · 分组`（`groupName` 空则只显示邮箱），行尾补 `Icons.Outlined.ChevronRight` 18dp/label3；非拉丁首字母归入 `#`（原实现直接取首字符，索引条上会出现「张」「李」）。
+3. **`/contact/set` 只认全量字段**：`contact-service.js` 的 `set` 走 `normalize(params)` + `checkEmail`，只传 `contactId+groupName` 会被判非法邮箱；`tools/seed-contacts.cjs` 改成连同 `name/email/remark` 一起提交，12 条联系人按 客户/工作/家人/默认 轮换分组。
+4. **写邮件补样张的结构**（提交 `af38f4f`）：新增「发件人」行（`Api.accounts()` 取多账户，点开就地下拉选择，选中项标蓝「当前」）、「抄送 / 密送」两个蓝字按钮（右对齐，展开后各占一行）、`Api.send` 增加 `cc`/`bcc` 参数并如实传给 `/email/send`。
+5. **真机验证 cc 链路**：`tools/compose-cc-steps.cjs` 走完整 UI 流程（发件人 admin@example.com、收件人 admin@example.com、抄送 ops@example.com、主题 `cc-ui-3105`）→ 发件箱出现 `209 | cc-ui-3105 | to admin@example.com | cc [{"address":"ops@example.com","name":"ops"}]`（`tools/find-cc.cjs` 查）。后端 `email-service.js:send` 本来就吃 `cc/bcc` 并按 `domainList` 判站内站外。
+6. **两个测试陷阱（写进工具脚本注释）**：① `adb shell input keyevent 111`（ESC）会直接关掉 Activity 掉回桌面，`keyevent 4` 会退页，收键盘不能靠它们；② 手机屏幕左缘有一个不属于本 App 的悬浮球（工行 `com.icbc`），`x < ~200` 的点击会被它吃掉并跳到工行，所以脚本一律点行中间（`x=540`），`am force-stop com.icbc` 只能短暂压制。
+7. 缺样张的「格式工具栏」仍未做（要做富文本编辑，属新功能）；管理员昵称卡头像仍未按样张收到 76dp。
+8. 质量闸门：`node tools/local-audit.cjs` → encoding / hardColor / glyph 全 0；`assembleDebug` 通过。
+
 `otsmail/mail-worker` 已有未提交改动：7 个 bug 修复（星标列表 500、站内图不入附件行、`/attachments` 只读 KV、read/unread 入参、jwt 未登录堆栈、附件 mimeType、CORS 本地白名单）与两个新接口（`POST /my/uploadImage`、`PUT /my/setting`）。上线前：`npm run check` → 本地 8789 + `npm run smoke:mobile`（21 项）→ 确认 `git status` 里他人未提交改动 → deploy → 验星标页与图片。清单另见 `docs/BACKEND-DEPLOY.md`。
