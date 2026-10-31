@@ -36,4 +36,12 @@
 
 ## 后端待办（不属于本仓库，但影响交付）
 
+## 2026-10-31 本轮：抽屉空数据的根因已定位
+
+1. **抽屉「帐户」与各计数为空不是客户端时机问题**：设备 `shared_prefs/otsmail.xml` 里存着 `token=dev-token`（早期调试包遗留），服务端对所有需要鉴权的接口返回 `{"code":401,"message":"身份认证失效,请重新登录"}`（实测 `/account/list`、`/email/menu-counts`、`/email/category-counts`、`/email/list`、`/my/setting` 全是这个结果）。收件箱本身此刻也显示「身份认证失效,请重新登录」，不是只有抽屉空。
+2. 处理：`adb shell pm clear com.otscup.otsmail` 清偏好后回到登录页（服务器已预填 `http://127.0.0.1:8789/api`），需要重新登录一次才能拿到真 JWT。**本地 dev 管理员密码我不知道**，需用户输入或授权重置本地 D1 口令。
+3. 顺带修掉的真 bug（`mail-worker` 已提交 `f175c2e`）：`src/service/account-service.js:20` 解构 `minEmailPrefix/emailPrefixFilter` 无默认值 → setting 缓存缺字段时 `emailPrefixFilter.some()` 抛 TypeError，导致 `/account/add` 必 500；另外本地 D1 缺 `user_perm` 表（`src/init/init.js` 只在安装流程建表），老库升级后任何写权限操作都会 500，已手工补建。
+4. 抽屉数据拉取合并进 `load()` 成功分支（提交 `2fe8f36`），去掉重复的 `LaunchedEffect`。
+5. 待办：登录后复验抽屉帐户/计数、多帐户切换、`/account/add` 新帐户在客户端可见。
+
 `otsmail/mail-worker` 已有未提交改动：7 个 bug 修复（星标列表 500、站内图不入附件行、`/attachments` 只读 KV、read/unread 入参、jwt 未登录堆栈、附件 mimeType、CORS 本地白名单）与两个新接口（`POST /my/uploadImage`、`PUT /my/setting`）。上线前：`npm run check` → 本地 8789 + `npm run smoke:mobile`（21 项）→ 确认 `git status` 里他人未提交改动 → deploy → 验星标页与图片。清单另见 `docs/BACKEND-DEPLOY.md`。
