@@ -275,7 +275,6 @@ Text(box.label, style = t.body, color = if (box == current) c.blue else c.label,
                                     .background(if (on) c.bgPressed else Color.Transparent)
                                     .tapArea {
                                         category = if (on) "" else key
-                                        current = mailboxes[0]
                                         scope.launch { drawer.close() }
                                     }
                                     .padding(horizontal = 16.dp),
