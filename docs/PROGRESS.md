@@ -78,4 +78,15 @@
 5. 截图左侧的「ICB」圆球是手机里工行 App 的悬浮球，属系统悬浮窗，`am force-stop com.icbc` 只能短暂去掉（会自动复活），不影响验收；要干净截图需用户手动关掉该悬浮窗。
 6. 质量闸门：`node tools/local-audit.cjs` → files 27，encoding / hardColor / glyph 全 0；`assembleDebug` 通过。
 
+## 2026-11-01 第六轮：UI 面板对齐设计稿
+
+1. **收件箱**（提交 `4a31223`）：行高 `min=86` + 上下 11dp、行间补 `OTDivider(inset = 58)`（此前注释误记「设计稿无行间线」）、新增 `OTDayHeader`（13/18 ink2，14/16/8）替换 `OTGroupHeader`、时间色 `label2→label3`、头像 44→36、顶栏 padding 6/16/4、标题行 padding 6/16/10 且去掉 `OTLargeTitle` 的 20dp 顶距、「12 未读」下移 6dp、FAB `end=20 bottom=34`、搜索胶囊 `start 10 / end 4`、图标 15、gap 6。
+2. **抽屉改浮动卡片**（提交 `4a31223`）：`ModalDrawerSheet` 由满高贴边改为 `width 322dp` + 四边 8dp 内缩 + `RoundedCornerShape(28.dp)` + `bgCard` + `WindowInsets(0)`，`statusBarsPadding/navigationBarsPadding` 移到 sheet 的 modifier 上；抬头头像 56→46、顶部 padding 16/16/12；帐户行圆点由「28dp 带首字母实心圆」改回样张的 12dp 空心环（2dp 描边，`accColor` 六色轮转）。
+3. **系统设置**（提交 `9a2d95e`）：原来每个子项一张卡（9 张），改为「每个分区一张卡 + 行间 `OTDivider(inset = 16)` + 行高 44dp」，分区仍为 站点(3)/存储与推送(4)/AI(1)。
+4. **写邮件**（提交 `f104fb0`）：附件由「已选 N 个附件」文字改为逐行列表（回形针图标 + 文件名 + KB + 右侧 ✕ 移除，移除时同步 `attachments`）；正文区 `height(220)` → `heightIn(min = 160)`；签名从 `Session.signature` 读，展示在正文下方（subhead/label2），发送时追加到 `text` 与 `html`（此前签名设置项存了但发信根本没用）。
+5. **真机复核**：`acc/02-inbox.png`（收件箱新行距/发丝线/日期头）、`acc/03-drawer.png`（322/28/8 浮动抽屉 + 空心帐户点）、`acc/04-settings.png`、`acc/05-syssettings.png`（分区卡）、`acc/09-compose.png`（签名显示在正文下）逐张 `read_image` 看过。
+6. **未对齐项**：设置页「系统设置」仍是独立卡（与下方管理卡之间有 8dp 缝，样张是一张卡）；管理员昵称卡头像 76dp 未按样张收小；写邮件缺样张的格式工具栏（属新功能，未做）。
+7. **踩坑复述**：用 PowerShell `Get-Content`/`WriteAllLines` 改含中文的 `.kt` 会双重编码（本次把 `SysSettingsScreen.kt` 写成乱码，`git checkout --` 复原后改用 edit 工具）；`adb shell input text` 遇空格只输入第一个词（签名被打成 `Sent`），多词要用 `%s`。
+8. 质量闸门：`node tools/local-audit.cjs` → files 27，encoding / hardColor / glyph 全 0；`assembleDebug` 通过。
+
 `otsmail/mail-worker` 已有未提交改动：7 个 bug 修复（星标列表 500、站内图不入附件行、`/attachments` 只读 KV、read/unread 入参、jwt 未登录堆栈、附件 mimeType、CORS 本地白名单）与两个新接口（`POST /my/uploadImage`、`PUT /my/setting`）。上线前：`npm run check` → 本地 8789 + `npm run smoke:mobile`（21 项）→ 确认 `git status` 里他人未提交改动 → deploy → 验星标页与图片。清单另见 `docs/BACKEND-DEPLOY.md`。
