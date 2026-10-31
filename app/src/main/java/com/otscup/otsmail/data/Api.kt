@@ -318,6 +318,8 @@ object Api {
         text: String,
         html: String,
         attachments: List<JSONObject> = emptyList(),
+        cc: List<String> = emptyList(),
+        bcc: List<String> = emptyList(),
     ) {
         val body = JSONObject()
             .put("accountId", accountId)
@@ -327,6 +329,8 @@ object Api {
             .put("content", html)
             .put("sendType", 0)
             .put("attachments", JSONArray(attachments))
+            .put("cc", JSONArray(cc))
+            .put("bcc", JSONArray(bcc))
         obj("POST", "/email/send", body)
     }
 

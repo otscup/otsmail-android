@@ -1,6 +1,7 @@
 package com.otscup.otsmail.ui
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.AttachFile
+import androidx.compose.material.icons.outlined.ChevronRight
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material3.Icon
 
@@ -9,6 +10,7 @@ import android.util.Base64
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -22,12 +24,14 @@ import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -68,6 +72,22 @@ fun ComposeScreen(
     val signature = remember { Session(ctx).signature }
     val attachments = remember { mutableListOf<JSONObject>() }
 
+    var fromId by remember { mutableStateOf(accountId) }
+    var fromEmail by remember { mutableStateOf("") }
+    var accounts by remember { mutableStateOf(listOf<Pair<Long, String>>()) }
+    var pickingFrom by remember { mutableStateOf(false) }
+    var ccText by remember { mutableStateOf("") }
+    var bccText by remember { mutableStateOf("") }
+    var showCc by remember { mutableStateOf(false) }
+    var showBcc by remember { mutableStateOf(false) }
+
+    LaunchedEffect(Unit) {
+        runCatching { Api.accounts() }.getOrNull()?.let { list ->
+            accounts = list
+            fromEmail = list.firstOrNull { it.first == fromId }?.second ?: list.firstOrNull()?.second ?: ""
+        }
+    }
+
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
         uris.take(10).forEach { uri ->
             runCatching {
@@ -99,7 +119,13 @@ fun ComposeScreen(
         val html = body.split("\n\n").joinToString("") { "<p>${it.replace("\n", "<br>")}</p>" } +
             if (sig.isEmpty()) "" else "<p>${sig.replace("\n", "<br>")}</p>" + quoted
         scope.launch {
-            runCatching { Api.send(accountId, toText.split(",", ";", " ").filter { it.isNotBlank() }, subjectText, text, html, attachments) }
+            val parts = { s: String -> s.split(",", ";", " ").map { it.trim() }.filter { it.contains("@") } }
+            runCatching {
+                Api.send(
+                    fromId, parts(toText), subjectText, text, html, attachments,
+                    cc = parts(ccText), bcc = parts(bccText),
+                )
+            }
                 .onSuccess { onDone() }
                 .onFailure { error = it.message ?: "发送失败" }
             busy = false
@@ -129,7 +155,56 @@ fun ComposeScreen(
         }
         if (error.isNotEmpty()) Text(error, style = t.footnote, color = c.red, modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp))
         Column(Modifier.weight(1f).verticalScroll(rememberScrollState())) {
+            if (accounts.isNotEmpty()) {
+                Row(
+                    Modifier.fillMaxWidth().heightIn(min = 52.dp).tapArea { pickingFrom = !pickingFrom }
+                        .padding(horizontal = 16.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text("发件人", style = t.footnote, color = c.label2, modifier = Modifier.width(56.dp))
+                    Text(fromEmail, style = t.body, color = c.label, maxLines = 1, modifier = Modifier.weight(1f))
+                    Icon(
+                        Icons.Outlined.ChevronRight, contentDescription = null,
+                        tint = c.label3, modifier = Modifier.size(18.dp),
+                    )
+                }
+                if (pickingFrom) {
+                    accounts.forEach { (id, email) ->
+                        Row(
+                            Modifier.fillMaxWidth().heightIn(min = 44.dp).tapArea {
+                                fromId = id
+                                fromEmail = email
+                                pickingFrom = false
+                            }.padding(horizontal = 16.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text(
+                                email, style = t.body,
+                                color = if (id == fromId) c.blue else c.label,
+                                modifier = Modifier.weight(1f),
+                            )
+                            if (id == fromId) Text("当前", style = t.caption1, color = c.blue)
+                        }
+                    }
+                }
+                OTDivider(inset = 16)
+            }
             OTFieldRow("收件人", toText, { toText = it }, hint = "someone@example.com")
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp),
+                horizontalArrangement = Arrangement.End,
+            ) {
+                Text(
+                    "抄送", style = t.footnote, color = c.blue,
+                    modifier = Modifier.tapArea { showCc = !showCc }.padding(end = 20.dp),
+                )
+                Text(
+                    "密送", style = t.footnote, color = c.blue,
+                    modifier = Modifier.tapArea { showBcc = !showBcc },
+                )
+            }
+            if (showCc) OTFieldRow("抄送", ccText, { ccText = it }, hint = "多个用逗号分隔")
+            if (showBcc) OTFieldRow("密送", bccText, { bccText = it }, hint = "多个用逗号分隔")
             OTDivider(inset = 16)
             OTFieldRow("主题", subjectText, { subjectText = it }, hint = "主题")
             OTDivider(inset = 16)
