@@ -168,7 +168,7 @@ fun SettingsScreen(
             )
 
             OTGroupHeader("管理")
-            OTGroup(Modifier.padding(horizontal = OTSpace.s4)) {
+            AdminLinks(onOpenAdmin) {
                 OTRow(
                     title = "系统设置",
                     icon = Icons.Outlined.Settings,
@@ -179,8 +179,6 @@ fun SettingsScreen(
                     },
                 )
             }
-            Spacer(Modifier.size(8.dp))
-            AdminLinks(onOpenAdmin)
             Text(
                 "只有带 setting:set 权限的账号（默认管理员）能改服务端的 AI 与翻译配置。",
                 style = t.footnote, color = c.label2,

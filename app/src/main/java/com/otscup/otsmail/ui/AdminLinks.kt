@@ -25,7 +25,7 @@ import com.otscup.otsmail.ui.theme.OT
 
 /** 设置页里的「管理」入口（管理员才用得到；权限不够时接口会返回真话，不在这里假装禁用）。 */
 @Composable
-internal fun AdminLinks(onOpenAdmin: (String) -> Unit) {
+internal fun AdminLinks(onOpenAdmin: (String) -> Unit, leading: (@Composable () -> Unit)? = null) {
     val c = OT.colors
     val d = OT.dimens
     // key to (图标, 同色底) —— 对应样张设置 App 的彩色图标块
@@ -43,6 +43,10 @@ internal fun AdminLinks(onOpenAdmin: (String) -> Unit) {
             .padding(horizontal = d.sp4.dp)
             .background(c.bgCard, RoundedCornerShape(14.dp)),
     ) {
+        if (leading != null) {
+            leading()
+            HorizontalDivider(color = c.separator, modifier = Modifier.padding(start = 58.dp))
+        }
         for ((i, row) in rows.withIndex()) {
             if (i > 0) HorizontalDivider(color = c.separator, modifier = Modifier.padding(start = 58.dp))
             OTRow(
