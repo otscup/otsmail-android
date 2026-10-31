@@ -104,7 +104,7 @@ fun AllMailScreen(onBack: () -> Unit, onOpen: (Long) -> Unit, onToast: (String) 
         LazyColumn(Modifier.fillMaxWidth()) {
             item {
                 Text(
-                    "共 $total 封 · 前 ${items.size} 封",
+                    "共 $total 封 · 已加载 ${items.size} 封",
                     style = t.footnote, color = c.label2,
                     modifier = Modifier.padding(horizontal = d.sp5.dp, vertical = d.sp2.dp),
                 )
@@ -113,7 +113,7 @@ fun AllMailScreen(onBack: () -> Unit, onOpen: (Long) -> Unit, onToast: (String) 
                 OTGroup(Modifier.padding(horizontal = d.sp4.dp, vertical = 4.dp)) {
                     OTRow(
                         title = m.subject.ifEmpty { "(无主题)" },
-                        subtitle = "${m.from} · ${m.time.takeLast(5)}",
+                        subtitle = "${m.from} · ${clockOf(m.time)}",
                         icon = Icons.Outlined.Mail,
                         iconTint = c.blue,
                         onClick = { onOpen(m.emailId) },
