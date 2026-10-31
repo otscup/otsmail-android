@@ -59,4 +59,14 @@
 3. **已知数据缺口**：`/star/list` 不返回 `category`，所以「已标星」列表不显示分类 chip（收件箱显示）。要么后端补字段，要么客户端在星标视图隐藏 chip——v1 保持现状，记录在案。
 4. 质量闸门：`node tools/local-audit.cjs` → files 27，encoding / hardColor / glyph 全 0；`assembleDebug` 通过。
 
+## 2026-11-01 第四轮：15 屏回归 + 四个真 bug
+
+1. **15 屏全部出图**（`F:\Desktop\MFiles\otsmail-android-shots\acc\`），脚本 `tools/cap15.cjs` 改成「每屏冷启动 → 开抽屉 → 按文本点」，不再依赖上一步的页面栈；`tools/cap-longmail*.cjs` 专拍长正文那封。
+2. **抽屉「其他」组不可达**（提交 `7e79820`）：抽屉根 `Column` 没有滚动，1080×2280 上「联系人/AI 助手/设置/系统设置」被裁在屏外。加 `.verticalScroll(rememberScrollState())` 后一屏滑到底可见，末尾还有「退出登录」。
+3. **启动时 token 没就位**（提交 `170fb33`）：`Session.apply()` 原在 `LaunchedEffect(Unit)` 里，晚于子屏首帧发出的请求，导致第一批接口带空 token 出门（分析页收件/发件/已删除恒为 0）。改成 `remember { Session(context).also { it.apply() } }` 同步执行。
+4. **收件箱时间列是 `mm:ss`**（提交 `d8660be`）：`clock()` 用 `fmtFull(raw).takeLast(5)`，从 `yyyy-MM-dd HH:mm:ss` 取到的是分秒（真机显示 `32:38`）。改用 `clockOf()` 取 `HH:mm`（`TimeFmt.kt`），真机恢复 `06:32`。
+5. **读信页正文被截断**（提交 `e7bd475`）：`contentHeight` 量出来的高度不可靠（宽表格/长正文只渲染到第 2~3 段，其余被 WebView 裁掉且再没有滚动）。结构性改法：页头 + 翻译行 + 附件行固定在顶部，正文 `Box` 用 `weight(1f)` 拿剩余高度、由 WebView 自己滚。真机验证长邮件：6 段全出、4 列宽表格不撑破、长链接不破版、正文可滚动（`acc/08-detail-long.png`、`acc/08b-detail-long-scrolled.png`）。
+6. 分析页脚注措辞从「本轮没接」改成用户可读的「统计口径…暂未接入」。
+7. 质量闸门：`node tools/local-audit.cjs` → files 27，encoding / hardColor / glyph 全 0；`assembleDebug` 通过。
+
 `otsmail/mail-worker` 已有未提交改动：7 个 bug 修复（星标列表 500、站内图不入附件行、`/attachments` 只读 KV、read/unread 入参、jwt 未登录堆栈、附件 mimeType、CORS 本地白名单）与两个新接口（`POST /my/uploadImage`、`PUT /my/setting`）。上线前：`npm run check` → 本地 8789 + `npm run smoke:mobile`（21 项）→ 确认 `git status` 里他人未提交改动 → deploy → 验星标页与图片。清单另见 `docs/BACKEND-DEPLOY.md`。
