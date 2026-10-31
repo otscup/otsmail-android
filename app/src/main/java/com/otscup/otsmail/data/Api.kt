@@ -136,6 +136,25 @@ object Api {
         return out
     }
 
+    /** 通讯录：/contact/list 的 data 是 { list, total }，取 list。返回 名称/邮箱/分组。 */
+    suspend fun contacts(): List<Triple<String, String, String>> {
+        val list = obj("GET", "/contact/list?page=1&size=200").optJSONArray("list") ?: JSONArray()
+        val out = ArrayList<Triple<String, String, String>>()
+        for (i in 0 until list.length()) {
+            val o = list.optJSONObject(i) ?: continue
+            val email = o.optString("email")
+            if (!email.contains("@")) continue
+            out.add(
+                Triple(
+                    o.optString("name").ifEmpty { email.substringBefore("@") },
+                    email,
+                    o.optString("groupName"),
+                ),
+            )
+        }
+        return out
+    }
+
     suspend fun emails(accountId: Long, page: Int, mailbox: String? = null, keyword: String = "", category: String = ""): Pair<List<MailItem>, Long> {
         val q = buildString {
             append("/email/list?accountId=").append(accountId)

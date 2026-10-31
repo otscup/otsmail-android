@@ -17,6 +17,9 @@ import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.ChevronRight
+import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -34,13 +37,17 @@ import com.otscup.otsmail.data.Session
 import com.otscup.otsmail.ui.theme.OT
 import kotlinx.coroutines.launch
 
-private data class Contact(val name: String, val email: String) {
-    val letter: String get() = name.trim().take(1).uppercase().ifEmpty { "#" }
+private data class Contact(val name: String, val email: String, val group: String = "") {
+    val letter: String
+        get() {
+            val ch = name.trim().take(1).uppercase()
+            return if (ch.isNotEmpty() && ch[0] in 'A'..'Z') ch else "#"
+        }
 }
 
 /**
- * 联系人：后端暂时没有通讯录接口，这里从收件箱里抽出「不重复的发件人」当常用联系人。
- * 点一行直接写信给这个地址。等后端加了 contacts 表再换成真数据源。
+ * 联系人：优先用后端通讯录（/contact/list）；通讯录为空时退回「从收件箱抽出不重复发件人」。
+ * 点一行直接写信给这个地址。
  */
 @Composable
 fun ContactsScreen(session: Session, onBack: () -> Unit, onWrite: (String) -> Unit) {
@@ -55,6 +62,12 @@ fun ContactsScreen(session: Session, onBack: () -> Unit, onWrite: (String) -> Un
 
     LaunchedEffect(Unit) {
         runCatching {
+            val book = runCatching { Api.contacts() }.getOrDefault(emptyList())
+            if (book.isNotEmpty()) {
+                contacts = book.map { (name, email, group) -> Contact(name, email, group) }
+                    .sortedBy { it.name.lowercase() }
+                return@runCatching
+            }
             val seen = LinkedHashMap<String, Contact>()
             // 两页足够凑出 30–40 个联系人；再多等后端接口
             for (page in 1..2) {
@@ -117,10 +130,15 @@ fun ContactsScreen(session: Session, onBack: () -> Unit, onWrite: (String) -> Un
                                                     maxLines = 1, overflow = TextOverflow.Ellipsis,
                                                 )
                                                 Text(
-                                                    ct.email, style = t.footnote, color = c.label2,
+                                                    if (ct.group.isEmpty()) ct.email else "${ct.email} · ${ct.group}",
+                                                    style = t.footnote, color = c.label2,
                                                     maxLines = 1, overflow = TextOverflow.Ellipsis,
                                                 )
                                             }
+                                            Icon(
+                                                Icons.Outlined.ChevronRight, contentDescription = null,
+                                                tint = c.label3, modifier = Modifier.size(18.dp),
+                                            )
                                         }
                                     }
                                 }
