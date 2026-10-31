@@ -136,9 +136,6 @@ fun InboxScreen(
     var counts by remember { mutableStateOf<Map<String, Int>>(emptyMap()) }
     var category by remember { mutableStateOf("") }
     var catCounts by remember { mutableStateOf<Map<String, Int>>(emptyMap()) }
-    LaunchedEffect(Unit) { runCatching { Api.accounts() }.onSuccess { accounts = it } }
-    LaunchedEffect(accVersion) { runCatching { Api.menuCounts() }.onSuccess { counts = it } }
-    LaunchedEffect(accVersion) { runCatching { Api.categoryCounts() }.onSuccess { catCounts = it } }
 
     suspend fun load(next: Int, reset: Boolean) {
         if (loading) return
@@ -155,6 +152,10 @@ fun InboxScreen(
             total = pair.second.toLong().toInt()
             page = next
             if (current.key == "receive") unread = items.count { it.unread }
+            // 抽屉数据跟着列表一起拉：composition 早期 Api.base 还没就绪，独立 LaunchedEffect 会静默失败
+            runCatching { Api.accounts() }.onSuccess { accounts = it }
+            runCatching { Api.menuCounts() }.onSuccess { counts = it }
+            runCatching { Api.categoryCounts() }.onSuccess { catCounts = it }
         }.onFailure { error = it.message ?: "加载失败" }
         loading = false
     }
