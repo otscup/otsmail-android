@@ -12,6 +12,8 @@ import androidx.compose.material.icons.outlined.Drafts
 import androidx.compose.material.icons.outlined.Mail
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -169,7 +171,13 @@ fun InboxScreen(
         drawerState = drawer,
         drawerContent = {
             ModalDrawerSheet(drawerContainerColor = c.bgGrouped) {
-                Column(Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding()) {
+                Column(
+                    Modifier
+                        .fillMaxSize()
+                        .verticalScroll(rememberScrollState())
+                        .statusBarsPadding()
+                        .navigationBarsPadding(),
+                ) {
                     Spacer(Modifier.height(OTSpace.s5))
                     Row(Modifier.padding(horizontal = OTSpace.s4), verticalAlignment = Alignment.CenterVertically) {
                         Box(
