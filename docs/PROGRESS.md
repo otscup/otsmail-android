@@ -69,4 +69,13 @@
 6. 分析页脚注措辞从「本轮没接」改成用户可读的「统计口径…暂未接入」。
 7. 质量闸门：`node tools/local-audit.cjs` → files 27，encoding / hardColor / glyph 全 0；`assembleDebug` 通过。
 
+## 2026-11-01 第五轮：抽屉「退出登录」删掉 + 15 屏重拍
+
+1. **抽屉「退出登录」不可达（真机语义节点 `bounds=[0,0][0,0]`）**：抽屉内容用 `verticalScroll` 后总高仍超屏，末行被 Layout 裁掉——看得见（Surface 不裁绘制）但 uiautomator 拿不到 bounds，点击也无命中。试过「外层 `Column` + 内层 `weight(1f)` 把退出键钉在底部」，语义节点依旧是 0,0（`ModalDrawerSheet` 内高度约束不受 `fillMaxSize` 控制）。
+2. **定案：抽屉里不放退出登录**（提交 `2d2c0db`）。理由：设置页底部本来就有「退出登录」（`SettingsScreen.kt:197`），抽屉那一份是重复入口；定稿样张的抽屉也只有 帐户/邮箱/分类/其他 四组。删掉后 `InboxScreen` 的 `onLogout` 形参与 `App.kt` 的传参一并去掉，退出统一走「设置 → 退出登录」。
+3. **15 屏重拍**：`tools/cap15.cjs` 一次跑完；抽屉单独用新增的 `tools/cap-drawer.cjs`（等 2.5s 动画结束再截，之前那张是半开状态）。登录页用 `tools/cap-login.cjs`（走「设置 → 退出登录」→ 截 `01-login` → 重新登录 → 截 `01b-after-login`）。**坑**：`adb shell input keyevent 111`（ESC）会直接关掉 Activity 掉回桌面，不要用它收键盘；点「登录」按钮失败时再点一次即可。
+4. **拼图**：`tools/contact-sheet.ps1` → `F:\Desktop\MFiles\otsmail-android-shots\contact-sheet.png`（1200×1494，15 屏带文件名）。
+5. 截图左侧的「ICB」圆球是手机里工行 App 的悬浮球，属系统悬浮窗，`am force-stop com.icbc` 只能短暂去掉（会自动复活），不影响验收；要干净截图需用户手动关掉该悬浮窗。
+6. 质量闸门：`node tools/local-audit.cjs` → files 27，encoding / hardColor / glyph 全 0；`assembleDebug` 通过。
+
 `otsmail/mail-worker` 已有未提交改动：7 个 bug 修复（星标列表 500、站内图不入附件行、`/attachments` 只读 KV、read/unread 入参、jwt 未登录堆栈、附件 mimeType、CORS 本地白名单）与两个新接口（`POST /my/uploadImage`、`PUT /my/setting`）。上线前：`npm run check` → 本地 8789 + `npm run smoke:mobile`（21 项）→ 确认 `git status` 里他人未提交改动 → deploy → 验星标页与图片。清单另见 `docs/BACKEND-DEPLOY.md`。
