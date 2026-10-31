@@ -3,6 +3,9 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.material.icons.outlined.Search
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.Canvas
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -74,6 +77,26 @@ fun OTDivider(inset: Int = 0) {
             .height(0.5.dp)
             .background(OT.colors.separator),
     )
+}
+
+/** 抽屉分组之间的虚分隔（样张 .drawer__dash：1.5px dotted、左右 18dp）。 */
+@Composable
+fun OTDash() {
+    val sep = OT.colors.separator
+    Canvas(
+        Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 18.dp, vertical = OTSpace.s2)
+            .height(1.5.dp),
+    ) {
+        drawLine(
+            color = sep,
+            start = Offset(0f, size.height / 2f),
+            end = Offset(size.width, size.height / 2f),
+            strokeWidth = size.height,
+            pathEffect = PathEffect.dashPathEffect(floatArrayOf(3f, 3f)),
+        )
+    }
 }
 
 /** 大标题（.large-title 34/41） */

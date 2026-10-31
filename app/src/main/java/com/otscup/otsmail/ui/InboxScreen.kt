@@ -236,6 +236,7 @@ fun InboxScreen(
                             }
                         }
                     }
+                    OTDash()
                     Spacer(Modifier.height(OTSpace.s4))
                     OTGroupHeader("邮箱")
                     OTGroup {
@@ -286,6 +287,7 @@ Text(box.label, style = t.body, color = if (box == current) c.blue else c.label,
                             }
                         }
                     }
+                    OTDash()
                     Spacer(Modifier.height(OTSpace.s4))
                     OTGroupHeader("其他")
                     OTGroup {
