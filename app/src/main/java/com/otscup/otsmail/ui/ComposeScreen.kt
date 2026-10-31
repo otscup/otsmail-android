@@ -4,6 +4,7 @@ import androidx.compose.material.icons.outlined.AttachFile
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material3.Icon
 
+import android.provider.OpenableColumns
 import android.util.Base64
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -72,7 +73,10 @@ fun ComposeScreen(
             runCatching {
                 val bytes = ctx.contentResolver.openInputStream(uri)?.use { it.readBytes() } ?: return@runCatching
                 if (bytes.size > 5 * 1024 * 1024) return@runCatching
-                val name = uri.lastPathSegment?.substringAfterLast('/') ?: "attachment"
+                val name = ctx.contentResolver
+                    .query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)
+                    ?.use { cur -> if (cur.moveToFirst()) cur.getString(0) else null }
+                    ?: uri.lastPathSegment?.substringAfterLast('/') ?: "attachment"
                 val mime = ctx.contentResolver.getType(uri) ?: "application/octet-stream"
                 attachments.add(
                     JSONObject()
