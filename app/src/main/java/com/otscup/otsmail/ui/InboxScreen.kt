@@ -1,6 +1,7 @@
 package com.otscup.otsmail.ui
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.material.icons.outlined.People
 import androidx.compose.material.icons.outlined.Tune
 import androidx.compose.material.icons.outlined.Settings
@@ -169,20 +170,26 @@ fun InboxScreen(
     ModalNavigationDrawer(
         drawerState = drawer,
         drawerContent = {
-            ModalDrawerSheet(drawerContainerColor = c.bgGrouped) {
+            ModalDrawerSheet(
+                drawerContainerColor = c.bgCard,
+                drawerShape = RoundedCornerShape(28.dp),
+                windowInsets = WindowInsets(0, 0, 0, 0),
+                modifier = Modifier
+                    .statusBarsPadding()
+                    .navigationBarsPadding()
+                    .padding(8.dp)
+                    .width(322.dp),
+            ) {
                 Column(
                     Modifier
                         .fillMaxSize()
-                        .verticalScroll(rememberScrollState())
-                        .statusBarsPadding()
-                        .navigationBarsPadding(),
+                        .verticalScroll(rememberScrollState()),
                 ) {
-                    Spacer(Modifier.height(OTSpace.s5))
-                    Row(Modifier.padding(horizontal = OTSpace.s4), verticalAlignment = Alignment.CenterVertically) {
+                    Row(Modifier.padding(start = 16.dp, end = 16.dp, top = 16.dp, bottom = 12.dp), verticalAlignment = Alignment.CenterVertically) {
                         Box(
-                            Modifier.size(56.dp).clip(CircleShape).background(c.blue),
+                            Modifier.size(46.dp).clip(CircleShape).background(c.blue),
                             contentAlignment = Alignment.Center,
-                        ) { Text(session.name.take(1).uppercase(), style = t.title2, color = Color.White) }
+                        ) { Text(session.name.take(1).uppercase(), style = t.title3, color = Color.White) }
                         Spacer(Modifier.width(12.dp))
                         Column(Modifier.weight(1f)) {
                             Text(session.name.ifEmpty { "我" }, style = t.body, color = c.label)
@@ -216,17 +223,9 @@ fun InboxScreen(
                             ) {
                                 val accColor = listOf(c.blue, c.green, c.orange, c.purple, c.teal, c.indigo)[i % 6]
                                 Box(
-                                    Modifier.size(28.dp).clip(CircleShape).background(accColor.copy(alpha = 0.14f))
-                                        .border(1.5.dp, accColor, CircleShape),
-                                    contentAlignment = Alignment.Center,
-                                ) {
-                                    Text(
-                                        acc.second.take(1).uppercase(),
-                                        style = t.caption1,
-                                        color = accColor,
-                                    )
-                                }
-                                Spacer(Modifier.width(12.dp))
+                                    Modifier.size(12.dp).border(2.dp, accColor, CircleShape),
+                                )
+                                Spacer(Modifier.width(10.dp))
                                 Text(acc.second, style = t.body, color = if (active) c.blue else c.label, maxLines = 1, modifier = Modifier.weight(1f))
                                 val unreadN = counts["inbox"] ?: 0
                                 if (active && unreadN > 0) {
@@ -325,16 +324,16 @@ Text(label, style = t.body, color = c.label) }
         Box(Modifier.fillMaxSize().background(c.bgGrouped).statusBarsPadding()) {
             Column(Modifier.fillMaxSize()) {
                 Row(
-                    Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = OTSpace.cardGap),
+                    Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, top = 6.dp, bottom = 4.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Box(
-                        Modifier.size(44.dp)
+                        Modifier.size(36.dp)
                             .clip(CircleShape)
                             .background(c.blue)
                             .tapArea { scope.launch { drawer.open() } },
                         contentAlignment = Alignment.Center,
-                    ) { Text(session.name.take(1).uppercase(), style = t.body, color = Color.White) }
+                    ) { Text(session.name.take(1).uppercase(), style = t.subhead.copy(fontWeight = FontWeight.SemiBold), color = Color.White) }
                     Spacer(Modifier.width(8.dp))
                     OTSearchPill(value = keyword, onValueChange = { keyword = it }) {
                         Box(
@@ -348,7 +347,7 @@ Text(label, style = t.body, color = c.label) }
                     }
                 }
                 Row(
-                    Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, top = 4.dp, bottom = 10.dp),
+                    Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, top = 6.dp, bottom = 10.dp),
                     verticalAlignment = Alignment.Bottom,
                 ) {
                     OTLargeTitle(
@@ -356,10 +355,10 @@ Text(label, style = t.body, color = c.label) }
                             "primary" -> "主要"; "social" -> "社交"; "promotion" -> "推广"
                             "updates" -> "动态"; "ads" -> "广告"; else -> category
                         },
-                        Modifier.padding(top = 20.dp),
                     )
                     Spacer(Modifier.weight(1f))
-                    if (unread > 0) Text("$unread 未读", style = t.footnote, color = c.blue)
+                    if (unread > 0) Text("$unread 未读", style = t.footnote, color = c.blue,
+                        modifier = Modifier.padding(bottom = 6.dp))
                 }
                 if (error.isNotEmpty()) {
                     Text(error, style = t.footnote, color = c.red, modifier = Modifier.padding(16.dp))
@@ -379,11 +378,11 @@ Text(label, style = t.body, color = c.label) }
                     val groups = items.groupBy { dayOf(it.time) }
                     LazyColumn(state = listState, modifier = Modifier.weight(1f), contentPadding = PaddingValues(bottom = 96.dp)) {
                         groups.forEach { (day, list) ->
-                            item(key = "h-$day") { OTGroupHeader(day) }
+                            item(key = "h-$day") { OTDayHeader(day) }
                             item(key = "g-$day") {
                                 OTGroup {
                                     list.forEachIndexed { index, mail ->
-                                        // 设计稿行间无分隔线，靠留白分组
+                                        if (index > 0) OTDivider(inset = 58)
                                         OTMailRow(
                                             from = mail.name.ifEmpty { mail.from },
                                             subject = mail.subject.ifEmpty { "（无主题）" },
@@ -437,7 +436,7 @@ Text(label, style = t.body, color = c.label) }
             Box(
                 Modifier
                     .align(Alignment.BottomEnd)
-                    .padding(20.dp)
+                    .padding(end = 20.dp, bottom = 34.dp)
                     .size(52.dp)
                     .clip(CircleShape)
                     .background(c.blue)

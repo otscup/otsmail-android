@@ -67,6 +67,17 @@ fun OTGroupHeader(text: String) {
     )
 }
 
+/** 列表内的日期标题（.day：13/18、ink2、14/16/8） */
+@Composable
+fun OTDayHeader(text: String) {
+    Text(
+        text,
+        style = OT.type.footnote,
+        color = OT.colors.label2,
+        modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 14.dp, bottom = 8.dp),
+    )
+}
+
 /** 卡间分隔（.group 之间 8dp 空隙用 Spacer 更直观，这里只给卡内发丝线） */
 @Composable
 fun OTDivider(inset: Int = 0) {
@@ -120,11 +131,11 @@ fun OTSearchPill(
             .height(36.dp)
             .clip(RoundedCornerShape(10.dp))
             .background(c.bgInput)
-            .padding(start = 12.dp, end = 6.dp),
+            .padding(start = 10.dp, end = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Icon(Icons.Outlined.Search, contentDescription = null, tint = c.label3, modifier = Modifier.size(18.dp))
-        Spacer(Modifier.width(8.dp))
+        Icon(Icons.Outlined.Search, contentDescription = null, tint = c.label3, modifier = Modifier.size(16.dp))
+        Spacer(Modifier.width(6.dp))
         Box(Modifier.weight(1f)) {
             if (value.isEmpty()) {
                 Text(placeholder, style = OT.type.subhead, color = c.label3)
@@ -177,7 +188,7 @@ fun OTAvatar(name: String, size: Int = 34) {
     }
 }
 
-/** 邮件行（.mail-row：总高 78，[未读点 8] 头像 34 主列 / 右上时间 / 右下星标 36） */
+/** 邮件行（.row：min-height 86、内边距 11/12/11/10、点 8 + 头像 34 + 主列 + 时间 + 星标 36） */
 @Composable
 fun OTMailRow(
     from: String,
@@ -194,9 +205,9 @@ fun OTMailRow(
     Row(
         Modifier
             .fillMaxWidth()
-            .heightIn(min = 78.dp)
+            .heightIn(min = 86.dp)
             .pressable(scale = 0.99f, pressedColor = c.bgPressed, shape = RoundedCornerShape(0.dp), onClick = onOpen)
-            .padding(start = 10.dp, end = 12.dp),
+            .padding(start = 10.dp, end = 12.dp, top = 11.dp, bottom = 11.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Box(Modifier.width(8.dp), contentAlignment = Alignment.Center) {
@@ -204,28 +215,29 @@ fun OTMailRow(
                 Box(Modifier.size(8.dp).clip(CircleShape).background(c.blue))
             }
         }
-        Spacer(Modifier.width(6.dp))
+        Spacer(Modifier.width(10.dp))
         OTAvatar(from, 34)
         Spacer(Modifier.width(10.dp))
         Column(Modifier.weight(1f)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
                     from, style = t.subhead.copy(fontWeight = if (unread) FontWeight.SemiBold else FontWeight.Normal),
-                    color = c.label, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, false),
+                    color = c.label, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f, false),
                 )
                 if (!category.isNullOrEmpty()) {
                     Spacer(Modifier.width(6.dp))
                     OTChip(category, c.gray)
                 }
                 Spacer(Modifier.weight(1f))
-                Text(time, style = t.caption1, color = c.label2, maxLines = 1, textAlign = TextAlign.End, modifier = Modifier.width(44.dp))
+                Text(time, style = t.caption1, color = c.label3, maxLines = 1, textAlign = TextAlign.End, modifier = Modifier.width(44.dp))
             }
             Spacer(Modifier.height(2.dp))
             Text(
                 subject, style = t.body.copy(fontWeight = if (unread) FontWeight.SemiBold else FontWeight.Normal),
                 color = c.label, maxLines = 1, overflow = TextOverflow.Ellipsis,
             )
-            Spacer(Modifier.height(2.dp))
+            Spacer(Modifier.height(1.dp))
             Text(snippet, style = t.subhead, color = c.label2, maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
         Spacer(Modifier.width(6.dp))
