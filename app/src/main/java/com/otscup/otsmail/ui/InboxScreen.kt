@@ -12,6 +12,7 @@ import androidx.compose.material.icons.outlined.Drafts
 import androidx.compose.material.icons.outlined.Mail
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -205,14 +206,16 @@ fun InboxScreen(
                                     .padding(horizontal = 16.dp),
                                 verticalAlignment = Alignment.CenterVertically,
                             ) {
+                                val accColor = listOf(c.blue, c.green, c.orange, c.purple, c.teal, c.indigo)[i % 6]
                                 Box(
-                                    Modifier.size(28.dp).clip(CircleShape).background(if (active) c.blue else c.bgInput),
+                                    Modifier.size(28.dp).clip(CircleShape).background(accColor.copy(alpha = 0.14f))
+                                        .border(1.5.dp, accColor, CircleShape),
                                     contentAlignment = Alignment.Center,
                                 ) {
                                     Text(
                                         acc.second.take(1).uppercase(),
                                         style = t.caption1,
-                                        color = if (active) Color.White else c.blue,
+                                        color = accColor,
                                     )
                                 }
                                 Spacer(Modifier.width(12.dp))
@@ -349,7 +352,13 @@ Text(label, style = t.body, color = c.label) }
                     Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, top = 4.dp, bottom = 10.dp),
                     verticalAlignment = Alignment.Bottom,
                 ) {
-                    OTLargeTitle(current.label, Modifier.padding(top = 20.dp))
+                    OTLargeTitle(
+                        current.label + if (category.isEmpty()) "" else " · " + when (category) {
+                            "primary" -> "主要"; "social" -> "社交"; "promotion" -> "推广"
+                            "updates" -> "动态"; "ads" -> "广告"; else -> category
+                        },
+                        Modifier.padding(top = 20.dp),
+                    )
                     Spacer(Modifier.weight(1f))
                     if (unread > 0) Text("$unread 未读", style = t.footnote, color = c.blue)
                 }
