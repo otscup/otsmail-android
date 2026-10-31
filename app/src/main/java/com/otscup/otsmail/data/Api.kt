@@ -123,6 +123,19 @@ object Api {
 
     // ---- 邮件 ----
 
+    /** 多账户：/account/list 的 data 直接是数组。 */
+    suspend fun accounts(): List<Pair<Long, String>> {
+        val arr = arr("GET", "/account/list")
+        val out = ArrayList<Pair<Long, String>>()
+        for (i in 0 until arr.length()) {
+            val o = arr.optJSONObject(i) ?: continue
+            val id = o.optLong("accountId")
+            if (id == 0L) continue
+            out.add(id to o.optString("email").ifEmpty { o.optString("name") })
+        }
+        return out
+    }
+
     suspend fun emails(accountId: Long, page: Int, mailbox: String? = null, keyword: String = ""): Pair<List<MailItem>, Long> {
         val q = buildString {
             append("/email/list?accountId=").append(accountId)

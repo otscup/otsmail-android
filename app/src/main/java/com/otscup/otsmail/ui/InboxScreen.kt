@@ -27,6 +27,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.ModalDrawerSheet
 import androidx.compose.material3.ModalNavigationDrawer
@@ -129,6 +130,11 @@ fun InboxScreen(
     var loading by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf("") }
     var unread by remember { mutableStateOf(0) }
+    var accounts by remember { mutableStateOf<List<Pair<Long, String>>>(emptyList()) }
+    var accVersion by remember { mutableStateOf(0) }
+    var counts by remember { mutableStateOf<Map<String, Int>>(emptyMap()) }
+    LaunchedEffect(Unit) { runCatching { Api.accounts() }.onSuccess { accounts = it } }
+    LaunchedEffect(accVersion) { runCatching { Api.menuCounts() }.onSuccess { counts = it } }
 
     suspend fun load(next: Int, reset: Boolean) {
         if (loading) return
@@ -149,7 +155,7 @@ fun InboxScreen(
         loading = false
     }
 
-    LaunchedEffect(current.key, keyword) {
+    LaunchedEffect(current.key, keyword, accVersion) {
         load(1, true)
         listState.scrollToItem(0)
     }
@@ -166,9 +172,61 @@ fun InboxScreen(
                             contentAlignment = Alignment.Center,
                         ) { Text(session.name.take(1).uppercase(), style = t.title2, color = Color.White) }
                         Spacer(Modifier.width(12.dp))
-                        Column {
+                        Column(Modifier.weight(1f)) {
                             Text(session.name.ifEmpty { "我" }, style = t.body, color = c.label)
                             Text(session.email, style = t.footnote, color = c.label2)
+                        }
+                        Box(Modifier.size(36.dp).tapArea { scope.launch { drawer.close() }; onOpenSysSettings() }, contentAlignment = Alignment.Center) {
+                            Icon(Icons.Outlined.Settings, contentDescription = "系统设置", tint = c.label2, modifier = Modifier.size(20.dp))
+                        }
+                    }
+                    Spacer(Modifier.height(OTSpace.s4))
+                    OTGroupHeader("帐户")
+                    OTGroup {
+                        accounts.forEachIndexed { i, acc ->
+                            if (i > 0) OTDivider(inset = 16)
+                            val active = acc.first == session.accountId
+                            Row(
+                                Modifier
+                                    .fillMaxWidth()
+                                    .height(56.dp)
+                                    .tapArea {
+                                        if (!active) {
+                                            session.accountId = acc.first
+                                            session.apply()
+                                            accVersion++
+                                            didTop = false
+                                        }
+                                        scope.launch { drawer.close() }
+                                    }
+                                    .padding(horizontal = 16.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Box(
+                                    Modifier.size(28.dp).clip(CircleShape).background(if (active) c.blue else c.bgInput),
+                                    contentAlignment = Alignment.Center,
+                                ) {
+                                    Text(
+                                        acc.second.take(1).uppercase(),
+                                        style = t.caption1,
+                                        color = if (active) Color.White else c.blue,
+                                    )
+                                }
+                                Spacer(Modifier.width(12.dp))
+                                Text(acc.second, style = t.body, color = if (active) c.blue else c.label, maxLines = 1, modifier = Modifier.weight(1f))
+                                val unreadN = counts["inbox"] ?: 0
+                                if (active && unreadN > 0) {
+                                    Text(
+                                        unreadN.toString(),
+                                        style = t.caption1,
+                                        color = Color.White,
+                                        modifier = Modifier
+                                            .clip(RoundedCornerShape(10.dp))
+                                            .background(c.orange)
+                                            .padding(horizontal = 7.dp, vertical = 2.dp),
+                                    )
+                                }
+                            }
                         }
                     }
                     Spacer(Modifier.height(OTSpace.s4))
@@ -180,6 +238,7 @@ fun InboxScreen(
                                 Modifier
                                     .fillMaxWidth()
                                     .height(44.dp)
+                                    .background(if (box == current) c.bgPressed else Color.Transparent)
                                     .tapArea {
                                         current = box
                                         scope.launch { drawer.close() }
@@ -189,7 +248,9 @@ fun InboxScreen(
                             ) {
                                 Icon(boxIcon(box.label), contentDescription = null, tint = if (box == current) c.blue else c.label2, modifier = Modifier.size(22.dp))
                                 Spacer(Modifier.width(12.dp))
-Text(box.label, style = t.body, color = if (box == current) c.blue else c.label)
+Text(box.label, style = t.body, color = if (box == current) c.blue else c.label, modifier = Modifier.weight(1f))
+                                val boxN = when (box.key) { "receive" -> counts["inbox"] ?: 0; "deleted" -> counts["deleted"] ?: 0; "spam" -> counts["spam"] ?: 0; else -> 0 }
+                                if (boxN > 0) Text(boxN.toString(), style = t.caption1, color = c.label2)
                             }
                         }
                     }
