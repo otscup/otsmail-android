@@ -133,8 +133,11 @@ fun InboxScreen(
     var accounts by remember { mutableStateOf<List<Pair<Long, String>>>(emptyList()) }
     var accVersion by remember { mutableStateOf(0) }
     var counts by remember { mutableStateOf<Map<String, Int>>(emptyMap()) }
+    var category by remember { mutableStateOf("") }
+    var catCounts by remember { mutableStateOf<Map<String, Int>>(emptyMap()) }
     LaunchedEffect(Unit) { runCatching { Api.accounts() }.onSuccess { accounts = it } }
     LaunchedEffect(accVersion) { runCatching { Api.menuCounts() }.onSuccess { counts = it } }
+    LaunchedEffect(accVersion) { runCatching { Api.categoryCounts() }.onSuccess { catCounts = it } }
 
     suspend fun load(next: Int, reset: Boolean) {
         if (loading) return
@@ -145,7 +148,7 @@ fun InboxScreen(
                 runCatching { Api.me() }.onSuccess { session.accountId = it.accountId }
             }
             val pair = if (current.key == "starred") Api.starred(next)
-            else Api.emails(session.accountId, next, current.key, keyword)
+            else Api.emails(session.accountId, next, current.key, keyword, category)
             if (reset) items.clear()
             items.addAll(pair.first)
             total = pair.second.toLong().toInt()
@@ -155,7 +158,7 @@ fun InboxScreen(
         loading = false
     }
 
-    LaunchedEffect(current.key, keyword, accVersion) {
+    LaunchedEffect(current.key, keyword, accVersion, category) {
         load(1, true)
         listState.scrollToItem(0)
     }
@@ -251,6 +254,32 @@ fun InboxScreen(
 Text(box.label, style = t.body, color = if (box == current) c.blue else c.label, modifier = Modifier.weight(1f))
                                 val boxN = when (box.key) { "receive" -> counts["inbox"] ?: 0; "deleted" -> counts["deleted"] ?: 0; "spam" -> counts["spam"] ?: 0; else -> 0 }
                                 if (boxN > 0) Text(boxN.toString(), style = t.caption1, color = c.label2)
+                            }
+                        }
+                    }
+                    Spacer(Modifier.height(OTSpace.s4))
+                    OTGroupHeader("分类")
+                    OTGroup {
+                        val cats = listOf("primary" to "主要", "social" to "社交", "promotion" to "推广", "updates" to "动态", "ads" to "广告")
+                        cats.forEachIndexed { i, (key, label) ->
+                            if (i > 0) OTDivider(inset = 16)
+                            val on = category == key
+                            Row(
+                                Modifier
+                                    .fillMaxWidth()
+                                    .height(44.dp)
+                                    .background(if (on) c.bgPressed else Color.Transparent)
+                                    .tapArea {
+                                        category = if (on) "" else key
+                                        current = mailboxes[0]
+                                        scope.launch { drawer.close() }
+                                    }
+                                    .padding(horizontal = 16.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Text(label, style = t.body, color = if (on) c.blue else c.label, modifier = Modifier.weight(1f))
+                                val n = catCounts[key] ?: 0
+                                if (n > 0) Text(n.toString(), style = t.caption1, color = c.label2)
                             }
                         }
                     }

@@ -136,12 +136,13 @@ object Api {
         return out
     }
 
-    suspend fun emails(accountId: Long, page: Int, mailbox: String? = null, keyword: String = ""): Pair<List<MailItem>, Long> {
+    suspend fun emails(accountId: Long, page: Int, mailbox: String? = null, keyword: String = "", category: String = ""): Pair<List<MailItem>, Long> {
         val q = buildString {
             append("/email/list?accountId=").append(accountId)
             append("&size=20&page=").append(page)
             append("&allReceive=0&emailId=0&timeSort=1&type=0")
             if (!mailbox.isNullOrEmpty()) append("&mailbox=").append(mailbox)
+            if (category.isNotEmpty()) append("&category=").append(category)
             if (keyword.isNotEmpty()) append("&searchType=all&text=").append(java.net.URLEncoder.encode(keyword, "UTF-8"))
         }
         val d = obj("GET", q)
