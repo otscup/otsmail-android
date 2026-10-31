@@ -133,6 +133,11 @@ fun DetailScreen(emailId: Long, onBack: () -> Unit, onReply: (MailDetail) -> Uni
                     factory = { ctx ->
                         WebView(ctx).apply {
                             settings.javaScriptEnabled = false
+                            settings.useWideViewPort = true
+                            settings.loadWithOverviewMode = true
+                            settings.setSupportZoom(false)
+                            settings.builtInZoomControls = false
+                            settings.textZoom = 100
                             setBackgroundColor(android.graphics.Color.TRANSPARENT)
                             webViewClient = object : WebViewClient() {
                                 override fun onPageFinished(view: WebView?, url: String?) {
@@ -153,7 +158,7 @@ fun DetailScreen(emailId: Long, onBack: () -> Unit, onReply: (MailDetail) -> Uni
                         val link = hex(c.blue)
                         val quote = hex(c.separator)
                         val shell = """<html><head><meta name="viewport" content="width=device-width,initial-scale=1">
-<style>html,body{width:100%;overflow-x:hidden;-webkit-text-size-adjust:100%}
+<style>*{max-width:100%!important;box-sizing:border-box}html,body{width:100%;overflow-x:hidden;-webkit-text-size-adjust:100%}
 body{margin:0;padding:0 16px 16px;background:transparent;color:$fg;
 font:17px/1.5 -apple-system,"Noto Sans SC",sans-serif;word-break:break-word}
 img,video{max-width:100%;height:auto}a{color:$link}
