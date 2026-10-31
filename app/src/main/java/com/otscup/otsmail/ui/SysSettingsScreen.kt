@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
@@ -218,26 +219,32 @@ fun SysSettingsScreen(onBack: () -> Unit, onToast: (String) -> Unit) {
 
             val card = opened
             if (card == null) {
-                for ((i, one) in CARDS.withIndex()) {
-                    if (i == 0) OTGroupHeader("站点")
-                    if (i == 3) OTGroupHeader("存储与推送")
-                    if (i == 7) OTGroupHeader("AI")
+                for ((start, title) in listOf(0 to "站点", 3 to "存储与推送", 7 to "AI")) {
+                    val end = when (start) { 0 -> 3; 3 -> 7; else -> CARDS.size }
+                    OTGroupHeader(title)
                     Column(
                         Modifier
                             .fillMaxWidth()
-                            .padding(horizontal = d.sp4.dp, vertical = if (i == 0 || i == 3 || i == 7) 0.dp else OTSpace.cardGap)
-                            .clip(RoundedCornerShape(14.dp)).background(c.bgCard),
+                            .padding(horizontal = d.sp4.dp)
+                            .padding(bottom = OTSpace.cardGap)
+                            .clip(RoundedCornerShape(14.dp))
+                            .background(c.bgCard),
                     ) {
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .pressable(pressedColor = c.bgInput) { opened = one }
-                                .padding(horizontal = OTSpace.s4, vertical = OTSpace.s3),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            Text(one.title, style = t.body, color = c.label, modifier = Modifier.weight(1f))
-                            Text(summary(one, current), style = t.footnote, color = c.label2)
-                            Text("  ›", style = t.body, color = c.label3)
+                        for (i in start until end) {
+                            val one = CARDS[i]
+                            if (i > start) OTDivider(inset = 16)
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .pressable(pressedColor = c.bgInput) { opened = one }
+                                    .heightIn(min = 44.dp)
+                                    .padding(horizontal = OTSpace.s4),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Text(one.title, style = t.body, color = c.label, modifier = Modifier.weight(1f))
+                                Text(summary(one, current), style = t.footnote, color = c.label2)
+                                Text("  ›", style = t.body, color = c.label3)
+                            }
                         }
                     }
                 }
