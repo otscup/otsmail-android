@@ -45,4 +45,11 @@
 4. 抽屉数据拉取合并进 `load()` 成功分支（提交 `2fe8f36`），去掉重复的 `LaunchedEffect`。
 5. 待办：`/account/add` 从客户端新建帐户后抽屉是否即时刷新（本轮只验了服务端能建、抽屉能显示已有帐户）。
 
+## 2026-10-31 第二轮：分类与邮箱组合筛选 + 草稿方案定案
+
+1. **组合筛选已落地**（提交 `98951dc`）：`InboxScreen.kt` 的分类点按不再执行 `current = mailboxes[0]`，分类与邮箱/星标/未读/垃圾互相独立叠加。真机验证两张：`acc/02c-inbox-unread-primary.png`（未读邮件 · 主要，12 行全是 primary 且带未读点）、`acc/02d-inbox-starred-primary.png`（已标星 · 主要，7 封、页脚「共 7 封 · 第 1 页」）。服务端 `/email/list` 本来就同时吃 `type/emailId` 与 `category`（`mail-worker/src/service/email-service.js`），无需改后端。
+2. **发现的小差异**：`/star/list` 返回的行不带 `category` 字段，所以「已标星」里不显示分类 chip（收件箱里有）。属数据字段缺失，不是排版问题，暂不处理。
+3. **草稿跨端同步：选「本地持久化」，不建后端草稿表**。理由：① `mail-worker` 目前全无 draft 概念（`grep draft src/` 空），要做得新增表 + 两个接口 + 冲突合并策略（同草稿多端编辑谁赢），这是 v1 之外的一整块；② 现有 `data/Drafts.kt`（SharedPreferences `otsmail_draft`，`list/save/remove` 以 `at` 毫秒作主键）已经满足「退出重进不丢」。真机实证：写信页填 `ops@example.com / draft-check-2230 / local` 后返回，Toast「已处理」，`run-as cat shared_prefs/otsmail_draft.xml` 拿到 `{"to":"ops@example.com","subject":"draft-check-2230","text":"local","at":1793457045823}`。跨端同步留到 v1.1，届时加 `draft` 表 + `GET/PUT /my/draft`，用 `updatedAt` 后写覆盖。
+4. 质量闸门：`node tools/local-audit.cjs` → files 27，encoding 0 / hardColor 0 / glyph 0；`assembleDebug` 通过。
+
 `otsmail/mail-worker` 已有未提交改动：7 个 bug 修复（星标列表 500、站内图不入附件行、`/attachments` 只读 KV、read/unread 入参、jwt 未登录堆栈、附件 mimeType、CORS 本地白名单）与两个新接口（`POST /my/uploadImage`、`PUT /my/setting`）。上线前：`npm run check` → 本地 8789 + `npm run smoke:mobile`（21 项）→ 确认 `git status` 里他人未提交改动 → deploy → 验星标页与图片。清单另见 `docs/BACKEND-DEPLOY.md`。
