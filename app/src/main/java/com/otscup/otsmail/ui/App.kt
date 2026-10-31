@@ -59,10 +59,6 @@ fun OtsApp() {
                     onOpenContacts = { route = Route.Contacts },
                     onOpenAi = { route = Route.Ai },
                     onOpenSysSettings = { route = Route.SysSettings },
-                    onLogout = {
-                        session.clear()
-                        route = Route.Login
-                    },
                 )
 
                 Route.Contacts -> SlidePage(onDismiss = { route = Route.Inbox }) {

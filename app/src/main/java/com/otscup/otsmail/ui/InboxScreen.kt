@@ -114,7 +114,6 @@ fun InboxScreen(
     onOpenContacts: () -> Unit,
     onOpenAi: () -> Unit,
     onOpenSysSettings: () -> Unit,
-    onLogout: () -> Unit,
 ) {
     val t = OT.type
     val c = OT.colors
@@ -319,16 +318,6 @@ Text(label, style = t.body, color = c.label) }
                         }
                     }
                     Spacer(Modifier.height(OTSpace.s4))
-                    OTGroup {
-                        Row(
-                            Modifier
-                                .fillMaxWidth()
-                                .height(44.dp)
-                                .tapArea { onLogout() }
-                                .padding(horizontal = 16.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) { Text("退出登录", style = t.body, color = c.red) }
-                    }
                 }
             }
         },
