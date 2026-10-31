@@ -1,6 +1,7 @@
 package com.otscup.otsmail.ui
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.AttachFile
+import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material3.Icon
 
 import android.util.Base64
@@ -14,6 +15,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
@@ -39,6 +41,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import com.otscup.otsmail.data.Api
 import com.otscup.otsmail.data.Drafts
+import com.otscup.otsmail.data.Session
 import com.otscup.otsmail.ui.theme.OT
 import kotlinx.coroutines.launch
 import org.json.JSONObject
@@ -61,6 +64,7 @@ fun ComposeScreen(
     var busy by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf("") }
     var picks by remember { mutableStateOf(listOf<String>()) }
+    val signature = remember { Session(ctx).signature }
     val attachments = remember { mutableListOf<JSONObject>() }
 
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
@@ -86,8 +90,10 @@ fun ComposeScreen(
         if (busy) return
         busy = true
         error = ""
-        val text = body.ifEmpty { " " }
-        val html = text.split("\n\n").joinToString("") { "<p>${it.replace("\n", "<br>")}</p>" } + quoted
+        val sig = signature.trim()
+        val text = (body + if (sig.isEmpty()) "" else if (body.isEmpty()) sig else "\n\n$sig").ifEmpty { " " }
+        val html = body.split("\n\n").joinToString("") { "<p>${it.replace("\n", "<br>")}</p>" } +
+            if (sig.isEmpty()) "" else "<p>${sig.replace("\n", "<br>")}</p>" + quoted
         scope.launch {
             runCatching { Api.send(accountId, toText.split(",", ";", " ").filter { it.isNotBlank() }, subjectText, text, html, attachments) }
                 .onSuccess { onDone() }
@@ -132,8 +138,37 @@ fun ComposeScreen(
                     onValueChange = { body = it },
                     textStyle = t.body.copy(color = c.label),
                     cursorBrush = SolidColor(c.blue),
-                    modifier = Modifier.fillMaxWidth().height(220.dp),
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 160.dp),
                 )
+                if (signature.isNotEmpty()) {
+                    Text(signature, style = t.subhead, color = c.label2, modifier = Modifier.padding(top = 12.dp))
+                }
+            }
+        }
+        if (picks.isNotEmpty()) {
+            OTGroup(Modifier.padding(horizontal = OTSpace.s4)) {
+                picks.forEachIndexed { i, name ->
+                    if (i > 0) OTDivider(inset = 16)
+                    val kb = (attachments.getOrNull(i)?.optInt("size") ?: 0) / 1024
+                    Row(
+                        Modifier.fillMaxWidth().heightIn(min = 44.dp).padding(horizontal = 16.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Icon(Icons.Outlined.AttachFile, contentDescription = null, tint = c.label2, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.size(8.dp))
+                        Column(Modifier.weight(1f)) {
+                            Text(name, style = t.subhead, color = c.label, maxLines = 1)
+                            Text("${kb.coerceAtLeast(1)} KB", style = t.caption1, color = c.label3)
+                        }
+                        Box(
+                            Modifier.size(32.dp).tapArea {
+                                picks = picks.filterIndexed { idx, _ -> idx != i }
+                                attachments.removeAt(i)
+                            },
+                            contentAlignment = Alignment.Center,
+                        ) { Icon(Icons.Outlined.Close, contentDescription = "移除", tint = c.label3, modifier = Modifier.size(18.dp)) }
+                    }
+                }
             }
         }
         OTGroup(Modifier.padding(horizontal = OTSpace.s4)) {
@@ -145,7 +180,7 @@ fun ComposeScreen(
             ) {
                 Icon(Icons.Outlined.AttachFile, contentDescription = null, tint = c.label2, modifier = Modifier.size(20.dp))
                 Spacer(Modifier.size(8.dp))
-                Text(if (picks.isEmpty()) "添加附件" else "已选 ${picks.size} 个附件", style = t.body, color = c.label)
+                Text(if (picks.isEmpty()) "添加附件" else "添加附件（已选 ${picks.size} 个）", style = t.body, color = c.label)
                 Spacer(Modifier.weight(1f))
                 Text("最多 10 个，单个 ≤5MB", style = t.caption1, color = c.label3)
             }
