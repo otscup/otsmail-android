@@ -35,6 +35,23 @@ npm run smoke:mobile                           # 21 项冒烟，应 21 passed, 0
 
 配套：`src/entity/user.js` 加 `signature` / `sendOnEnter` 两列；迁移脚本 `dev/migrate-mobile-settings.sql`（**线上 D1 已执行过**，新环境仍需跑一次）。
 
+## 三·五、老库升级要补的 `user_perm` 表（本轮新发现）
+
+`src/init/init.js` 的 `otsmail_22DB()` 只在**安装流程**里建 `user_perm`，老库升级后任何鉴权写操作（如 `/account/add`）都会 500：`D1_ERROR: no such table: user_perm`，栈指 `src/service/perm-service.js:28`。补建：
+
+```sql
+CREATE TABLE IF NOT EXISTS user_perm (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER NOT NULL,
+  perm_id INTEGER NOT NULL,
+  allow INTEGER NOT NULL DEFAULT 1
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_user_perm ON user_perm(user_id, perm_id);
+```
+
+同轮还修了 `src/service/account-service.js:20`：解构 `minEmailPrefix/emailPrefixFilter` 没给默认值，setting 缓存缺字段时 `emailPrefixFilter.some()` 抛 TypeError → `/account/add` 必 500（已提交 `f175c2e`）。
+
+
 ## 四、部署前必须确认
 
 1. `git status --porcelain` —— 工作区里混着**他人的未提交改动**：`mail-vue/src/components/email-scroll/index.vue`、`mail-vue/src/views/sys-setting/index.vue`、`mail-vue/src/layout/aside/index.vue`、`mail-vue/src/request/email.js`、`mail-worker/src/api/email-api.js`、`src/email/email.js`、`src/entity/setting.js`、`src/hono/hono.js`、`src/init/init.js`、`src/service/setting-service.js`、`wrangler-dev.toml`。deploy 会**一起上生产**，需先与作者确认。

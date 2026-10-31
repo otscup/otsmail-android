@@ -39,9 +39,10 @@
 ## 2026-10-31 本轮：抽屉空数据的根因已定位
 
 1. **抽屉「帐户」与各计数为空不是客户端时机问题**：设备 `shared_prefs/otsmail.xml` 里存着 `token=dev-token`（早期调试包遗留），服务端对所有需要鉴权的接口返回 `{"code":401,"message":"身份认证失效,请重新登录"}`（实测 `/account/list`、`/email/menu-counts`、`/email/category-counts`、`/email/list`、`/my/setting` 全是这个结果）。收件箱本身此刻也显示「身份认证失效,请重新登录」，不是只有抽屉空。
-2. 处理：`adb shell pm clear com.otscup.otsmail` 清偏好后回到登录页（服务器已预填 `http://127.0.0.1:8789/api`），需要重新登录一次才能拿到真 JWT。**本地 dev 管理员密码我不知道**，需用户输入或授权重置本地 D1 口令。
+2. 处理：`adb shell pm clear com.otscup.otsmail` 清偏好后回到登录页（服务器已预填 `http://127.0.0.1:8789/api`）。**本地 dev 管理员口令已按用户授权重置为 `123456`**（`tools/set-dev-pwd.cjs` 生成 PBKDF2 哈希 → `wrangler d1 execute otsmail-dev --local --file dev/_tmp/set-dev-pwd.sql`），仅动本地 D1，线上未变。
+3. 重置后真机复验通过：收件箱 18 封/12 未读正常加载；抽屉出现两个帐户（admin@example.com 带橙色 18 未读胶囊、ops@example.com）、邮箱计数 18/2、分类计数 主要 18；点 `ops@example.com` 切帐户 → 列表重载为空、再切回 admin 恢复 18 封。截图 `acc/03d-drawer-two-accounts.png`、`acc/03e-drawer-switch-account.png`、`acc/_back-admin.png`。
 3. 顺带修掉的真 bug（`mail-worker` 已提交 `f175c2e`）：`src/service/account-service.js:20` 解构 `minEmailPrefix/emailPrefixFilter` 无默认值 → setting 缓存缺字段时 `emailPrefixFilter.some()` 抛 TypeError，导致 `/account/add` 必 500；另外本地 D1 缺 `user_perm` 表（`src/init/init.js` 只在安装流程建表），老库升级后任何写权限操作都会 500，已手工补建。
 4. 抽屉数据拉取合并进 `load()` 成功分支（提交 `2fe8f36`），去掉重复的 `LaunchedEffect`。
-5. 待办：登录后复验抽屉帐户/计数、多帐户切换、`/account/add` 新帐户在客户端可见。
+5. 待办：`/account/add` 从客户端新建帐户后抽屉是否即时刷新（本轮只验了服务端能建、抽屉能显示已有帐户）。
 
 `otsmail/mail-worker` 已有未提交改动：7 个 bug 修复（星标列表 500、站内图不入附件行、`/attachments` 只读 KV、read/unread 入参、jwt 未登录堆栈、附件 mimeType、CORS 本地白名单）与两个新接口（`POST /my/uploadImage`、`PUT /my/setting`）。上线前：`npm run check` → 本地 8789 + `npm run smoke:mobile`（21 项）→ 确认 `git status` 里他人未提交改动 → deploy → 验星标页与图片。清单另见 `docs/BACKEND-DEPLOY.md`。
