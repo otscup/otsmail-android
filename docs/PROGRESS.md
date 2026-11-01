@@ -98,3 +98,8 @@
 8. **待办**：联系人 contact-hero、写邮件格式工具栏、管理员昵称卡头像、`mail-worker` 部署、精细像素校对、更新交付物。
 
 `otsmail/mail-worker` 已有未提交改动：7 个 bug 修复与两个新接口（`POST /my/uploadImage`、`PUT /my/setting`）。上线前：`npm run check` → 本地 8789 + `npm run smoke:mobile`（21 项）→ 确认 `git status` → deploy → 验星标页与图片。清单另见 `docs/BACKEND-DEPLOY.md`。
+
+### 第九轮（2026-11-02）
+- BACKEND-DEPLOY 补充 mail-worker status 筛选（支持无人收件）。
+- 装机验证，local-audit 全 0，assembleDebug 通过。
+
