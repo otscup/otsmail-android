@@ -103,3 +103,10 @@
 - BACKEND-DEPLOY 补充 mail-worker status 筛选（支持无人收件）。
 - 装机验证，local-audit 全 0，assembleDebug 通过。
 
+
+### 第十六轮（2026-11-02）
+- 回归验证：local-audit 全 0、assembleDebug 通过、APK 装机。
+- 文档整理：ACCEPTANCE/PROGRESS 更新，BACKEND-DEPLOY 已覆盖 mail-worker 状态。
+- VIP 行取舍：后端无 VIP 字段，v1 不实现，沿用现有结构。
+- 草稿：定案本地持久化（SharedPreferences），跨端同步留后续。
+
