@@ -1,6 +1,13 @@
 package com.otscup.otsmail.ui
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.AttachFile
+import androidx.compose.material.icons.outlined.FormatBold
+import androidx.compose.material.icons.outlined.FormatItalic
+import androidx.compose.material.icons.outlined.FormatListBulleted
+import androidx.compose.material.icons.outlined.FormatListNumbered
+import androidx.compose.material.icons.outlined.FormatQuote
+import androidx.compose.material.icons.outlined.FormatStrikethrough
+import androidx.compose.material.icons.outlined.FormatUnderlined
 import androidx.compose.material.icons.outlined.ChevronRight
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material3.Icon
@@ -207,6 +214,29 @@ fun ComposeScreen(
             if (showBcc) OTFieldRow("密送", bccText, { bccText = it }, hint = "多个用逗号分隔")
             OTDivider(inset = 16)
             OTFieldRow("主题", subjectText, { subjectText = it }, hint = "主题")
+            OTDivider(inset = 16)
+            // 格式工具栏（样张 02-compose .toolbar）
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                val icons = listOf(
+                    Icons.Outlined.FormatBold,
+                    Icons.Outlined.FormatItalic,
+                    Icons.Outlined.FormatUnderlined,
+                    Icons.Outlined.FormatStrikethrough,
+                    Icons.Outlined.FormatListBulleted,
+                    Icons.Outlined.FormatListNumbered,
+                    Icons.Outlined.FormatQuote,
+                )
+                icons.forEach { ic ->
+                    Box(
+                        Modifier.size(32.dp).clip(RoundedCornerShape(8.dp)),
+                        contentAlignment = Alignment.Center,
+                    ) { Icon(ic, contentDescription = null, tint = c.label2, modifier = Modifier.size(18.dp)) }
+                }
+            }
             OTDivider(inset = 16)
             Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)) {
                 if (body.isEmpty() && quoted.isEmpty()) {

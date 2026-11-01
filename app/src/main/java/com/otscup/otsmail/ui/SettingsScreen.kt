@@ -114,7 +114,7 @@ fun SettingsScreen(
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Box(
-                        Modifier.size(56.dp).clip(CircleShape).background(c.blue),
+                        Modifier.size(88.dp).clip(CircleShape).background(c.blue),
                         contentAlignment = Alignment.Center,
                     ) {
                         Text(
