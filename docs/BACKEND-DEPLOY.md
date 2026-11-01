@@ -63,3 +63,6 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_user_perm ON user_perm(user_id, perm_id);
 1. `GET /api/setting/websiteConfig` 200 且响应头里没有白名单 origin（生产应保持同源限制）；
 2. 登录后 `GET /api/star/list?size=20&page=1` **200 且 total 正确**（这条是 bug #1 的回归点）；
 3. 任意 `GET /attachments/<已存在的 key>` 返回 200 + 正确的 `Content-Type`（bug #4/#7 的回归点）。
+
+## 补充（本轮）
+- mail-worker/src/service/email-service.js：list/	otal 支持 status 参数，拼接 statusCondition = status ? [eq(email.status, Number(status))] : []；客户端用于「无人收件」（status=7）。
