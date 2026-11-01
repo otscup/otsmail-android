@@ -19,6 +19,8 @@ data class MailItem(
     val unread: Boolean,
     val starred: Boolean,
     val category: String = "",
+    val type: Int = 0,
+    val status: Int = 0,
 )
 
 data class MailDetail(
@@ -208,13 +210,25 @@ object Api {
 
     // ---- 管理页（全部邮件 / 用户 / 权限 / 注册密钥 / 分析）----
 
-    /** GET /email/list 全量（accountId=0 表示不限），只取列表所需字段。 */
-    suspend fun allEmails(page: Int, keyword: String = ""): Pair<List<MailItem>, Long> {
-        val q = "/email/list?size=20&page=$page&allReceive=1&timeSort=1&type=0" +
-            if (keyword.isBlank()) "" else "&text=" + java.net.URLEncoder.encode(keyword, "UTF-8") + "&searchType=all"
+    /** GET /email/list 全量（accountId=0 表示不限）。type/mailbox/status 对应全部邮件页的分组 pills（全部/收件/发件/已删除/无人收件）。 */
+    suspend fun allEmails(
+        page: Int,
+        keyword: String = "",
+        type: Int? = 0,
+        mailbox: String? = null,
+        status: Int? = null,
+    ): Pair<List<MailItem>, Long> {
+        var q = "/email/list?size=20&page=$page&allReceive=1&timeSort=1" +
+            if (type == null) "" else "&type=$type" +
+            if (mailbox == null) "" else "&mailbox=$mailbox" +
+            if (status == null) "" else "&status=$status"
+        if (keyword.isNotBlank()) q += "&text=" + java.net.URLEncoder.encode(keyword, "UTF-8") + "&searchType=all"
         val data = obj("GET", q)
         return data.optJSONArray("list").toMailItems() to data.optLong("total")
     }
+
+    /** GET /analysis/echarts：总览计数、15 天用户/邮件增长、发件人占比、今日发送。 */
+    suspend fun analysisEcharts(): JSONObject = obj("GET", "/analysis/echarts")
 
     suspend fun users(page: Int, status: Int = -1): Pair<List<JSONObject>, Long> {
         val data = obj("GET", "/user/list?size=20&page=$page&status=$status&sort=desc")
@@ -372,6 +386,8 @@ object Api {
                 unread = o.optInt("unread", 1) == 0,
                 starred = o.optInt("isStar", 0) == 1,
                 category = o.optString("category"),
+                type = o.optInt("type"),
+                status = o.optInt("status"),
             )
         }
     }

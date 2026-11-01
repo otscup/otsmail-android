@@ -14,6 +14,8 @@ import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -42,6 +44,8 @@ import com.otscup.otsmail.ui.theme.OT
 import kotlinx.coroutines.launch
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.ArrowUpward
+import androidx.compose.material.icons.outlined.Check
+import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material3.Icon
 
 private data class Msg(
@@ -55,6 +59,7 @@ private data class Msg(
  * 回复里的 actions 逐条显示执行回执，失败的要如实标红——样张 14-ai 就是这么画的。
  */
 @Composable
+@OptIn(ExperimentalLayoutApi::class)
 fun AiScreen(session: Session, onBack: () -> Unit, onOpenCompose: () -> Unit) {
     val c = OT.colors
     val t = OT.type
@@ -110,17 +115,21 @@ fun AiScreen(session: Session, onBack: () -> Unit, onOpenCompose: () -> Unit) {
             item { Spacer(Modifier.height(d.sp2.dp)) }
         }
 
-        // 快捷指令（样张 .aichip）
-        Row(
+        // 快捷指令（样张 .aichips：FlowRow 换行 + 4 个预设）
+        val presets = listOf("汇总今天的未读", "找最近 7 天的验证码", "清理推广邮件", "起草一封新邮件")
+        FlowRow(
             modifier = Modifier.fillMaxWidth().padding(horizontal = d.sp3.dp, vertical = d.sp1.dp),
             horizontalArrangement = Arrangement.spacedBy(d.sp2.dp),
+            verticalArrangement = Arrangement.spacedBy(d.sp2.dp),
         ) {
-            listOf("汇总今天的未读").forEach { label ->
+            presets.forEach { label ->
                 Box(
                     modifier = Modifier
+                        .height(32.dp)
                         .background(c.bgInput, RoundedCornerShape(50))
                         .pressable(shape = RoundedCornerShape(50)) { send(label) }
-                        .padding(horizontal = OTSpace.s3, vertical = OTSpace.s2),
+                        .padding(horizontal = OTSpace.s3),
+                    contentAlignment = Alignment.Center,
                 ) { Text(label, style = t.caption1, color = c.label2) }
             }
         }
@@ -144,18 +153,18 @@ fun AiScreen(session: Session, onBack: () -> Unit, onOpenCompose: () -> Unit) {
                     cursorBrush = SolidColor(c.blue),
                     modifier = Modifier.fillMaxWidth(),
                     decorationBox = { inner ->
-                        if (input.isEmpty()) Text("让 AI 帮你找或做点什么", style = t.body, color = c.label3)
+                        if (input.isEmpty()) Text("让 AI 在所有邮件里找或做点什么", style = t.body, color = c.label3)
                         inner()
                     },
                 )
             }
             Box(
                 modifier = Modifier
-                    .size(34.dp)
+                    .size(38.dp)
                     .background(if (busy || input.isBlank()) c.label3 else c.blue, CircleShape)
                     .pressable(scale = 0.9f, shape = CircleShape) { send(input) },
                 contentAlignment = Alignment.Center,
-            ) { Icon(Icons.Outlined.ArrowUpward, null, tint = androidx.compose.ui.graphics.Color.White, modifier = Modifier.size(18.dp)) }
+            ) { Icon(Icons.Outlined.ArrowUpward, null, tint = androidx.compose.ui.graphics.Color.White, modifier = Modifier.size(17.dp)) }
         }
     }
 }
@@ -173,26 +182,26 @@ private fun Bubble(m: Msg) {
         Box(
             modifier = Modifier
                 .widthIn(max = 280.dp)
-                .background(if (mine) c.blue else c.bgInput, RoundedCornerShape(18.dp))
-                .padding(horizontal = d.sp3.dp, vertical = d.sp2.dp),
+                .background(
+                    if (mine) c.blue else c.bgInput,
+                    RoundedCornerShape(
+                        topStart = 20.dp, topEnd = 20.dp,
+                        bottomStart = if (mine) 20.dp else 6.dp,
+                        bottomEnd = if (mine) 6.dp else 20.dp,
+                    ),
+                )
+                .padding(horizontal = 14.dp, vertical = 10.dp),
         ) {
             Text(m.text, style = t.body, color = if (mine) androidx.compose.ui.graphics.Color.White else c.label)
         }
-        // 动作回执：成功的灰、失败的蓝底红字（样张 .chat__act--ok / --fail）
+        // 动作回执：纯文字，成功绿、失败红（样张 .chat__acts）
         m.actions.forEach { a ->
-            Row(
-                modifier = Modifier
-                    .padding(top = OTSpace.s1)
-                    .background(if (a.ok) c.bgInput else c.bgInput, RoundedCornerShape(6.dp))
-                    .padding(horizontal = 6.dp, vertical = 2.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Text(
-                    text = if (a.ok) "✓ ${a.type}" else "✕ ${a.type}${if (a.error.isEmpty()) "" else " · " + a.error}",
-                    style = t.caption1,
-                    color = if (a.ok) c.label2 else c.red,
-                )
-            }
+            Text(
+                text = if (a.ok) a.type else "${a.type}${if (a.error.isEmpty()) "" else " · " + a.error}",
+                style = t.caption1,
+                color = if (a.ok) c.green else c.red,
+                modifier = Modifier.padding(top = OTSpace.s1),
+            )
         }
     }
 }

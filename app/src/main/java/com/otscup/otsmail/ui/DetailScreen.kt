@@ -40,6 +40,8 @@ import kotlinx.coroutines.launch
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.AttachFile
+import androidx.compose.material.icons.outlined.ChevronRight
+import androidx.compose.material.icons.outlined.Translate
 import androidx.compose.material3.Icon
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.outlined.StarBorder
@@ -133,11 +135,11 @@ fun DetailScreen(emailId: Long, onBack: () -> Unit, onReply: (MailDetail) -> Uni
                     }.padding(horizontal = 16.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    Text("译", style = t.subhead, color = c.blue)
+                    Icon(Icons.Outlined.Translate, contentDescription = null, tint = c.blue, modifier = Modifier.size(18.dp))
                     Spacer(Modifier.size(10.dp))
                     Text(if (translated.isEmpty()) "翻译邮件" else "已翻译为简体中文", style = t.body, color = c.label)
                     Spacer(Modifier.weight(1f))
-                    Text(if (busy) "…" else "›", style = t.body, color = c.label3)
+                    Icon(Icons.Outlined.ChevronRight, contentDescription = null, tint = c.label3, modifier = Modifier.size(18.dp))
                 }
             }
             if (m.attachments.isNotEmpty()) {

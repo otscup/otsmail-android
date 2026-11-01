@@ -2,6 +2,7 @@ package com.otscup.otsmail.ui
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -24,9 +25,14 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.MailOutline
+import androidx.compose.material3.Icon
 import com.otscup.otsmail.BuildConfig
 import com.otscup.otsmail.data.Api
 import com.otscup.otsmail.data.Session
@@ -86,13 +92,20 @@ fun LoginScreen(
     ) {
         Spacer(Modifier.height(64.dp))
         Box(
-            modifier = Modifier.size(74.dp).background(c.blue, RoundedCornerShape(21.dp)),
+            modifier = Modifier
+                .size(74.dp)
+                .shadow(8.dp, RoundedCornerShape(21.dp))
+                .clip(RoundedCornerShape(21.dp))
+                .background(c.blue, RoundedCornerShape(21.dp)),
             contentAlignment = Alignment.Center,
         ) {
-            Text("O", style = t.title1, color = Color.White, fontWeight = FontWeight.Bold)
+            Icon(Icons.Outlined.MailOutline, contentDescription = null, tint = Color.White, modifier = Modifier.size(34.dp))
         }
         Spacer(Modifier.height(OTSpace.s4))
-        Text("OTSMail", style = t.title1, color = c.label)
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("OTS", style = t.title1, color = c.label, fontWeight = FontWeight.Bold)
+            Text("Mail", style = t.title1, color = c.blue, fontWeight = FontWeight.Bold)
+        }
         Spacer(Modifier.height(4.dp))
         Text("登录到你的邮箱", style = t.subhead, color = c.label2)
         Spacer(Modifier.height(OTSpace.s6))

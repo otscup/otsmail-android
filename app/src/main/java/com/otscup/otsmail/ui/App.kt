@@ -97,21 +97,18 @@ fun OtsApp() {
                 Route.Users -> SlidePage(onDismiss = { route = Route.Settings }) {
                     UsersScreen(
                         onBack = { route = Route.Settings },
-                        onToast = { msg -> scope.launch { snackbar.showSnackbar(msg) } },
                     )
                 }
 
                 Route.Roles -> SlidePage(onDismiss = { route = Route.Settings }) {
                     RolesScreen(
                         onBack = { route = Route.Settings },
-                        onToast = { msg -> scope.launch { snackbar.showSnackbar(msg) } },
                     )
                 }
 
                 Route.RegKeys -> SlidePage(onDismiss = { route = Route.Settings }) {
                     RegKeysScreen(
                         onBack = { route = Route.Settings },
-                        onToast = { msg -> scope.launch { snackbar.showSnackbar(msg) } },
                     )
                 }
 
