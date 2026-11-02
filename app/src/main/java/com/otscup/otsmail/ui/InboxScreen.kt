@@ -252,7 +252,20 @@ fun InboxScreen(
                         Box(
                             Modifier
                                 .size(28.dp)
-                                .tapArea { /* TODO: add account */ },
+                                .tapArea {
+                                    scope.launch {
+                                        runCatching {
+                                            val email = "${java.util.UUID.randomUUID().toString().substring(0, 8)}@${session.email.substringAfter("@")}"
+                                            Api.addAccount(email)
+                                        }.onSuccess {
+                                            accVersion++
+                                            didTop = false
+                                            runCatching { Api.me() }.onSuccess { session.accountId = it.accountId }
+                                        }.onFailure {
+                                            error = it.message ?: "添加失败"
+                                        }
+                                    }
+                                },
                             contentAlignment = Alignment.Center,
                         ) {
                             Icon(Icons.Outlined.Edit, contentDescription = null, tint = c.label2, modifier = Modifier.size(18.dp))
