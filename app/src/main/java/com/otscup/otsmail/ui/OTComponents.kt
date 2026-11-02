@@ -153,17 +153,17 @@ fun OTSearchPill(
     }
 }
 
-/** 胶囊标签（.chip：高 20、圆角 10、11pt、tint 底）+ 分类文字 */
+/** 胶囊标签（.chip：高 20、圆角 10、11pt） */
 @Composable
 fun OTChip(text: String, tint: Color) {
     val c = OT.colors
     Box(
         Modifier
             .clip(RoundedCornerShape(10.dp))
-            .background(tint.copy(alpha = 0.10f))
+            .background(Color(0xFFEEF1F6))
             .padding(horizontal = 7.dp, vertical = 4.dp),
     ) {
-        Text(text, style = OT.type.caption2, color = tint, maxLines = 1)
+        Text(text, style = OT.type.caption2, color = Color(0xFF5B5B66), maxLines = 1)
     }
 }
 
