@@ -142,7 +142,7 @@ object Api {
     suspend fun addAccount(email: String, token: String = ""): JSONObject {
         val body = JSONObject().put("email", email)
         if (token.isNotEmpty()) body.put("token", token)
-        return post("/account/add", body)
+        return obj("POST", "/account/add", body)
     }
 
     /** 通讯录：/contact/list 的 data 是 { list, total }，取 list。返回 名称/邮箱/分组。 */
