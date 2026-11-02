@@ -134,7 +134,7 @@ fun OTSearchPill(
             .padding(start = 10.dp, end = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Icon(Icons.Outlined.Search, contentDescription = null, tint = c.label3, modifier = Modifier.size(16.dp))
+        Icon(Icons.Outlined.Search, contentDescription = null, tint = c.label3, modifier = Modifier.size(15.dp))
         Spacer(Modifier.width(6.dp))
         Box(Modifier.weight(1f)) {
             if (value.isEmpty()) {
