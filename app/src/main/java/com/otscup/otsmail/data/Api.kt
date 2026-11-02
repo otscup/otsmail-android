@@ -138,6 +138,13 @@ object Api {
         return out
     }
 
+    /** 添加邮箱账户（POST /account/add） */
+    suspend fun addAccount(email: String, token: String = ""): JSONObject {
+        val body = JSONObject().put("email", email)
+        if (token.isNotEmpty()) body.put("token", token)
+        return post("/account/add", body)
+    }
+
     /** 通讯录：/contact/list 的 data 是 { list, total }，取 list。返回 名称/邮箱/分组。 */
     suspend fun contacts(): List<Triple<String, String, String>> {
         val list = obj("GET", "/contact/list?page=1&size=200").optJSONArray("list") ?: JSONArray()

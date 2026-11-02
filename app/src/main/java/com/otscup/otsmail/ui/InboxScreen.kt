@@ -244,7 +244,20 @@ fun InboxScreen(
                     }
                     OTDash()
                     Spacer(Modifier.height(OTSpace.s4))
-                    OTGroupHeader("邮箱")
+                    Row(
+                        Modifier.padding(start = 20.dp, end = 16.dp, bottom = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text("邮箱", style = t.footnote, color = c.label2, modifier = Modifier.weight(1f))
+                        Box(
+                            Modifier
+                                .size(28.dp)
+                                .tapArea { /* TODO: add account */ },
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Icon(Icons.Outlined.Edit, contentDescription = null, tint = c.label2, modifier = Modifier.size(18.dp))
+                        }
+                    }
                     OTGroup {
                         mailboxes.forEachIndexed { i, box ->
                             if (i > 0) OTDivider(inset = 16)
