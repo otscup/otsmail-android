@@ -343,7 +343,7 @@ Text(label, style = t.body, color = c.label) }
                                 .background(c.blue)
                                 .tapArea { onOpenAi() },
                             contentAlignment = Alignment.Center,
-                        ) { Icon(Icons.Outlined.AutoAwesome, contentDescription = null, tint = Color.White, modifier = Modifier.size(16.dp)) }
+                        ) { Icon(Icons.Outlined.AutoAwesome, contentDescription = null, tint = Color.White, modifier = Modifier.size(14.dp)) }
                     }
                 }
                 Row(
