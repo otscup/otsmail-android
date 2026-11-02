@@ -78,7 +78,7 @@ fun OTDayHeader(text: String) {
     )
 }
 
-/** 卡间分隔（.group 之间 8dp 空隙用 Spacer 更直观，这里只给卡内发丝线） */
+/** 卡内发丝线（样张 .row + .row::before left:58） */
 @Composable
 fun OTDivider(inset: Int = 0) {
     Box(
