@@ -160,10 +160,10 @@ fun OTChip(text: String, tint: Color) {
     Box(
         Modifier
             .clip(RoundedCornerShape(999.dp))
-            .background(Color(0xFFEEF1F6))
+            .background(c.bgPressed)
             .padding(horizontal = 7.dp, vertical = 4.dp),
     ) {
-        Text(text, style = OT.type.caption2, color = Color(0xFF5B5B66), maxLines = 1)
+        Text(text, style = OT.type.caption2, color = c.label2, maxLines = 1)
     }
 }
 
