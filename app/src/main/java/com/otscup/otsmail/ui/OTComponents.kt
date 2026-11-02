@@ -159,7 +159,7 @@ fun OTChip(text: String, tint: Color) {
     val c = OT.colors
     Box(
         Modifier
-            .clip(RoundedCornerShape(10.dp))
+            .clip(RoundedCornerShape(999.dp))
             .background(Color(0xFFEEF1F6))
             .padding(horizontal = 7.dp, vertical = 4.dp),
     ) {
