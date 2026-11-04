@@ -62,6 +62,7 @@ import com.otscup.otsmail.BuildConfig
 import com.otscup.otsmail.R
 import com.otscup.otsmail.data.Api
 import com.otscup.otsmail.data.Session
+import com.otscup.otsmail.data.ServerAddress
 import com.otscup.otsmail.data.friendlyError
 import com.otscup.otsmail.ui.theme.OT
 import kotlinx.coroutines.Dispatchers
@@ -632,6 +633,11 @@ fun SystemSettingsScreen(
     var showAvatars by remember { mutableStateOf(session.showAvatars) }
     var sendOnEnter by remember { mutableStateOf(session.sendOnEnter.ifEmpty { "enter" }) }
     var sendSheet by remember { mutableStateOf(false) }
+    // 服务器地址：改动即退出登录（旧 token 只对旧服务器有效）
+    var serverSheet by remember { mutableStateOf(false) }
+    var serverDraft by remember { mutableStateOf(session.base) }
+    var serverBusy by remember { mutableStateOf(false) }
+    var serverError by remember { mutableStateOf("") }
 
     // 通知状态：从系统设置返回时（ON_RESUME）重新读，避免显示过期状态
     val context = LocalContext.current
@@ -724,7 +730,12 @@ fun SystemSettingsScreen(
                 OTDivider(inset = 16)
                 SettingRow(title = "版本", value = "${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})")
                 OTDivider(inset = 16)
-                SettingRow(title = "服务器", value = session.base)
+                SettingRow(
+                    title = "服务器",
+                    value = session.base.removeSuffix("/api"),
+                    onClick = { serverDraft = session.base; serverError = ""; serverSheet = true },
+                    showChevron = true,
+                )
             }
             Spacer(Modifier.height(24.dp))
         }
@@ -761,6 +772,78 @@ fun SystemSettingsScreen(
                 ) {
                     Text(mode.second, style = t.body, color = c.label, modifier = Modifier.weight(1f))
                     if (sendOnEnter == mode.first) Text("当前", style = t.footnote, color = c.label3)
+                }
+            }
+            Spacer(Modifier.height(12.dp))
+        }
+    }
+
+    if (serverSheet) {
+        OTSheet(onDismiss = { if (!serverBusy) serverSheet = false }) {
+            Text(
+                "服务器",
+                style = t.title3,
+                color = c.label,
+                modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp),
+            )
+            OTFieldRow(
+                label = "服务器地址",
+                value = serverDraft,
+                onValueChange = {
+                    serverDraft = it
+                    if (serverError.isNotEmpty()) serverError = ""
+                },
+                hint = ServerAddress.HINT,
+            )
+            Text(
+                "修改后需要重新登录：现有登录态只对原服务器有效。",
+                style = t.footnote,
+                color = c.label2,
+                modifier = Modifier.padding(horizontal = 20.dp, vertical = 4.dp),
+            )
+            if (serverError.isNotEmpty()) {
+                Text(
+                    serverError,
+                    style = t.footnote,
+                    color = c.red,
+                    modifier = Modifier.padding(horizontal = 20.dp, vertical = 4.dp),
+                )
+            }
+            Spacer(Modifier.height(8.dp))
+            Box(Modifier.padding(horizontal = 16.dp)) {
+                OTPrimaryButton(
+                    if (serverBusy) "检查中…" else "保存并退出登录",
+                    enabled = !serverBusy,
+                ) {
+                    when (val parsed = ServerAddress.parse(serverDraft)) {
+                        is ServerAddress.Parsed.Fail -> serverError = parsed.message
+                        is ServerAddress.Parsed.Ok -> {
+                            if (parsed.apiBase == session.base) {
+                                serverSheet = false
+                            } else {
+                                serverBusy = true
+                                serverError = ""
+                                scope.launch {
+                                    val problem = ServerAddress.verify(parsed.apiBase)
+                                    if (problem != null) {
+                                        serverError = problem
+                                    } else {
+                                        // 旧 token 属于旧服务器：先清登录态再换地址
+                                        session.clear()
+                                        session.base = parsed.apiBase
+                                        session.loginDomain = ""
+                                        session.apply()
+                                        serverSheet = false
+                                        serverBusy = false
+                                        onToast("服务器地址已更新，请重新登录")
+                                        onBack()
+                                        return@launch
+                                    }
+                                    serverBusy = false
+                                }
+                            }
+                        }
+                    }
                 }
             }
             Spacer(Modifier.height(12.dp))

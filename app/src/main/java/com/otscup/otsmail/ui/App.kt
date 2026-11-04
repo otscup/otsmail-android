@@ -36,6 +36,7 @@ import com.otscup.otsmail.ui.theme.OTTheme
 import kotlinx.coroutines.launch
 
 private sealed interface Route {
+    data object ServerSetup : Route
     data object Login : Route
     data object Inbox : Route
     data class Detail(val id: Long) : Route
@@ -67,7 +68,16 @@ fun OtsApp() {
     // 列表/详情缓存要在 Session 之前初始化：退出登录时会清空它
     MailCache.init(context.applicationContext)
     val session = remember { Session(context).also { it.apply() } }
-    var route by remember { mutableStateOf<Route>(if (session.token.isEmpty()) Route.Login else Route.Inbox) }
+    var route by remember {
+        mutableStateOf<Route>(
+            when {
+                // 没有保存过服务器地址：先走引导页，用户填完并通过校验才进登录页
+                session.base.isEmpty() -> Route.ServerSetup
+                session.token.isEmpty() -> Route.Login
+                else -> Route.Inbox
+            },
+        )
+    }
     // 路由返回栈：系统返回/左缘横滑统一回到上一层，而不是直接退出到桌面
     val backStack = remember { androidx.compose.runtime.mutableStateListOf<Route>() }
     // 写信页自动保存产出的草稿 id：401 被拦去登录后，靠它把写信页原样接回来
@@ -84,7 +94,9 @@ fun OtsApp() {
     // 401 已经统一显示顶部提示，friendlyError 对 401 返回空串，这里再兜一层空消息
     val toast: (String) -> Unit = { msg -> if (msg.isNotEmpty()) scope.launch { snackbar.showSnackbar(msg) } }
     // 收件箱/登录页是根：在根上按返回才退出到桌面
-    androidx.activity.compose.BackHandler(enabled = route != Route.Inbox && route != Route.Login) { goBack() }
+    androidx.activity.compose.BackHandler(
+        enabled = route != Route.Inbox && route != Route.Login && route != Route.ServerSetup,
+    ) { goBack() }
 
     // 登录后空闲时预热 WebView 引擎：第一次建 WebView 约 0.9~1.4s，不预热就全算在开信耗时里
     LaunchedEffect(session.token.isNotEmpty()) {
@@ -134,6 +146,11 @@ fun OtsApp() {
     OTTheme {
         androidx.compose.foundation.layout.Box(Modifier.fillMaxSize().background(OT.colors.bgGrouped)) {
             when (val r = route) {
+                Route.ServerSetup -> ServerSetupScreen(
+                    session = session,
+                    onConfigured = { route = Route.Login },
+                )
+
                 Route.Login -> LoginScreen(
                     session = session,
                     onLoggedIn = {
@@ -235,7 +252,8 @@ fun OtsApp() {
                 Route.SystemSettings -> SlidePage(onDismiss = { goBack() }) {
                     SystemSettingsScreen(
                         session = session,
-                        onBack = { goBack() },
+                        // 改服务器地址会清掉登录态，直接回登录页而不是停在已登出的设置页
+                        onBack = { if (session.token.isEmpty()) route = Route.Login else goBack() },
                         onToast = toast,
                         onOpenServerSettings = { go(Route.ServerSettings) },
                         onOpenAdmin = { key ->

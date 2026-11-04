@@ -2,7 +2,7 @@
 
 OTS Mail 的 Android 客户端。Kotlin + Jetpack Compose，Material 3，单 Activity，包名 `com.otscup.otsmail`。
 
-后端不是本仓库：服务端（Cloudflare Worker + D1）与网页端在 [otscup/otsmail](https://github.com/otscup/otsmail)，本仓库只是它的手机壳。装好后登录你的自建实例即可使用。
+后端不是本仓库：服务端（Cloudflare Worker + D1）与网页端在 [otscup/otsmail](https://github.com/otscup/otsmail)，本仓库只是它的手机壳。客户端不内置任何公共服务器，首次启动需要填写你自己的实例地址。
 
 ## 功能
 
@@ -21,9 +21,19 @@ OTS Mail 的 Android 客户端。Kotlin + Jetpack Compose，Material 3，单 Act
 
 下载入口也提供在 [otscup/otsmail 的 Releases](https://github.com/otscup/otsmail/releases/tag/android-v0.2.0)（同一个安装包，与服务端/网页版放在一起）。
 
+**首次打开会先要求填写你自己的服务器地址**（形如 `https://mail.example.com`）。客户端不带任何默认服务器，作者也不提供公共邮箱服务；请先按下面的「自托管」一节部署你自己的实例。地址会通过 `/api/setting/websiteConfig` 校验，通过后才会进入登录页；之后可在登录页右上角「服务器」或设置 → 系统设置 → 服务器里修改（修改会退出登录）。
+
+**推送需要你自己的 Firebase 项目**，作者打包的 Release 里没有你的配置。要开推送：
+
+1. Firebase 控制台新建项目 → 添加 Android 应用，包名填 `com.otscup.otsmail`
+2. 下载 `google-services.json` 放到 `app/google-services.json`，重新构建并安装
+3. 按第 4 节把 Firebase 服务账号的三个值写进你自己实例的 Worker
+
+不配 Firebase 也能正常收发邮件，只是没有推送。
+
 系统要求：Android 8.0（API 26）及以上。
 
-> 签名是固定的。后续版本直接覆盖安装即可；如果从别处装过同包名的包，会因签名不一致而装不上，需要先卸载（会清掉登录态）。
+> **作者提供的 Release 包只用于连接使用者自己的 OTSMail 实例**，不要把它当作公共服务器客户端；公共地址随时可能关闭。签名固定，后续版本直接覆盖安装即可；如果从别处装过同包名的包，会因签名不一致而装不上，需要先卸载（会清掉登录态）。
 
 ## 自托管：从零跑起来
 
@@ -47,7 +57,7 @@ OTS Mail 的 Android 客户端。Kotlin + Jetpack Compose，Material 3，单 Act
 
 发布签名：自己生成一个 keystore，**放在仓库外**，然后在仓库根新建 `keystore.properties`（该文件已被 `.gitignore` 忽略，不要提交）：
 
-> CI 只自动构建 **debug 包**（见 `.github/workflows/android.yml`）。release 包目前仍由本地手工签名构建，keystore 不进仓库、不进 Secrets。
+> CI 会在打 `v*` tag 时自动出正式签名包（keystore 存在仓库 Secrets 里，见 `.github/workflows/release.yml`）；日常 debug 包由 `.github/workflows/android.yml` 构建。本地仍需上面的 `keystore.properties` 才能手工出正式包。
 
 ```bash
 keytool -genkeypair -v -keystore ~/keys/otsmail-release.jks \
@@ -66,7 +76,7 @@ keyPassword=你的口令
 
 > **务必备份 keystore**。密钥丢了就无法给已安装用户推送覆盖升级，只能换包名重发。
 
-后端地址写死在 `app/build.gradle.kts` 的 `BASE_URL`（默认 `https://mail.otscup.com/api`）。自建实例改这一行，或装好后在登录页的「服务器」里改（会记在本地）。
+客户端不含内置服务器地址，首次启动必须填写你的实例地址（形如 `https://mail.example.com`，只需要域名；也可以显式写成 `.../api`）。地址保存在本机，之后可在登录页右上角「服务器」或设置页里修改。`app/build.gradle.kts` 里没有 `BASE_URL` 之类的运行时默认值，生产代码里也没有硬编码域名兜底。
 
 ### 3. Firebase 推送（可选）
 
@@ -127,13 +137,15 @@ app/src/main/java/com/otscup/otsmail/
 ├── data/                    数据层（无第三方网络库，HttpURLConnection + org.json）
 │   ├── Api.kt               全部 HTTP 接口与错误映射
 │   ├── Session.kt           账号、服务器地址、token 的本地持久化
+│   ├── ServerAddress.kt     服务器地址规范化 + websiteConfig 校验（自托管引导）
 │   ├── MailCache.kt         列表内存快照 + SQLite 缓存，保证进出详情不丢滚动位置
 │   ├── Drafts.kt            草稿本地存取
 │   ├── PushManager.kt       FCM token 获取与设备登记（失败静默，不阻塞界面）
 │   └── OAuthFlow.kt         OAuth 待处理请求 + 回调总线（跨进程存活）
 ├── push/                    FCM 接收、通知构建、去重、深链路由
 └── ui/                      Compose 页面与组件
-    ├── App.kt               路由（登录 → 收件箱 ↔ 详情 / 写信，未引 navigation 库）
+    ├── App.kt               路由（服务器引导 → 登录 → 收件箱 ↔ 详情 / 写信，未引 navigation 库）
+    ├── ServerSetupScreen.kt 首次启动的服务器地址引导页
     ├── LoginScreen.kt       账号密码 / 2FA / OIDC（Custom Tabs）
     ├── InboxScreen.kt       收件箱与筛选
     ├── DetailScreen.kt      HTML 正文 WebView、附件、星标

@@ -76,11 +76,6 @@ android {
         compose = true
         buildConfig = true
     }
-
-    defaultConfig {
-        // 真实后端（生产 Worker otsmail）；本地 dev 可登录页手填 http://127.0.0.1:8789/api
-        buildConfigField("String", "BASE_URL", "\"https://mail.otscup.com/api\"")
-    }
 }
 
 dependencies {

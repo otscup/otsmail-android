@@ -58,7 +58,6 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
-import com.otscup.otsmail.BuildConfig
 import com.otscup.otsmail.R
 import com.otscup.otsmail.data.Api
 import com.otscup.otsmail.data.ApiException
@@ -66,6 +65,7 @@ import com.otscup.otsmail.data.OAuthCallbackBus
 import com.otscup.otsmail.data.OAuthPendingStore
 import com.otscup.otsmail.data.OAuthRequest
 import com.otscup.otsmail.data.Session
+import com.otscup.otsmail.data.ServerAddress
 import com.otscup.otsmail.data.friendlyError
 import com.otscup.otsmail.ui.theme.OT
 import kotlinx.coroutines.launch
@@ -88,12 +88,12 @@ private val LoginAccentLight = Color(0xFF5C6A76)
 private val LoginAccentDark = Color(0xFF9BAAB8)
 
 @Composable
-private fun loginAccent(): Color =
+internal fun loginAccent(): Color =
     if (androidx.compose.foundation.isSystemInDarkTheme()) LoginAccentDark else LoginAccentLight
 
 /** 中性主按钮：亮色黑底白字、暗色白底黑字；不使用品牌蓝，也不加阴影/渐变。 */
 @Composable
-private fun LoginPrimaryButton(text: String, enabled: Boolean = true, onClick: () -> Unit) {
+internal fun LoginPrimaryButton(text: String, enabled: Boolean = true, onClick: () -> Unit) {
     val t = OT.type
     val c = OT.colors
     Box(
@@ -119,13 +119,15 @@ fun LoginScreen(session: Session, onLoggedIn: () -> Unit) {
     val c = OT.colors
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    var base by remember { mutableStateOf(session.base.ifEmpty { BuildConfig.BASE_URL }) }
+    // 服务器地址只来自本机保存（首次启动由 ServerSetupScreen 写入），没有内置默认值
+    var base by remember { mutableStateOf(session.base) }
     var domain by remember { mutableStateOf(session.loginDomain.ifEmpty { hostOf(base) }) }
     var email by remember { mutableStateOf("") }
     var password by remember { mutableStateOf("") }
     var loading by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf("") }
     var serverSheet by remember { mutableStateOf(false) }
+    var serverBusy by remember { mutableStateOf(false) }
     // 登录前可读的站点配置：注册开关、注册码策略、域名列表、第三方登录开关
     var config by remember { mutableStateOf<JSONObject?>(null) }
     var twoFactorCode by remember { mutableStateOf("") }
@@ -340,7 +342,7 @@ fun LoginScreen(session: Session, onLoggedIn: () -> Unit) {
                 label = "服务器地址",
                 value = base,
                 onValueChange = { base = it },
-                hint = "https://otsmail.example.com/api",
+                hint = ServerAddress.HINT,
                 number = false,
             )
             OTDivider(inset = 16)
@@ -351,11 +353,31 @@ fun LoginScreen(session: Session, onLoggedIn: () -> Unit) {
                 hint = "otsmail.example.com",
             )
             Box(Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
-                LoginPrimaryButton("保存", enabled = true) {
-                    session.base = base.trim()
-                    session.loginDomain = domain
-                    session.apply()
-                    serverSheet = false
+                LoginPrimaryButton(if (serverBusy) "检查中…" else "保存", enabled = !serverBusy) {
+                    when (val parsed = ServerAddress.parse(base)) {
+                        is ServerAddress.Parsed.Fail -> toast(parsed.message)
+                        is ServerAddress.Parsed.Ok -> {
+                            serverBusy = true
+                            scope.launch {
+                                val problem = ServerAddress.verify(parsed.apiBase)
+                                if (problem != null) {
+                                    toast(problem)
+                                } else {
+                                    if (parsed.apiBase != session.base) {
+                                        // 旧 token 属于旧服务器：换地址前先清掉登录态
+                                        session.clear()
+                                        domain = hostOf(parsed.apiBase)
+                                    }
+                                    session.base = parsed.apiBase
+                                    session.loginDomain = domain
+                                    session.apply()
+                                    base = parsed.apiBase
+                                    serverSheet = false
+                                }
+                                serverBusy = false
+                            }
+                        }
+                    }
                 }
             }
             Spacer(Modifier.height(12.dp))
