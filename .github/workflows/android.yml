@@ -1,0 +1,39 @@
+name: Android CI
+
+on:
+  push:
+    branches: [ master ]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Build debug APK
+        # 跳过 lintVitalRelease：本机 Windows + AGP 8.7.2 下该任务长时间无进展（实测卡死），
+        # CI 一并跳过，避免流水线无意义地空转。
+        # 没有 app/google-services.json 也能构建：插件按文件是否存在决定是否启用。
+        run: |
+          chmod +x ./gradlew
+          ./gradlew assembleDebug -x lintVitalRelease --console=plain
+
+      - name: Upload debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: otsmail-debug
+          path: app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error

@@ -45,6 +45,8 @@ OTS Mail 的 Android 客户端。Kotlin + Jetpack Compose，Material 3，单 Act
 
 发布签名：自己生成一个 keystore，**放在仓库外**，然后在仓库根新建 `keystore.properties`（该文件已被 `.gitignore` 忽略，不要提交）：
 
+> CI 只自动构建 **debug 包**（见 `.github/workflows/android.yml`）。release 包目前仍由本地手工签名构建，keystore 不进仓库、不进 Secrets。
+
 ```bash
 keytool -genkeypair -v -keystore ~/keys/otsmail-release.jks \
   -alias otsmail -keyalg RSA -keysize 2048 -validity 10000
@@ -161,3 +163,7 @@ app/src/main/java/com/otscup/otsmail/
 | minSdk | 26 |
 
 `assembleRelease` 若卡在 `lintVitalAnalyzeRelease`，可加 `-x lintVitalRelease` 跳过（本机在 Windows + 特定 AGP 组合下会长时间无进展）。
+
+## 许可
+
+MIT License，全文见 [LICENSE](LICENSE)。Copyright (c) 2026 OtsCup。
