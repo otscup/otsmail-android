@@ -96,12 +96,17 @@ private fun AdminBar(title: String, action: String? = null, onAction: () -> Unit
     }
 }
 
-/* ---------------- 全部邮件 ---------------- */
+/* ---------------- 全部邮件（全站口径） ---------------- */
 
-/** 分组 pill 与搜索词放进程级：进详情丢 composition，返回后仍是同一分组、同一页、同一位置。 */
+/**
+ * 分组 pill 与搜索词放进程级：进详情丢 composition，返回后仍是同一分组、同一页、同一位置。
+ * 缓存 key 必须带 scope（site-mail|），否则会和旧版「当前用户全部邮箱」的 allmail| 快照串数据。
+ */
 internal object AllMailUi {
     var pill by mutableStateOf("all")
     var keyword by mutableStateOf("")
+    /** /my/loginUserInfo 的 userId：用来判断这一封是不是自己的邮件（他人邮件详情服务端会拒绝） */
+    var myUserId by mutableStateOf(-1L)
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -122,12 +127,15 @@ fun AllMailScreen(onBack: () -> Unit, onOpen: (Long) -> Unit, onToast: (String) 
         }
     }
 
-    val key = "allmail|pill:$pill|kw:${keyword.trim()}"
+    // scope 写进 key：全站列表与「我的全部邮箱」是两套数据，绝不能共用快照
+    val key = "site-mail|pill:$pill|kw:${keyword.trim()}"
     val store = MailCache.list(key, 0L)
-    // 「全部邮件」天然是多帐户混合列表：用 /account/list 做本地映射，服务端列表已带 accountId
-    var accountEmails by remember { mutableStateOf<Map<Long, String>>(emptyMap()) }
+    var myUserId by remember { mutableStateOf(AllMailUi.myUserId) }
     LaunchedEffect(Unit) {
-        runCatching { Api.accounts() }.onSuccess { accountEmails = it.toMap() }
+        if (myUserId <= 0) runCatching { Api.me() }.onSuccess {
+            myUserId = it.userId
+            AllMailUi.myUserId = it.userId
+        }
     }
     val items = store.items
     var restoreToken by remember { mutableStateOf(0) }
@@ -137,43 +145,7 @@ fun AllMailScreen(onBack: () -> Unit, onOpen: (Long) -> Unit, onToast: (String) 
     var notice by remember { mutableStateOf("") }
     val ptrState = rememberPullToRefreshState()
 
-    // 多选：全部邮件同样是长按进入，批量动作走 MailBatchOps 逐条串行
-    var selectMode by remember { mutableStateOf(false) }
-    var selected by remember { mutableStateOf<Set<Long>>(emptySet()) }
-    var batchBusy by remember { mutableStateOf(false) }
-    var moveSheet by remember { mutableStateOf(false) }
-    fun exitSelect() {
-        selectMode = false
-        selected = emptySet()
-    }
-    BackHandler(enabled = selectMode || moveSheet) {
-        if (moveSheet) moveSheet = false else exitSelect()
-    }
-
-    fun runBatch(action: MailBatch) {
-        if (batchBusy || selected.isEmpty()) return
-        val ids = selected.toList()
-        batchBusy = true
-        scope.launch {
-            val failed = MailBatchOps.run(action, ids)
-            batchBusy = false
-            exitSelect()
-            notice = if (failed > 0) "$failed 封失败，其余已处理" else "已处理 ${ids.size} 封"
-        }
-    }
-
-    fun runMove(target: String) {
-        if (batchBusy || selected.isEmpty()) return
-        val ids = selected.toList()
-        batchBusy = true
-        moveSheet = false
-        scope.launch {
-            val failed = MailBatchOps.move(target, ids)
-            batchBusy = false
-            exitSelect()
-            notice = if (failed > 0) "$failed 封失败，其余已处理" else "已移动 ${ids.size} 封"
-        }
-    }
+    // 全站列表只读：不接批量删除/移动（all-email:delete 按 emailId 物理删除且无 userId 过滤，会误删他人邮件）
 
     LaunchedEffect(notice) {
         if (notice.isNotEmpty()) {
@@ -195,13 +167,18 @@ fun AllMailScreen(onBack: () -> Unit, onOpen: (Long) -> Unit, onToast: (String) 
             }
     }
 
-    suspend fun fetchRaw(next: Int): JSONObject = when (pill) {
-        "inbox" -> Api.allEmailsRaw(next, keyword, type = 0)
-        "sent" -> Api.allEmailsRaw(next, keyword, type = 1)
-        "deleted" -> Api.allEmailsRaw(next, keyword, mailbox = "deleted")
-        "noone" -> Api.allEmailsRaw(next, keyword, type = 1, status = 7)
-        else -> Api.allEmailsRaw(next, keyword, mailbox = "all")
-    }
+    suspend fun fetchRaw(next: Int): JSONObject = Api.siteEmailsRaw(
+        page = next,
+        keyword = keyword,
+        type = when (pill) {
+            "inbox" -> "receive"
+            "sent" -> "send"
+            "deleted" -> "delete"
+            "noone" -> "noone"
+            else -> "all"
+        },
+        timeSort = 0,
+    )
 
     suspend fun refreshFirst(toTop: Boolean = false) {
         val (fresh, total) = Api.parseList(fetchRaw(1))
@@ -294,21 +271,8 @@ fun AllMailScreen(onBack: () -> Unit, onOpen: (Long) -> Unit, onToast: (String) 
     }
 
     Column(Modifier.fillMaxSize().background(c.bgGrouped).statusBarsPadding().navigationBarsPadding()) {
-        if (selectMode) {
-            MailSelectionHeader(
-                count = selected.size,
-                allSelected = items.isNotEmpty() && selected.size == items.size,
-                onExit = { exitSelect() },
-                onToggleAll = {
-                    selected = if (items.isNotEmpty() && selected.size == items.size) emptySet()
-                    else items.map { it.emailId }.toSet()
-                },
-            )
-        } else {
-            AdminBar("全部邮件", onBack = onBack)
-        }
-        if (!selectMode) {
-            Column(Modifier.padding(horizontal = d.sp4.dp, vertical = d.sp2.dp)) {
+        AdminBar("全部邮件", onBack = onBack)
+        Column(Modifier.padding(horizontal = d.sp4.dp, vertical = d.sp2.dp)) {
             OTSearchPill(value = kwText, placeholder = "搜索发件人、主题、邮箱", onValueChange = { kwText = it })
             Spacer(Modifier.height(d.sp2.dp))
             Row(
@@ -327,7 +291,11 @@ fun AllMailScreen(onBack: () -> Unit, onOpen: (Long) -> Unit, onToast: (String) 
                     ) { Text(label, style = t.caption1, color = if (on) Color.White else c.label2) }
                 }
             }
-        }
+            Text(
+                "全站只读：不提供批量删除/移动（网页端 /allEmail/delete 无 userId 过滤，会跨用户误删）",
+                style = t.caption2, color = c.label3,
+                modifier = Modifier.padding(top = OTSpace.s2),
+            )
         }
         if (store.error.isNotEmpty()) {
             Text(store.error, style = t.footnote, color = c.red, modifier = Modifier.padding(d.sp4.dp))
@@ -359,11 +327,16 @@ fun AllMailScreen(onBack: () -> Unit, onOpen: (Long) -> Unit, onToast: (String) 
         } else {
             LazyColumn(modifier = Modifier.fillMaxSize(), state = listState) {
             item(key = "count") {
-                Text(
-                    "共 ${store.total} 封 · 已加载 ${items.size} 封",
-                    style = t.footnote, color = c.label2,
-                    modifier = Modifier.padding(horizontal = d.sp5.dp, vertical = d.sp2.dp),
-                )
+                Column(Modifier.padding(horizontal = d.sp5.dp, vertical = d.sp2.dp)) {
+                    Text(
+                        "全站共 ${store.total} 封 · 已加载 ${items.size} 封",
+                        style = t.footnote, color = c.label2,
+                    )
+                    Text(
+                        "全站口径：同网页 /allEmail/list，含已删除；抽屉「收件箱」徽标只统计我的邮箱，两者不可比",
+                        style = t.caption2, color = c.label3,
+                    )
+                }
             }
             items(items, key = { it.emailId }) { m ->
                 OTMailRow(
@@ -382,21 +355,22 @@ fun AllMailScreen(onBack: () -> Unit, onOpen: (Long) -> Unit, onToast: (String) 
                     starred = m.starred,
                     category = null,
                     onOpen = {
-                        if (selectMode) {
-                            selected = if (m.emailId in selected) selected - m.emailId else selected + m.emailId
+                        // 服务端 /email/detail 仍按 userId 校验：别人的邮件点开只会报错
+                        if (myUserId > 0 && m.userId != myUserId) {
+                            notice = "他人邮件：全站列表只读，详情请到网页端查看"
                         } else {
                             onOpen(m.emailId)
                         }
                     },
-                    onLongPress = {
-                        if (!selectMode) selectMode = true
-                        selected = if (m.emailId in selected) selected - m.emailId else selected + m.emailId
-                    },
-                    selectionMode = selectMode,
-                    selected = m.emailId in selected,
+                    onLongPress = null,
+                    selectionMode = false,
+                    selected = false,
                     onStar = {},
-                    mailboxLabel = accountEmails[m.accountId]?.takeIf { it.isNotBlank() }
-                        ?: m.recipient.takeIf { it.isNotBlank() && m.type != 1 },
+                    // 全站数据里同一账户/不同账户混杂：行尾必须显示收件邮箱，拿不到才退回收件人
+                    mailboxLabel = m.toEmail.takeIf { it.isNotBlank() }
+                        ?: m.recipient.takeIf { it.isNotBlank() },
+                    // 所属用户（登录邮箱）单列一行小字；userId 只用来判断是否本人，不直接展示
+                    ownerLabel = m.userEmail.takeIf { it.isNotBlank() && it != m.toEmail },
                 )
                 HorizontalDivider(color = c.separatorOpaque, thickness = 0.5.dp, modifier = Modifier.padding(start = 58.dp))
             }
@@ -410,40 +384,6 @@ fun AllMailScreen(onBack: () -> Unit, onOpen: (Long) -> Unit, onToast: (String) 
             }
             }
         }
-        }
-        if (selectMode) {
-            MailSelectionActions(
-                busy = batchBusy,
-                onAction = { runBatch(it) },
-                onMove = { moveSheet = true },
-            )
-        }
-    }
-
-    if (moveSheet) {
-        OTSheet(onDismiss = { moveSheet = false }) {
-            Text(
-                "移动到",
-                style = t.title3,
-                color = c.label,
-                modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp),
-            )
-            categories.forEach { (key, label) ->
-                Row(
-                    Modifier
-                        .fillMaxWidth()
-                        .height(48.dp)
-                        .tapArea { runMove(key) }
-                        .padding(horizontal = 20.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Text(label, style = t.body, color = c.label, modifier = Modifier.weight(1f))
-                    if (batchBusy) androidx.compose.material3.CircularProgressIndicator(
-                        color = c.blue, strokeWidth = 2.dp, modifier = Modifier.size(16.dp),
-                    )
-                }
-            }
-            Spacer(Modifier.height(12.dp))
         }
     }
 }

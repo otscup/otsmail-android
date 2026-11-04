@@ -334,6 +334,9 @@ object MailCache {
         .put("status", status)
         .put("accountId", accountId)
         .put("recipient", recipient)
+        .put("userId", userId)
+        .put("toEmail", toEmail)
+        .put("userEmail", userEmail)
 
     private fun parseItem(o: JSONObject): MailItem = MailItem(
         emailId = o.optLong("emailId"),
@@ -349,6 +352,9 @@ object MailCache {
         status = o.optInt("status"),
         accountId = o.optLong("accountId"),
         recipient = o.optString("recipient"),
+        userId = o.optLong("userId"),
+        toEmail = o.optString("toEmail"),
+        userEmail = o.optString("userEmail"),
     )
 
     private fun MailDetail.toJson(): JSONObject = JSONObject()

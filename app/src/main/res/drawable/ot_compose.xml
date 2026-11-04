@@ -4,12 +4,26 @@
     android:height="24dp"
     android:viewportWidth="24"
     android:viewportHeight="24">
-    <!-- 单支斜铅笔：五边形笔身，笔尾略宽、笔尖收窄；45° 斜轴，排版中心 12/12 -->
-    <path
-        android:fillColor="@android:color/transparent"
-        android:strokeColor="#FF000000"
-        android:strokeWidth="2.0"
-        android:strokeLineCap="round"
-        android:strokeLineJoin="round"
-        android:pathData="M3.94,18.97 L7.2,15.41 L17.89,5.03 L20.06,7.2 L9.99,17.6 Z" />
+    <!-- 三段式线稿铅笔（V3 定稿）：笔尖三角 + 笔身 + 圆角笔帽，笔帽接缝在 16.6；
+         描边 1.8、圆头圆角，整体绕中心 -45°（笔尖朝左下）。
+         颜色最终由 Compose 的 Icon tint 决定（亮 #3A3A3C / 暗 #D1D1D6），这里只留亮色兜底。 -->
+    <group
+        android:pivotX="12"
+        android:pivotY="12"
+        android:rotation="-45">
+        <path
+            android:fillColor="@android:color/transparent"
+            android:strokeColor="#FF3A3A3C"
+            android:strokeWidth="1.8"
+            android:strokeLineCap="round"
+            android:strokeLineJoin="round"
+            android:pathData="M3.4,12 L7.4,9.8 L18.2,9.8 A2.2,2.2 0 0 1 18.2,14.2 L7.4,14.2 Z" />
+        <path
+            android:fillColor="@android:color/transparent"
+            android:strokeColor="#FF3A3A3C"
+            android:strokeWidth="1.8"
+            android:strokeLineCap="round"
+            android:strokeLineJoin="round"
+            android:pathData="M16.6,9.8 L16.6,14.2" />
+    </group>
 </vector>

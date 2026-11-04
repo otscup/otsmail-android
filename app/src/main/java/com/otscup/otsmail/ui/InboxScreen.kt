@@ -30,7 +30,6 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.AdminPanelSettings
 import androidx.compose.material.icons.outlined.AllInbox
-import androidx.compose.material.icons.outlined.AutoAwesome
 import androidx.compose.material.icons.outlined.Campaign
 import androidx.compose.material.icons.outlined.ChevronRight
 import androidx.compose.material.icons.outlined.Delete
@@ -75,6 +74,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.PathEffect
@@ -153,6 +153,16 @@ internal object InboxUi {
     var forceTick by mutableStateOf(0)
 }
 
+/**
+ * 抽屉里「分类 / 账户」两组的展开状态：进程级，和 InboxUi 同级。
+ * 进详情再返回、切账户都不丢；不落盘，冷启动回到折叠态（默认只露前 3 项）。
+ * 两组互不覆盖：展开分类不影响账户，反之亦然。
+ */
+internal object DrawerUi {
+    var categoriesExpanded by mutableStateOf(false)
+    var accountsExpanded by mutableStateOf(false)
+}
+
 /** 列表是「日期 stickyHeader + 邮件行」拼起来的扁平索引，恢复滚动位置要按这个口径算。 */
 private fun flatIndexOf(items: List<MailItem>, emailId: Long): Int? {
     var idx = 0
@@ -213,6 +223,18 @@ fun InboxScreen(
     var accounts by remember { mutableStateOf<List<Pair<Long, String>>>(emptyList()) }
     var counts by remember { mutableStateOf<Map<String, Int>>(emptyMap()) }
     var catCounts by remember { mutableStateOf<Map<String, Int>>(emptyMap()) }
+
+    /**
+     * 计数必须跟随抽屉当前选中的范围：
+     * 单帐户 → accountId + allReceive=0（服务端才按该 account 统计）；
+     * 「全部帐户」→ accountId=0 + allReceive=1（该 user 名下全部 account 汇总）。
+     * 之前不带参数，服务端永远返回用户级总数，切帐户后徽标看起来不刷新。
+     */
+    suspend fun loadCounts() {
+        val acc = if (allAccounts) 0L else accountId
+        runCatching { Api.menuCounts(acc, allAccounts) }.onSuccess { counts = it }
+        runCatching { Api.categoryCounts(acc, allAccounts) }.onSuccess { catCounts = it }
+    }
     var showAvatars by remember { mutableStateOf(session.showAvatars) }
     // 多帐户混合列表用：accountId → 邮箱地址（/account/list 已有，不新增服务端依赖）
     val accountEmails = remember(accounts) { accounts.toMap() }
@@ -425,8 +447,7 @@ fun InboxScreen(
             batchBusy = false
             exitSelect()
             notice = if (failed > 0) "$failed 封失败，其余已处理" else "已处理 ${ids.size} 封"
-            runCatching { Api.menuCounts() }.onSuccess { counts = it }
-            runCatching { Api.categoryCounts() }.onSuccess { catCounts = it }
+            loadCounts()
         }
     }
 
@@ -442,8 +463,7 @@ fun InboxScreen(
             batchBusy = false
             exitSelect()
             notice = if (failed > 0) "$failed 封失败，其余已处理" else "已移动 ${ids.size} 封"
-            runCatching { Api.menuCounts() }.onSuccess { counts = it }
-            runCatching { Api.categoryCounts() }.onSuccess { catCounts = it }
+            loadCounts()
         }
     }
 
@@ -476,8 +496,7 @@ fun InboxScreen(
         }
         store.loading = false
         runCatching { Api.accounts() }.onSuccess { accounts = it }
-        runCatching { Api.menuCounts() }.onSuccess { counts = it }
-        runCatching { Api.categoryCounts() }.onSuccess { catCounts = it }
+        loadCounts()
     }
 
     // 已经在「全部帐户·收件箱」时再点抽屉里的「全部帐户」不改变 listKey，
@@ -537,8 +556,17 @@ fun InboxScreen(
                                 }
                             }
                             Column(Modifier.padding(horizontal = 8.dp)) {
-                                // 样张顺序：先列帐户，再是"全部帐户"，最后"添加帐户"
-                                accounts.forEachIndexed { i, acc ->
+                                // 样张顺序：先列帐户，再是"全部帐户"，最后"添加帐户"。
+                                // 超过 3 个帐户时默认只露前 3 个，其余收进「更多账户 (N)」；固定项始终可见。
+                                val accountLimit = 3
+                                val visibleAccountIdx =
+                                    if (DrawerUi.accountsExpanded || accounts.size <= accountLimit) {
+                                        accounts.indices.toList()
+                                    } else {
+                                        accounts.indices.take(accountLimit)
+                                    }
+                                visibleAccountIdx.forEach { i ->
+                                    val acc = accounts[i]
                                     val accColor = accColor(i)
                                     DrawerRow(
                                         icon = null,
@@ -550,11 +578,37 @@ fun InboxScreen(
                                                 session.accountId = acc.first
                                                 session.apply()
                                                 InboxUi.accountTick++
+                                                // 切帐户必须复位分类：旧分类（如「推广」）在新邮箱里
+                                                // 往往一封都没有，列表看起来像空的，选中态也残留
+                                                InboxUi.category = ""
                                             }
                                             InboxUi.allAccounts = false
                                             close()
                                         },
                                         leading = { OTAccountDot(accColor, unread = false, size = 12) },
+                                    )
+                                }
+                                if (accounts.size > accountLimit) {
+                                    DrawerRow(
+                                        icon = null,
+                                        label = if (DrawerUi.accountsExpanded) {
+                                            "收起账户"
+                                        } else {
+                                            "更多账户 (${accounts.size - accountLimit})"
+                                        },
+                                        selected = false,
+                                        subhead = true,
+                                        onClick = { DrawerUi.accountsExpanded = !DrawerUi.accountsExpanded },
+                                        trailing = {
+                                            Icon(
+                                                painterResource(R.drawable.ot_chevron_right),
+                                                contentDescription = null,
+                                                tint = c.label3,
+                                                modifier = Modifier
+                                                    .size(16.dp)
+                                                    .rotate(if (DrawerUi.accountsExpanded) -90f else 90f),
+                                            )
+                                        },
                                     )
                                 }
                                 DrawerRow(
@@ -615,7 +669,15 @@ fun InboxScreen(
                             OTDash()
                             Column(Modifier.padding(horizontal = 8.dp)) {
                                 DrawerLabel("分类")
-                                categories.forEach { (key, label) ->
+                                // 分类同理：默认前 3 项，其余收进「更多分类 (N)」；≤3 项时不显示该行。
+                                val categoryLimit = 3
+                                val visibleCategories =
+                                    if (DrawerUi.categoriesExpanded || categories.size <= categoryLimit) {
+                                        categories
+                                    } else {
+                                        categories.take(categoryLimit)
+                                    }
+                                visibleCategories.forEach { (key, label) ->
                                     DrawerRow(
                                         icon = categoryIcon(key),
                                         label = label,
@@ -628,6 +690,28 @@ fun InboxScreen(
                                         trailing = {
                                             val n = catCounts[key] ?: 0
                                             if (n > 0) Text("$n", style = t.caption1, color = c.label2)
+                                        },
+                                    )
+                                }
+                                if (categories.size > categoryLimit) {
+                                    DrawerRow(
+                                        icon = null,
+                                        label = if (DrawerUi.categoriesExpanded) {
+                                            "收起分类"
+                                        } else {
+                                            "更多分类 (${categories.size - categoryLimit})"
+                                        },
+                                        selected = false,
+                                        onClick = { DrawerUi.categoriesExpanded = !DrawerUi.categoriesExpanded },
+                                        trailing = {
+                                            Icon(
+                                                painterResource(R.drawable.ot_chevron_right),
+                                                contentDescription = null,
+                                                tint = c.label3,
+                                                modifier = Modifier
+                                                    .size(16.dp)
+                                                    .rotate(if (DrawerUi.categoriesExpanded) -90f else 90f),
+                                            )
                                         },
                                     )
                                 }
@@ -692,7 +776,7 @@ fun InboxScreen(
                                     .tapArea { onOpenAi() },
                                 contentAlignment = Alignment.Center,
                             ) {
-                                Icon(Icons.Outlined.AutoAwesome, contentDescription = "AI 助手", tint = c.blue, modifier = Modifier.size(22.dp))
+                                AiStarGradient(22.dp)
                             }
                         }
                     }

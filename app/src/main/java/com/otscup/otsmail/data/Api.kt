@@ -46,6 +46,12 @@ data class MailItem(
     val accountId: Long = 0,
     /** 收件地址（服务端 recipient 数组里的第一个）；发件行为收件人列表首项，展示时按 type 区分 */
     val recipient: String = "",
+    /** 归属用户：全站列表按它判断「是不是自己的邮件」，普通列表为 0 */
+    val userId: Long = 0,
+    /** 收件邮箱原文（服务端 toEmail）：全站列表行内必须显示，否则分不清邮件属于哪个邮箱 */
+    val toEmail: String = "",
+    /** 该邮件所属用户的登录邮箱（服务端 userEmail），用于行内归属标签 */
+    val userEmail: String = "",
 )
 
 data class MailAtt(val filename: String, val key: String)
@@ -84,6 +90,8 @@ data class Me(
     val avatar: String = "",
     val twoFactor: Boolean = false,
     val twoFactorRequired: Boolean = false,
+    /** 服务端 user.type 原样（当 roleId 用）；0 = 系统管理员，全站邮件入口的门槛之一 */
+    val type: Long = -1,
 )
 
 /**
@@ -244,6 +252,7 @@ object Api {
             avatar = d.optString("avatar"),
             twoFactor = d.optBoolean("twoFactor", false),
             twoFactorRequired = d.optBoolean("twoFactorRequired", false),
+            type = d.optLong("type", -1L),
         )
     }
 
@@ -442,6 +451,39 @@ object Api {
         }
         return obj("GET", q.toString())
     }
+
+    /**
+     * GET /allEmail/list —— 全站口径（所有域名下所有 account，无 user_id 过滤）。
+     * 与网页版 /all-email 同一个接口、同一组参数，口径见 docs/全站邮件范围查证.md。
+     * type 是字符串 all/receive/send/delete/noone；page 从 1 开始（服务端 >0 走 offset 分页）。
+     * 注意服务端不默认排除 is_del，type=all 会包含已删除邮件（与网页版一致）。
+     */
+    suspend fun siteEmailsRaw(
+        page: Int,
+        keyword: String = "",
+        type: String = "all",
+        timeSort: Int = 0,
+        category: String? = null,
+    ): JSONObject {
+        val q = StringBuilder("/allEmail/list?size=20&page=$page&timeSort=$timeSort&type=")
+            .append(if (type.isBlank()) "all" else type)
+        if (!category.isNullOrBlank()) {
+            q.append("&category=").append(java.net.URLEncoder.encode(category, "UTF-8"))
+        }
+        if (keyword.isNotBlank()) {
+            q.append("&keyword=").append(java.net.URLEncoder.encode(keyword, "UTF-8"))
+        }
+        return obj("GET", q.toString(), readTimeoutMs = 45_000)
+    }
+
+    suspend fun siteEmails(
+        page: Int,
+        keyword: String = "",
+        type: String = "all",
+        timeSort: Int = 0,
+        category: String? = null,
+    ): Pair<List<MailItem>, Long> =
+        parseList(siteEmailsRaw(page, keyword, type, timeSort, category))
 
     /** GET /analysis/echarts：总览计数、15 天用户/邮件增长、发件人占比、今日发送。 */
     suspend fun analysisEcharts(): JSONObject = obj("GET", "/analysis/echarts")
@@ -650,22 +692,28 @@ object Api {
         obj("POST", "/email/send", body)
     }
 
-    suspend fun categoryCounts(): Map<String, Int> {
-        val d = obj("GET", "/email/category-counts?allReceive=0")
+    /**
+     * 分类计数：accountId + allReceive 决定范围。
+     * 服务端只有当「给了 accountId 且 allReceive=0」才按单个帐户统计，否则累加该 user 的全部帐户。
+     * 抽屉切帐户必须把 accountId 传下去，否则徽标永远是用户级总数、看起来不刷新。
+     */
+    suspend fun categoryCounts(accountId: Long = 0L, allReceive: Boolean = true): Map<String, Int> {
+        val d = obj("GET", "/email/category-counts?accountId=$accountId&allReceive=${if (allReceive) 1 else 0}")
         return listOf("primary", "social", "promotion", "updates", "ads", "spam")
             .associateWith { d.optInt(it) }
     }
 
-    suspend fun menuCounts(): Map<String, Int> {
-        val d = obj("GET", "/email/menu-counts")
-        // 服务端 menu-counts 只给 inbox/sent/deleted/spam，未读数单查一次列表的 total。
+    suspend fun menuCounts(accountId: Long = 0L, allReceive: Boolean = true): Map<String, Int> {
+        val d = obj("GET", "/email/menu-counts?accountId=$accountId&allReceive=${if (allReceive) 1 else 0}")
+        // 未读数没有计数接口，用列表 total；范围必须与 menu-counts 保持一致
         val unread = runCatching {
             obj(
                 "GET",
-                "/email/list?accountId=0&allReceive=1&size=1&page=1&emailId=0&timeSort=0&type=0&mailbox=unread",
+                "/email/list?accountId=$accountId&allReceive=${if (allReceive) 1 else 0}" +
+                    "&size=1&page=1&emailId=0&timeSort=0&type=0&mailbox=unread",
             ).optLong("total").toInt()
         }.getOrDefault(0)
-        // 星标没有菜单计数接口，用 /star/list 的 total
+        // 星标接口只按 userId 统计（/star/list 没有账户参数），切帐户时保持用户级口径
         val starred = runCatching {
             obj("GET", "/star/list?size=1&page=1").optLong("total").toInt()
         }.getOrDefault(0)
@@ -703,6 +751,9 @@ object Api {
                 status = o.optInt("status"),
                 accountId = o.optLong("accountId"),
                 recipient = firstAddress(o.optString("recipient")),
+                userId = o.optLong("userId"),
+                toEmail = o.optString("toEmail"),
+                userEmail = o.optString("userEmail"),
             )
         }
     }

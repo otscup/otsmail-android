@@ -651,6 +651,16 @@ fun SystemSettingsScreen(
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
+    // 全站邮件入口的门槛：permKeys 含 all-email:query / *，或 user.type === 0（系统管理员）。
+    // 初值 null = 还没拿到权限 → 整行不渲染（fail-closed），不先闪一下再消失。
+    var canSiteMail by remember { mutableStateOf<Boolean?>(null) }
+    LaunchedEffect(Unit) {
+        runCatching { Api.me() }.onSuccess { me ->
+            canSiteMail = me.type == 0L ||
+                me.permKeys.contains("all-email:query") || me.permKeys.contains("*")
+        }.onFailure { canSiteMail = false }
+    }
+
     Column(
         Modifier.fillMaxSize().background(c.bgGrouped).statusBarsPadding().navigationBarsPadding(),
     ) {
@@ -705,9 +715,10 @@ fun SystemSettingsScreen(
             )
 
             OTGroupHeader("后台数据")
-            AdminLinks(onOpenAdmin)
+            AdminLinks(onOpenAdmin, showAllMail = canSiteMail == true)
             Text(
-                "全部邮件 / 用户管理 / 权限控制 / 注册密钥 / 分析；需要对应管理员权限，接口会返回真实错误。",
+                "「全部邮件」是全站数据（/allEmail/list，所有域名、所有账户），仅 permKeys 含 all-email:query 或系统管理员可见；" +
+                    "用户管理 / 权限控制 / 注册密钥 / 分析各自需要对应后台权限，接口会返回真实错误。",
                 style = t.footnote, color = c.label2,
                 modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp),
             )

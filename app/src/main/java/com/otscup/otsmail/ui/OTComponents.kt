@@ -8,6 +8,7 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -26,6 +27,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Star
+import androidx.compose.material.icons.outlined.AutoAwesome
 import androidx.compose.material.icons.outlined.Check
 import androidx.compose.material.icons.outlined.Edit
 import androidx.compose.material.icons.outlined.Search
@@ -43,20 +45,29 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.drawscope.scale
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.graphics.vector.PathParser
+import androidx.compose.ui.graphics.vector.VectorGroup
+import androidx.compose.ui.graphics.vector.VectorPath
 import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.annotation.DrawableRes
 import androidx.compose.ui.graphics.painter.Painter
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.otscup.otsmail.R
 import com.otscup.otsmail.ui.theme.OT
@@ -236,6 +247,52 @@ private fun OTIconButtonBox(description: String, tint: Color, size: Int, onClick
     }
 }
 
+/**
+ * AI 入口星形：形状沿用 Material AutoAwesome（不必自造），只把填充换成线性渐变。
+ * 亮色：蓝→紫→品红→橙，135°（左上→右下），在白色卡面上对比足够；
+ * 暗色：同色相提亮一档，避免紫/蓝在 #1C1C1E 上糊掉。
+ */
+@Composable
+fun AiStarGradient(size: Dp = 22.dp) {
+    val dark = isSystemInDarkTheme()
+    val colors = if (dark) listOf(
+        Color(0xFF5AC8FA), Color(0xFFB18CFF), Color(0xFFFF7BA9), Color(0xFFFFC46B),
+    ) else listOf(
+        Color(0xFF0A84FF), Color(0xFF7B61FF), Color(0xFFFF2D95), Color(0xFFFF9F0A),
+    )
+    val vector = Icons.Outlined.AutoAwesome
+    val path = remember { vector.flattenToPath() }
+    Canvas(Modifier.size(size).semantics { contentDescription = "AI 助手" }) {
+        val s = this.size.minDimension / vector.viewportWidth
+        scale(s, s, pivot = Offset.Zero) {
+            drawPath(
+                path,
+                brush = Brush.linearGradient(
+                    colors,
+                    start = Offset.Zero,
+                    end = Offset(vector.viewportWidth, vector.viewportHeight),
+                ),
+            )
+        }
+    }
+}
+
+/** 把 ImageVector 的所有子路径合并成一个 Path，便于用 Brush 填充。 */
+private fun ImageVector.flattenToPath(): Path {
+    val parser = PathParser()
+    fun walk(group: VectorGroup) {
+        group.forEach { node ->
+            when (node) {
+                is VectorPath -> parser.addPathNodes(node.pathData)
+                is VectorGroup -> walk(node)
+                else -> Unit
+            }
+        }
+    }
+    walk(root)
+    return parser.toPath()
+}
+
 /** 胶囊标签（.chip：高 20、圆角 pill、11pt medium） */
 @Composable
 fun OTChip(text: String, tint: Color, outline: Boolean = false) {
@@ -410,6 +467,8 @@ fun OTMailRow(
     onLongPress: (() -> Unit)? = null,
     /** 多账户混合列表才传：这封邮件所属/发往的邮箱地址，显示在主题行右侧 */
     mailboxLabel: String? = null,
+    /** 全站列表才传：邮件所属用户的登录邮箱，小字缩在 mailboxLabel 下面 */
+    ownerLabel: String? = null,
 ) {
     val t = OT.type
     val c = OT.colors
@@ -468,14 +527,34 @@ fun OTMailRow(
                         color = c.label,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f, fill = false),
+                        modifier = Modifier.weight(1f),
                     )
                     if (!mailboxLabel.isNullOrBlank()) {
                         Spacer(Modifier.width(8.dp))
+                        Column(horizontalAlignment = Alignment.End) {
+                            Text(
+                                mailboxLabel,
+                                style = t.caption1,
+                                color = c.label2,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.widthIn(max = 128.dp),
+                            )
+                            if (!ownerLabel.isNullOrBlank()) Text(
+                                ownerLabel,
+                                style = t.caption2,
+                                color = c.label3,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.widthIn(max = 128.dp),
+                            )
+                        }
+                    } else if (!ownerLabel.isNullOrBlank()) {
+                        Spacer(Modifier.width(8.dp))
                         Text(
-                            mailboxLabel,
-                            style = t.caption1,
-                            color = c.label2,
+                            ownerLabel,
+                            style = t.caption2,
+                            color = c.label3,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
                             modifier = Modifier.widthIn(max = 128.dp),
@@ -528,11 +607,13 @@ fun OTBadge(count: Int) {
 
 /**
  * 写邮件 FAB（.fab：52、右 16、home 上方 16）。
- * 不用蓝底：卡面底色 + 0.5dp 发丝描边，阴影压到极轻；图标是蓝色线条（不是色块）。
+ * 不用蓝底：卡面底色 + 0.5dp 发丝描边，阴影压到极轻；图标是深灰线条（不是色块）。
  */
 @Composable
 fun OTFab(onClick: () -> Unit) {
     val c = OT.colors
+    // 深灰笔触：亮 #3A3A3C（白卡上 11.4:1）、暗 #D1D1D6（#1C1C1E 上 11.2:1），都过 WCAG AAA
+    val ink = if (isSystemInDarkTheme()) Color(0xFFD1D1D6) else Color(0xFF3A3A3C)
     Box(
         Modifier
             .size(OT.dimens.fabSize.dp)
@@ -548,7 +629,7 @@ fun OTFab(onClick: () -> Unit) {
             .pressable(scale = 0.96f, pressedColor = c.bgPressed, shape = CircleShape, onClick = onClick),
         contentAlignment = Alignment.Center,
     ) {
-        Icon(painterResource(R.drawable.ot_compose), contentDescription = "写邮件", tint = c.blue, modifier = Modifier.size(24.dp))
+        Icon(painterResource(R.drawable.ot_compose), contentDescription = "写邮件", tint = ink, modifier = Modifier.size(24.dp))
     }
 }
 
