@@ -15,11 +15,25 @@ android {
     namespace = "com.otscup.otsmail"
     compileSdk = 35
 
-    // 发布签名：口令写在仓库根 keystore.properties（已 gitignore），jks 放在仓库外
+    // 发布签名：本地优先读仓库根 keystore.properties（已 gitignore，jks 放仓库外）；
+    // CI 没有这个文件，回退读环境变量（KEYSTORE_FILE / KEYSTORE_PASSWORD / KEY_ALIAS / KEY_PASSWORD）
+    // 或同名的 -P 属性。
     val keystorePropsFile = rootProject.file("keystore.properties")
     val keystoreProps = Properties().apply {
         if (keystorePropsFile.exists()) keystorePropsFile.inputStream().use { load(it) }
     }
+
+    fun signOpt(key: String, env: String): String? =
+        keystoreProps.getProperty(key)
+            ?: System.getenv(env)
+            ?: (project.findProperty(key) as String?)
+
+    val signStoreFile = signOpt("storeFile", "KEYSTORE_FILE")
+    val signStorePwd = signOpt("storePassword", "KEYSTORE_PASSWORD")
+    val signKeyAlias = signOpt("keyAlias", "KEY_ALIAS")
+    val signKeyPwd = signOpt("keyPassword", "KEY_PASSWORD")
+    val signingReady =
+        signStoreFile != null && signStorePwd != null && signKeyAlias != null && signKeyPwd != null
 
     defaultConfig {
         applicationId = "com.otscup.otsmail"
@@ -30,12 +44,12 @@ android {
     }
 
     signingConfigs {
-        if (keystorePropsFile.exists()) {
+        if (signingReady) {
             create("release") {
-                storeFile = file(keystoreProps.getProperty("storeFile"))
-                storePassword = keystoreProps.getProperty("storePassword")
-                keyAlias = keystoreProps.getProperty("keyAlias")
-                keyPassword = keystoreProps.getProperty("keyPassword")
+                storeFile = file(signStoreFile!!)
+                storePassword = signStorePwd
+                keyAlias = signKeyAlias
+                keyPassword = signKeyPwd
             }
         }
     }
@@ -43,7 +57,7 @@ android {
     buildTypes {
         release {
             isMinifyEnabled = false
-            if (keystorePropsFile.exists()) {
+            if (signingReady) {
                 signingConfig = signingConfigs.getByName("release")
             }
         }
