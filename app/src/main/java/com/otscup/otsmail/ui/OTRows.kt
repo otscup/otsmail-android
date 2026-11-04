@@ -18,7 +18,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.painter.Painter
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.dp
 import com.otscup.otsmail.ui.theme.OT
 
@@ -32,6 +34,8 @@ fun OTRow(
     modifier: Modifier = Modifier,
     subtitle: String? = null,
     icon: ImageVector? = null,
+    /** 自绘圆润图标（res/drawable），和 icon 二选一。 */
+    iconRes: Int? = null,
     iconTint: Color? = null,
     trailing: (@Composable () -> Unit)? = null,
     onClick: (() -> Unit)? = null,
@@ -47,6 +51,9 @@ fun OTRow(
     Row(base.padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
         if (icon != null) {
             ORIconTile(icon, tint)
+            Spacer(Modifier.width(12.dp))
+        } else if (iconRes != null) {
+            ORIconTile(painterResource(iconRes), tint)
             Spacer(Modifier.width(12.dp))
         }
         Column(Modifier.weight(1f)) {
@@ -65,10 +72,21 @@ fun OTRow(
 /** 设计稿里的左侧色块：30×30、圆角 7、同色 14% 底、图标 18dp。 */
 @Composable
 fun ORIconTile(icon: ImageVector, tint: Color) {
+    ORIconTile(painter = null, icon = icon, tint = tint)
+}
+
+@Composable
+fun ORIconTile(icon: Painter, tint: Color) {
+    ORIconTile(painter = icon, icon = null, tint = tint)
+}
+
+@Composable
+private fun ORIconTile(painter: Painter?, icon: ImageVector?, tint: Color) {
     Box(
         Modifier.size(30.dp).clip(RoundedCornerShape(7.dp)).background(tint.copy(alpha = 0.14f)),
         contentAlignment = Alignment.Center,
     ) {
-        Icon(icon, null, tint = tint, modifier = Modifier.size(18.dp))
+        if (icon != null) Icon(icon, null, tint = tint, modifier = Modifier.size(18.dp))
+        else if (painter != null) Icon(painter, null, tint = tint, modifier = Modifier.size(18.dp))
     }
 }

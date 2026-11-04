@@ -1,0 +1,17 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- 信封主体：白色圆角矩形 -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M38,38 h32 a8,8 0 0 1 8,8 v16 a8,8 0 0 1 -8,8 h-32 a8,8 0 0 1 -8,-8 v-16 a8,8 0 0 1 8,-8 z" />
+    <!-- 信封折线：蓝色 V -->
+    <path
+        android:strokeColor="#007AFF"
+        android:strokeWidth="3.2"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:pathData="M33,44 L54,57 L75,44" />
+</vector>

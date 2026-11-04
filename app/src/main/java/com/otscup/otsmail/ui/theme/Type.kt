@@ -18,7 +18,7 @@ val otTypography = OTType(
     subhead = TextStyle(fontFamily = FontFamily.SansSerif, fontSize = 15.sp, lineHeight = 20.sp, letterSpacing = (-0.24).sp),
     footnote = TextStyle(fontFamily = FontFamily.SansSerif, fontSize = 13.sp, lineHeight = 18.sp, letterSpacing = (-0.08).sp),
     caption1 = TextStyle(fontFamily = FontFamily.SansSerif, fontSize = 12.sp, lineHeight = 16.sp),
-    caption2 = TextStyle(fontFamily = FontFamily.SansSerif, fontSize = 11.sp, lineHeight = 13.sp, letterSpacing = 0.07.sp),
+    caption2 = TextStyle(fontFamily = FontFamily.SansSerif, fontSize = 11.sp, lineHeight = 13.sp, letterSpacing = 0.sp),
 )
 
 data class OTType(

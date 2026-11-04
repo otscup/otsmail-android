@@ -1,12 +1,25 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
+// 没有 google-services.json 就不启用推送配置：APK 照常构建，只是收不到推送
+if (file("google-services.json").exists()) {
+    apply(plugin = "com.google.gms.google-services")
+}
+
 android {
     namespace = "com.otscup.otsmail"
     compileSdk = 35
+
+    // 发布签名：口令写在仓库根 keystore.properties（已 gitignore），jks 放在仓库外
+    val keystorePropsFile = rootProject.file("keystore.properties")
+    val keystoreProps = Properties().apply {
+        if (keystorePropsFile.exists()) keystorePropsFile.inputStream().use { load(it) }
+    }
 
     defaultConfig {
         applicationId = "com.otscup.otsmail"
@@ -16,9 +29,23 @@ android {
         versionName = "0.2.0"
     }
 
+    signingConfigs {
+        if (keystorePropsFile.exists()) {
+            create("release") {
+                storeFile = file(keystoreProps.getProperty("storeFile"))
+                storePassword = keystoreProps.getProperty("storePassword")
+                keyAlias = keystoreProps.getProperty("keyAlias")
+                keyPassword = keystoreProps.getProperty("keyPassword")
+            }
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = false
+            if (keystorePropsFile.exists()) {
+                signingConfig = signingConfigs.getByName("release")
+            }
         }
     }
 
@@ -37,8 +64,8 @@ android {
     }
 
     defaultConfig {
-        // 换成电脑的局域网 IP，手机和电脑同一个 wifi 才连得上；留空则在登录页手填
-        buildConfigField("String", "BASE_URL", "\"http://127.0.0.1:8789/api\"")
+        // 真实后端（生产 Worker otsmail）；本地 dev 可登录页手填 http://127.0.0.1:8789/api
+        buildConfigField("String", "BASE_URL", "\"https://mail.otscup.com/api\"")
     }
 }
 
@@ -51,7 +78,12 @@ dependencies {
     implementation("androidx.compose.material:material-icons-extended")
     implementation("androidx.compose.ui:ui-tooling-preview")
     implementation("androidx.activity:activity-compose:1.9.3")
+    // Custom Tabs：OIDC 授权页放到 Chrome，WebAuthn（通行密钥）才可能被调起
+    implementation("androidx.browser:browser:1.8.0")
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.7")
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.7")
+    // FCM：版本交给 BOM 管理
+    implementation(platform("com.google.firebase:firebase-bom:33.7.0"))
+    implementation("com.google.firebase:firebase-messaging")
     debugImplementation("androidx.compose.ui:ui-tooling")
 }

@@ -39,7 +39,9 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.otscup.otsmail.data.AiAction
 import com.otscup.otsmail.data.Api
+import com.otscup.otsmail.data.ApiException
 import com.otscup.otsmail.data.Session
+import com.otscup.otsmail.data.friendlyError
 import com.otscup.otsmail.ui.theme.OT
 import kotlinx.coroutines.launch
 import androidx.compose.material.icons.Icons
@@ -71,6 +73,11 @@ fun AiScreen(session: Session, onBack: () -> Unit, onOpenCompose: () -> Unit) {
     var input by remember { mutableStateOf("") }
     var busy by remember { mutableStateOf(false) }
 
+    // 出现「正在思考」气泡时把它滚进视野，用户才知道请求已经在跑
+    androidx.compose.runtime.LaunchedEffect(busy) {
+        if (busy) listState.animateScrollToItem((msgs.lastIndex + 1).coerceAtLeast(0))
+    }
+
     fun send(text: String) {
         val q = text.trim()
         if (q.isEmpty() || busy) return
@@ -78,13 +85,22 @@ fun AiScreen(session: Session, onBack: () -> Unit, onOpenCompose: () -> Unit) {
         input = ""
         msgs.add(Msg("me", q))
         scope.launch {
+            // 服务端一次要 20 秒以上才回；busy 期间必须有「正在思考」的可见反馈，
+            // 否则用户看到的就是「点了没反应」。
             runCatching {
                 val history = msgs.map { it.role to it.text }
                 Api.ai(q, session.accountId, history)
             }.onSuccess { (reply, acts) ->
                 msgs.add(Msg("ai", reply.ifEmpty { "（没有文字回复）" }, acts))
-            }.onFailure {
-                msgs.add(Msg("ai", "AI 没回话：" + (it.message ?: "未知错误")))
+            }.onFailure { e ->
+                val reason = when {
+                    e is ApiException && (e.httpCode == 503 || e.message.contains("未配置")) ->
+                        "AI 服务未配置，请联系管理员"
+                    // 401 不再单独弹窗，只在这里指向上方的全局提示
+                    e is ApiException && e.httpCode == 401 -> "登录已过期，点顶部提示重新登录"
+                    else -> friendlyError(e)
+                }
+                msgs.add(Msg("ai", "AI 没回话：$reason"))
             }
             busy = false
             listState.animateScrollToItem(msgs.lastIndex.coerceAtLeast(0))
@@ -112,6 +128,9 @@ fun AiScreen(session: Session, onBack: () -> Unit, onOpenCompose: () -> Unit) {
             verticalArrangement = Arrangement.spacedBy(d.sp2.dp),
         ) {
             items(msgs) { m -> Bubble(m) }
+            if (busy) {
+                item(key = "thinking") { Bubble(Msg("ai", "正在思考…")) }
+            }
             item { Spacer(Modifier.height(d.sp2.dp)) }
         }
 

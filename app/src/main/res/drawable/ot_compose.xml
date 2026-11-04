@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <!-- 单支斜铅笔：五边形笔身，笔尾略宽、笔尖收窄；45° 斜轴，排版中心 12/12 -->
+    <path
+        android:fillColor="@android:color/transparent"
+        android:strokeColor="#FF000000"
+        android:strokeWidth="2.0"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:pathData="M3.94,18.97 L7.2,15.41 L17.89,5.03 L20.06,7.2 L9.99,17.6 Z" />
+</vector>

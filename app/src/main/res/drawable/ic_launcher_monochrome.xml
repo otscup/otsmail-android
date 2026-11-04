@@ -1,0 +1,19 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- 单色 themed icon：信封轮廓 + 折线，系统按主题色着色（用 alpha 蒙版） -->
+    <path
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="4"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:pathData="M38,40 h32 a8,8 0 0 1 8,8 v14 a8,8 0 0 1 -8,8 h-32 a8,8 0 0 1 -8,-8 v-14 a8,8 0 0 1 8,-8 z" />
+    <path
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="4"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:pathData="M33,45 L54,57 L75,45" />
+</vector>

@@ -1,27 +1,19 @@
 package com.otscup.otsmail.ui
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.outlined.AttachFile
-import androidx.compose.material.icons.outlined.FormatBold
-import androidx.compose.material.icons.outlined.FormatItalic
-import androidx.compose.material.icons.outlined.FormatListBulleted
-import androidx.compose.material.icons.outlined.FormatListNumbered
-import androidx.compose.material.icons.outlined.FormatQuote
-import androidx.compose.material.icons.outlined.FormatStrikethrough
-import androidx.compose.material.icons.outlined.FormatUnderlined
-import androidx.compose.material.icons.outlined.ChevronRight
-import androidx.compose.material.icons.outlined.Close
-import androidx.compose.material3.Icon
 
 import android.provider.OpenableColumns
 import android.util.Base64
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.annotation.DrawableRes
 import androidx.compose.foundation.background
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -33,70 +25,169 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.ChevronRight
+import androidx.compose.material.icons.outlined.Close
+import androidx.compose.material.icons.outlined.Person
+import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.text.TextRange
+import androidx.compose.ui.text.font.FontStyle
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.TextFieldValue
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import com.otscup.otsmail.R
 import com.otscup.otsmail.data.Api
+import com.otscup.otsmail.data.Draft
 import com.otscup.otsmail.data.Drafts
+import com.otscup.otsmail.data.MailCache
 import com.otscup.otsmail.data.Session
+import com.otscup.otsmail.data.friendlyError
 import com.otscup.otsmail.ui.theme.OT
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import org.json.JSONArray
 import org.json.JSONObject
+import java.util.UUID
 
+/**
+ * 写信页。草稿保护：
+ * - 输入 800ms 防抖自动存本机草稿（按账号隔离，见 Drafts）；
+ * - onStop（切后台）立即存一次；
+ * - 发送失败不清空输入，保留正文并提示「已存草稿，可稍后重试」+「重试发送」；
+ * - 成功发送删除草稿；重新进写信页若本账号有未完成草稿，顶部提示「继续编辑」；
+ * - 标题栏「草稿」进入草稿列表。
+ */
 @Composable
 fun ComposeScreen(
     accountId: Long,
     to: String,
     subject: String,
     quoted: String = "",
-    onDone: () -> Unit,
+    /** 右滑回复时列表只给了 emailId：原文没缓存时在这里后台补引用，不阻塞进写信页 */
+    quoteEmailId: Long? = null,
+    draftId: String? = null,
+    onOpenDrafts: () -> Unit = {},
+    /** 自动保存产出的草稿 id 同步给调用方：401 时路由会被重建，靠它把写信页原样接回来 */
+    onDraftId: (String) -> Unit = {},
+    onFinished: (sent: Boolean) -> Unit,
 ) {
     val t = OT.type
     val c = OT.colors
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
-    var toText by remember { mutableStateOf(to) }
-    var subjectText by remember { mutableStateOf(subject) }
-    var body by remember { mutableStateOf("") }
+
+    // 从草稿列表点进来的：先把整份草稿读出来，后面所有字段都按它初始化
+    val restored = remember { draftId?.let { Drafts.get(ctx, it) } }
+    // 只存了文件名、没有 content 的附件发不出去，恢复时直接丢掉并在提示里说明
+    val restoredAtts = remember {
+        val arr = runCatching { JSONArray(restored?.attachmentsJson ?: "[]") }.getOrNull() ?: JSONArray()
+        (0 until arr.length()).mapNotNull { arr.optJSONObject(it) }.filter { it.optString("content").isNotEmpty() }
+    }
+
+    var draftIdState by remember { mutableStateOf(restored?.id ?: draftId ?: UUID.randomUUID().toString()) }
+    var toTags by remember {
+        mutableStateOf(restored?.toTags ?: to.split(",", ";", " ").map { it.trim() }.filter { it.contains("@") })
+    }
+    var toInput by remember {
+        mutableStateOf(restored?.toInput ?: if (restored == null && toTags.isEmpty() && to.isNotBlank()) to else "")
+    }
+    var ccTags by remember { mutableStateOf(restored?.ccTags ?: listOf()) }
+    var bccTags by remember { mutableStateOf(restored?.bccTags ?: listOf()) }
+    var ccInput by remember { mutableStateOf(restored?.ccInput.orEmpty()) }
+    var bccInput by remember { mutableStateOf(restored?.bccInput.orEmpty()) }
+    var subjectText by remember { mutableStateOf(restored?.subject ?: subject) }
+    var body by remember {
+        val txt = restored?.body.orEmpty()
+        val start = restored?.selStart ?: -1
+        val end = restored?.selEnd ?: -1
+        mutableStateOf(
+            TextFieldValue(
+                txt,
+                if (start in 0..txt.length && end in 0..txt.length) TextRange(start, end) else TextRange(txt.length),
+            ),
+        )
+    }
+    var quotedHtml by remember { mutableStateOf(restored?.quoted.orEmpty().ifEmpty { quoted }) }
     var busy by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf("") }
-    var picks by remember { mutableStateOf(listOf<String>()) }
+    var sendFailed by remember { mutableStateOf(false) }
+    var draftSaved by remember { mutableStateOf(false) }
+    var restoreNote by remember {
+        mutableStateOf(if (restored?.attachmentsDropped == true) "部分附件超过 2MB，未能完整保存" else "")
+    }
+    var touched by remember { mutableStateOf(restored != null) }
+    // 发送成功后禁止再落盘：否则 onDispose 会把刚删掉的草稿又写回来
+    var sentOk by remember { mutableStateOf(false) }
+    // 右滑回复：缓存没命中时先开页，这里再补原文引用；拿不到就保持无引用，不阻塞发送
+    LaunchedEffect(quoteEmailId) {
+        val id = quoteEmailId ?: return@LaunchedEffect
+        if (quotedHtml.isNotEmpty()) return@LaunchedEffect
+        val d = MailCache.detailMemory(id)?.first
+            ?: MailCache.detailDisk(id)?.first
+            ?: runCatching { Api.detail(id) }.getOrNull()
+        if (d != null && quotedHtml.isEmpty()) {
+            quotedHtml = buildQuoteHtml(d.name.ifEmpty { d.from }, d.content)
+            touched = true
+        }
+    }
+    val attachments = remember { mutableListOf<JSONObject>().also { list -> restoredAtts.forEach(list::add) } }
+    var picks by remember { mutableStateOf(restoredAtts.map { it.optString("filename") }) }
     val signature = remember { Session(ctx).signature }
-    val attachments = remember { mutableListOf<JSONObject>() }
 
-    var fromId by remember { mutableStateOf(accountId) }
+    var fromId by remember { mutableStateOf(restored?.fromId?.takeIf { it > 0 } ?: accountId) }
     var fromEmail by remember { mutableStateOf("") }
     var accounts by remember { mutableStateOf(listOf<Pair<Long, String>>()) }
     var pickingFrom by remember { mutableStateOf(false) }
-    var ccText by remember { mutableStateOf("") }
-    var bccText by remember { mutableStateOf("") }
-    var showCc by remember { mutableStateOf(false) }
-    var showBcc by remember { mutableStateOf(false) }
+    var showCc by remember { mutableStateOf(restored?.ccTags?.isNotEmpty() == true || restored?.ccInput?.isNotBlank() == true) }
+    var showBcc by remember { mutableStateOf(restored?.bccTags?.isNotEmpty() == true || restored?.bccInput?.isNotBlank() == true) }
+    // 新建写信页时提示恢复本账号最近一份未完成草稿（不自动覆盖用户正在写的空白页）
+    var offer by remember { mutableStateOf<Draft?>(null) }
 
     LaunchedEffect(Unit) {
+        onDraftId(draftIdState)
         runCatching { Api.accounts() }.getOrNull()?.let { list ->
             accounts = list
             fromEmail = list.firstOrNull { it.first == fromId }?.second ?: list.firstOrNull()?.second ?: ""
         }
+        if (draftId == null) {
+            val latest = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                Drafts.latest(ctx, accountId)
+            }
+            if (latest != null && !latest.isEmpty()) offer = latest
+        }
     }
 
-    val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
-        uris.take(10).forEach { uri ->
+    fun addFiles(uris: List<android.net.Uri>) {
+        uris.take(10 - picks.size).forEach { uri ->
             runCatching {
                 val bytes = ctx.contentResolver.openInputStream(uri)?.use { it.readBytes() } ?: return@runCatching
                 if (bytes.size > 5 * 1024 * 1024) return@runCatching
@@ -113,187 +204,656 @@ fun ComposeScreen(
                         .put("contentType", mime),
                 )
                 picks = picks + name
+                touched = true
             }
         }
+    }
+
+    val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
+        addFiles(uris)
+    }
+    val imagePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
+        addFiles(uris)
+    }
+
+    /** 当前输入 → 草稿；空内容不落盘（顺手删掉旧草稿）。 */
+    fun persist(force: Boolean = false): Boolean {
+        if (sentOk) return false
+        if (!touched && !force) return false
+        val atts = JSONArray()
+        attachments.forEach { atts.put(it) }
+        val draft = Draft(
+            id = draftIdState,
+            accountId = accountId,
+            fromId = fromId,
+            toTags = toTags,
+            toInput = toInput,
+            ccTags = ccTags,
+            ccInput = ccInput,
+            bccTags = bccTags,
+            bccInput = bccInput,
+            subject = subjectText,
+            body = body.text,
+            selStart = body.selection.start,
+            selEnd = body.selection.end,
+            quoted = quotedHtml,
+            attachmentsJson = atts.toString(),
+            attachmentsDropped = false,
+            updatedAt = 0L,
+        )
+        if (draft.isEmpty()) {
+            Drafts.delete(ctx, draftIdState)
+            return false
+        }
+        val saved = Drafts.save(ctx, draft)
+        draftIdState = saved.id
+        onDraftId(saved.id)
+        if (saved.attachmentsDropped) restoreNote = "部分附件超过 2MB，未能完整保存"
+        return true
+    }
+
+    fun applyDraft(d: Draft) {
+        draftIdState = d.id
+        onDraftId(d.id)
+        toTags = d.toTags
+        toInput = d.toInput
+        ccTags = d.ccTags
+        ccInput = d.ccInput
+        bccTags = d.bccTags
+        bccInput = d.bccInput
+        showCc = d.ccTags.isNotEmpty() || d.ccInput.isNotBlank()
+        showBcc = d.bccTags.isNotEmpty() || d.bccInput.isNotBlank()
+        subjectText = d.subject
+        val txt = d.body
+        val start = d.selStart
+        val end = d.selEnd
+        body = TextFieldValue(
+            txt,
+            if (start in 0..txt.length && end in 0..txt.length) TextRange(start, end) else TextRange(txt.length),
+        )
+        quotedHtml = d.quoted
+        if (d.fromId > 0) fromId = d.fromId
+        val arr = runCatching { JSONArray(d.attachmentsJson) }.getOrNull() ?: JSONArray()
+        val atts = (0 until arr.length()).mapNotNull { arr.optJSONObject(it) }.filter { it.optString("content").isNotEmpty() }
+        attachments.clear()
+        atts.forEach(attachments::add)
+        picks = atts.map { it.optString("filename") }
+        restoreNote = if (d.attachmentsDropped) "部分附件超过 2MB，未能完整保存" else ""
+        touched = true
+        offer = null
+    }
+
+    // 切后台（onStop）立即落盘一次，不等 800ms 防抖
+    val lifecycleOwner = LocalLifecycleOwner.current
+    val saveNow = rememberUpdatedState { persist() }
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_STOP) saveNow.value()
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+            // 离开写信页（去草稿箱/被 401 拦去登录）也落盘，页面被重建时能原样接回来
+            saveNow.value()
+        }
+    }
+
+    // 输入 800ms 防抖自动保存：每次敲键都会取消上一个计时器并重新开始
+    LaunchedEffect(
+        toTags, toInput, ccTags, ccInput, bccTags, bccInput, subjectText, body.text, picks, fromId,
+    ) {
+        if (!touched) return@LaunchedEffect
+        delay(800)
+        persist()
+    }
+
+    fun commit(input: String, tags: List<String>, setTags: (List<String>) -> Unit, clear: () -> Unit) {
+        val v = input.trim().trim(',', ';', ' ')
+        if (v.contains("@")) setTags(tags + v)
+        clear()
+    }
+
+    fun wrap(prefix: String, suffix: String) {
+        val sel = body.selection
+        val start = minOf(sel.start, sel.end)
+        val end = maxOf(sel.start, sel.end)
+        val txt = body.text
+        val newText = txt.substring(0, start) + prefix + txt.substring(start, end) + suffix + txt.substring(end)
+        body = TextFieldValue(newText, TextRange(start + prefix.length, start + prefix.length + (end - start)))
+        touched = true
+    }
+
+    fun prefixLine(prefix: String) {
+        val at = body.text.lastIndexOf('\n', (body.selection.start - 1).coerceAtLeast(0)) + 1
+        val newText = body.text.substring(0, at) + prefix + body.text.substring(at)
+        body = TextFieldValue(newText, TextRange(body.selection.start + prefix.length))
+        touched = true
     }
 
     fun send() {
         if (busy) return
+        val recipients = toTags + listOfNotNull(toInput.trim().takeIf { it.contains("@") })
+        if (recipients.isEmpty()) {
+            error = "请填写收件人"
+            return
+        }
         busy = true
         error = ""
+        sendFailed = false
         val sig = signature.trim()
-        val text = (body + if (sig.isEmpty()) "" else if (body.isEmpty()) sig else "\n\n$sig").ifEmpty { " " }
-        val html = body.split("\n\n").joinToString("") { "<p>${it.replace("\n", "<br>")}</p>" } +
-            if (sig.isEmpty()) "" else "<p>${sig.replace("\n", "<br>")}</p>" + quoted
+        val plain = buildString {
+            append(body.text)
+            if (sig.isNotEmpty()) append(if (body.text.isEmpty()) sig else "\n\n$sig")
+        }.ifEmpty { " " }
+        val html = textToHtml(body.text) +
+            (if (sig.isEmpty()) "" else "<p>${escapeHtml(sig).replace("\n", "<br>")}</p>") +
+            quotedHtml
         scope.launch {
-            val parts = { s: String -> s.split(",", ";", " ").map { it.trim() }.filter { it.contains("@") } }
             runCatching {
                 Api.send(
-                    fromId, parts(toText), subjectText, text, html, attachments,
-                    cc = parts(ccText), bcc = parts(bccText),
+                    fromId, recipients, subjectText, plain, html, attachments,
+                    cc = ccTags + listOfNotNull(ccInput.trim().takeIf { it.contains("@") }),
+                    bcc = bccTags + listOfNotNull(bccInput.trim().takeIf { it.contains("@") }),
                 )
             }
-                .onSuccess { onDone() }
-                .onFailure { error = it.message ?: "发送失败" }
+                .onSuccess {
+                    sentOk = true
+                    touched = true
+                    Drafts.delete(ctx, draftIdState)
+                    MailSync.changed()
+                    onFinished(true)
+                }
+                .onFailure { e ->
+                    // 失败不清空输入：立刻把当前内容落盘，并给出重试入口
+                    touched = true
+                    val saved = persist(force = true)
+                    draftSaved = saved
+                    sendFailed = true
+                    error = "发送失败：${friendlyError(e)}"
+                }
             busy = false
         }
     }
 
-    Column(Modifier.fillMaxSize().background(c.bgCard).statusBarsPadding().navigationBarsPadding().imePadding()) {
-        OTNavBar(
-            title = if (quoted.isEmpty()) "写邮件" else "回复",
-            onLeading = {
-                Drafts.save(ctx, toText, subjectText, body.ifEmpty { quoted.take(0) })
-                onDone()
-            },
-            leadingText = "取消",
+    Column(Modifier.fillMaxSize().background(c.bgCard).statusBarsPadding().imePadding().navigationBarsPadding()) {
+        // 头部
+        Row(
+            Modifier.fillMaxWidth().height(44.dp).background(c.bgBar).padding(horizontal = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
         ) {
             Box(
-                Modifier.height(44.dp).padding(horizontal = 8.dp).clip(RoundedCornerShape(10.dp))
-                    .tapArea { send() },
+                Modifier.width(64.dp).height(44.dp).clip(RoundedCornerShape(OT.dimens.rMd.dp)).tapArea {
+                    persist()
+                    onFinished(false)
+                },
+                contentAlignment = Alignment.CenterStart,
+            ) {
+                Text("取消", style = t.body, color = c.blue, modifier = Modifier.padding(start = 12.dp))
+            }
+            Text(
+                if (quotedHtml.isEmpty()) "写邮件" else "回复",
+                style = t.body.copy(fontWeight = FontWeight.SemiBold),
+                color = c.label,
+                modifier = Modifier.weight(1f),
+                textAlign = TextAlign.Center,
+            )
+            Box(
+                Modifier.width(44.dp).height(44.dp).tapArea { persist(); onOpenDrafts() },
                 contentAlignment = Alignment.Center,
             ) {
+                Text("草稿", style = t.footnote, color = c.blue)
+            }
+            Box(
+                Modifier.width(56.dp).height(44.dp).clip(RoundedCornerShape(OT.dimens.rMd.dp)).tapArea { send() },
+                contentAlignment = Alignment.CenterEnd,
+            ) {
                 Text(
-                    if (busy) "发送中" else "发送",
-                    style = t.body,
+                    if (busy) "发送中…" else "发送",
+                    style = t.body.copy(fontWeight = FontWeight.SemiBold),
                     color = if (busy) c.label3 else c.blue,
+                    modifier = Modifier.padding(end = 12.dp),
                 )
             }
         }
-        if (error.isNotEmpty()) Text(error, style = t.footnote, color = c.red, modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp))
-        Column(Modifier.weight(1f).verticalScroll(rememberScrollState())) {
-            if (accounts.isNotEmpty()) {
-                Row(
-                    Modifier.fillMaxWidth().heightIn(min = 52.dp).tapArea { pickingFrom = !pickingFrom }
-                        .padding(horizontal = 16.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Text("发件人", style = t.footnote, color = c.label2, modifier = Modifier.width(56.dp))
-                    Text(fromEmail, style = t.body, color = c.label, maxLines = 1, modifier = Modifier.weight(1f))
-                    Icon(
-                        Icons.Outlined.ChevronRight, contentDescription = null,
-                        tint = c.label3, modifier = Modifier.size(18.dp),
+        OTDivider(strong = true)
+
+        // 未完成草稿恢复提示
+        offer?.let { draft ->
+            Row(
+                Modifier.fillMaxWidth().background(c.bgInput).padding(horizontal = 16.dp, vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text("有一份未完成的草稿", style = t.footnote.copy(fontWeight = FontWeight.SemiBold), color = c.label)
+                    Text(
+                        draft.subject.ifEmpty { draft.body.take(28).ifEmpty { "（无主题）" } },
+                        style = t.caption1, color = c.label2, maxLines = 1,
                     )
                 }
-                if (pickingFrom) {
-                    accounts.forEach { (id, email) ->
-                        Row(
-                            Modifier.fillMaxWidth().heightIn(min = 44.dp).tapArea {
-                                fromId = id
-                                fromEmail = email
-                                pickingFrom = false
-                            }.padding(horizontal = 16.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            Text(
-                                email, style = t.body,
-                                color = if (id == fromId) c.blue else c.label,
-                                modifier = Modifier.weight(1f),
-                            )
-                            if (id == fromId) Text("当前", style = t.caption1, color = c.blue)
+                Text(
+                    "继续编辑",
+                    style = t.footnote.copy(fontWeight = FontWeight.SemiBold),
+                    color = c.blue,
+                    modifier = Modifier.tapArea { applyDraft(draft) }.padding(horizontal = 8.dp, vertical = 6.dp),
+                )
+                Text(
+                    "忽略",
+                    style = t.footnote,
+                    color = c.label2,
+                    modifier = Modifier.tapArea { offer = null }.padding(horizontal = 8.dp, vertical = 6.dp),
+                )
+            }
+            OTDivider(strong = true)
+        }
+
+        if (error.isNotEmpty()) {
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(error, style = t.footnote, color = c.red, modifier = Modifier.weight(1f))
+                if (sendFailed) {
+                    Text(
+                        "重试发送",
+                        style = t.footnote.copy(fontWeight = FontWeight.SemiBold),
+                        color = c.blue,
+                        modifier = Modifier.tapArea { if (!busy) send() }.padding(horizontal = 8.dp, vertical = 4.dp),
+                    )
+                }
+            }
+        }
+        if (draftSaved && sendFailed) {
+            Text(
+                "已存草稿，可稍后重试",
+                style = t.footnote,
+                color = c.label2,
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 2.dp),
+            )
+        }
+        if (restoreNote.isNotEmpty()) {
+            Text(
+                restoreNote,
+                style = t.footnote,
+                color = c.label2,
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 2.dp),
+            )
+        }
+
+        Column(Modifier.weight(1f).verticalScroll(rememberScrollState())) {
+            // 发件人
+            if (accounts.isNotEmpty()) {
+                Column(Modifier.fillMaxWidth().background(c.bgCard)) {
+                    Row(
+                        Modifier.fillMaxWidth().height(48.dp).tapArea { pickingFrom = !pickingFrom }.padding(horizontal = 16.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text("发件人", style = t.body, color = c.label, modifier = Modifier.width(56.dp))
+                        Text(
+                            fromEmail, style = t.body, color = c.label2, maxLines = 1,
+                            modifier = Modifier.weight(1f),
+                            textAlign = TextAlign.End,
+                        )
+                        Icon(Icons.Outlined.ChevronRight, contentDescription = null, tint = c.label3, modifier = Modifier.size(14.dp))
+                    }
+                    if (pickingFrom) {
+                        accounts.forEach { (id, email) ->
+                            OTDivider(inset = 16)
+                            Row(
+                                Modifier.fillMaxWidth().heightIn(min = 44.dp).tapArea {
+                                    fromId = id
+                                    fromEmail = email
+                                    pickingFrom = false
+                                    touched = true
+                                }.padding(horizontal = 16.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Text(
+                                    email, style = t.body,
+                                    color = if (id == fromId) c.blue else c.label,
+                                    modifier = Modifier.weight(1f),
+                                )
+                                if (id == fromId) Text("当前", style = t.caption1, color = c.blue)
+                            }
                         }
                     }
                 }
-                OTDivider(inset = 16)
+                OTDivider(strong = true)
             }
-            OTFieldRow("收件人", toText, { toText = it }, hint = "someone@example.com")
+
+            // 收件人
+            OTTagField(
+                label = "收件人",
+                tags = toTags,
+                input = toInput,
+                onInput = { v ->
+                    toInput = v
+                    touched = true
+                    if (v.contains(",") || v.contains(";") || v.endsWith(" ")) {
+                        commit(v, toTags, { toTags = it }, { toInput = "" })
+                    }
+                },
+                onRemove = { idx -> toTags = toTags.filterIndexed { i, _ -> i != idx }; touched = true },
+            )
+
+            // 抄送 / 密送控制
             Row(
-                Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp),
-                horizontalArrangement = Arrangement.End,
+                Modifier.fillMaxWidth().background(c.bgCard).padding(start = 16.dp, end = 16.dp, bottom = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
             ) {
+                Box(
+                    Modifier.size(30.dp).clip(CircleShape).background(c.bgInput),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(Icons.Outlined.Person, contentDescription = null, tint = c.blue, modifier = Modifier.size(18.dp))
+                }
+                Spacer(Modifier.weight(1f))
                 Text(
-                    "抄送", style = t.footnote, color = c.blue,
-                    modifier = Modifier.tapArea { showCc = !showCc }.padding(end = 20.dp),
+                    "抄送",
+                    style = t.subhead,
+                    color = c.blue,
+                    modifier = Modifier.height(34.dp).tapArea { showCc = !showCc }.padding(horizontal = 12.dp, vertical = 8.dp),
                 )
                 Text(
-                    "密送", style = t.footnote, color = c.blue,
-                    modifier = Modifier.tapArea { showBcc = !showBcc },
+                    "密送",
+                    style = t.subhead,
+                    color = c.blue,
+                    modifier = Modifier.height(34.dp).tapArea { showBcc = !showBcc }.padding(horizontal = 12.dp, vertical = 8.dp),
                 )
             }
-            if (showCc) OTFieldRow("抄送", ccText, { ccText = it }, hint = "多个用逗号分隔")
-            if (showBcc) OTFieldRow("密送", bccText, { bccText = it }, hint = "多个用逗号分隔")
-            OTDivider(inset = 16)
-            OTFieldRow("主题", subjectText, { subjectText = it }, hint = "主题")
-            OTDivider(inset = 16)
-            // 格式工具栏（样张 02-compose .toolbar）
+            if (showCc) {
+                OTDivider(strong = true)
+                OTTagField(
+                    label = "抄送",
+                    tags = ccTags,
+                    input = ccInput,
+                    onInput = { v ->
+                        ccInput = v
+                        touched = true
+                        if (v.contains(",") || v.contains(";")) commit(v, ccTags, { ccTags = it }, { ccInput = "" })
+                    },
+                    onRemove = { idx -> ccTags = ccTags.filterIndexed { i, _ -> i != idx }; touched = true },
+                )
+            }
+            if (showBcc) {
+                OTDivider(strong = true)
+                OTTagField(
+                    label = "密送",
+                    tags = bccTags,
+                    input = bccInput,
+                    onInput = { v ->
+                        bccInput = v
+                        touched = true
+                        if (v.contains(",") || v.contains(";")) commit(v, bccTags, { bccTags = it }, { bccInput = "" })
+                    },
+                    onRemove = { idx -> bccTags = bccTags.filterIndexed { i, _ -> i != idx }; touched = true },
+                )
+            }
+
+            // 主题
+            OTDivider(strong = true)
             Row(
-                Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
+                Modifier.fillMaxWidth().height(44.dp).background(c.bgCard).padding(horizontal = 16.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Box(Modifier.weight(1f)) {
+                    if (subjectText.isEmpty()) Text("主题", style = t.body, color = c.label3)
+                    BasicTextField(
+                        value = subjectText,
+                        onValueChange = { subjectText = it; touched = true },
+                        singleLine = true,
+                        textStyle = t.body.copy(color = c.label),
+                        cursorBrush = SolidColor(c.blue),
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+            }
+
+            // 正文
+            OTDivider(strong = true)
+            Column(Modifier.fillMaxWidth().background(c.bgCard).padding(horizontal = 16.dp, vertical = 12.dp)) {
+                Box(Modifier.fillMaxWidth().heightIn(min = 260.dp)) {
+                    if (body.text.isEmpty()) Text("正文", style = t.body, color = c.label3)
+                    BasicTextField(
+                        value = body,
+                        onValueChange = { body = it; touched = true },
+                        textStyle = t.body.copy(color = c.label, lineHeight = 22.sp),
+                        cursorBrush = SolidColor(c.blue),
+                        modifier = Modifier.fillMaxWidth().heightIn(min = 260.dp),
+                    )
+                }
+                val quote = quotedHtml.replace(Regex("<[^>]+>"), " ").replace(Regex("\\s+"), " ").trim()
+                if (quote.isNotEmpty()) {
+                    Spacer(Modifier.height(12.dp))
+                    Row(Modifier.fillMaxWidth().height(IntrinsicSize.Min)) {
+                        Box(Modifier.width(3.dp).fillMaxHeight().background(c.separator))
+                        Text(
+                            quote.take(300),
+                            style = t.footnote,
+                            color = c.label2,
+                            modifier = Modifier.padding(start = 10.dp),
+                        )
+                    }
+                }
+                if (signature.isNotEmpty()) {
+                    OTDivider(strong = true)
+                    Spacer(Modifier.height(8.dp))
+                    Text(signature, style = t.footnote, color = c.label2)
+                }
+            }
+
+            // 附件
+            if (picks.isNotEmpty()) {
+                OTDivider(strong = true)
+                Column(Modifier.fillMaxWidth().background(c.bgCard)) {
+                    picks.forEachIndexed { i, name ->
+                        if (i > 0) OTDivider(inset = 16)
+                        val kb = (attachments.getOrNull(i)?.optInt("size") ?: 0) / 1024
+                        Row(
+                            Modifier.fillMaxWidth().heightIn(min = 44.dp).padding(start = 16.dp, end = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Icon(painterResource(R.drawable.ot_attach), contentDescription = null, tint = c.label2, modifier = Modifier.size(18.dp))
+                            Spacer(Modifier.width(8.dp))
+                            Column(Modifier.weight(1f)) {
+                                Text(name, style = t.subhead, color = c.label, maxLines = 1)
+                                Text("${kb.coerceAtLeast(1)} KB", style = t.caption1, color = c.label2)
+                            }
+                            Box(
+                                Modifier.size(28.dp).tapArea {
+                                    picks = picks.filterIndexed { idx, _ -> idx != i }
+                                    attachments.removeAt(i)
+                                    touched = true
+                                },
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                Icon(Icons.Outlined.Close, contentDescription = "移除", tint = c.label3, modifier = Modifier.size(16.dp))
+                            }
+                        }
+                    }
+                }
+            }
+            Spacer(Modifier.height(16.dp))
+        }
+
+        // 格式工具条（.toolbar：44+home、bg-bar、30 按钮 22 图标；项多时横向滑动，不换行）
+        OTDivider(strong = true)
+        val toolsScroll = rememberScrollState()
+        Box(
+            Modifier
+                .fillMaxWidth()
+                .background(c.bgBar)
+                .height(44.dp),
+        ) {
+            Row(
+                Modifier
+                    .fillMaxHeight()
+                    .horizontalScroll(toolsScroll)
+                    .padding(start = 8.dp, end = 36.dp),
                 horizontalArrangement = Arrangement.spacedBy(4.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                val icons = listOf(
-                    Icons.Outlined.FormatBold,
-                    Icons.Outlined.FormatItalic,
-                    Icons.Outlined.FormatUnderlined,
-                    Icons.Outlined.FormatStrikethrough,
-                    Icons.Outlined.FormatListBulleted,
-                    Icons.Outlined.FormatListNumbered,
-                    Icons.Outlined.FormatQuote,
-                )
-                icons.forEach { ic ->
-                    Box(
-                        Modifier.size(32.dp).clip(RoundedCornerShape(8.dp)),
-                        contentAlignment = Alignment.Center,
-                    ) { Icon(ic, contentDescription = null, tint = c.label2, modifier = Modifier.size(18.dp)) }
-                }
-            }
-            OTDivider(inset = 16)
-            Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)) {
-                if (body.isEmpty() && quoted.isEmpty()) {
-                    Text("正文", style = t.body, color = c.label3)
-                }
-                BasicTextField(
-                    value = body,
-                    onValueChange = { body = it },
-                    textStyle = t.body.copy(color = c.label),
-                    cursorBrush = SolidColor(c.blue),
-                    modifier = Modifier.fillMaxWidth().heightIn(min = 160.dp),
-                )
-                if (signature.isNotEmpty()) {
-                    Text(signature, style = t.subhead, color = c.label2, modifier = Modifier.padding(top = 12.dp))
-                }
-            }
-        }
-        if (picks.isNotEmpty()) {
-            OTGroup(Modifier.padding(horizontal = OTSpace.s4)) {
-                picks.forEachIndexed { i, name ->
-                    if (i > 0) OTDivider(inset = 16)
-                    val kb = (attachments.getOrNull(i)?.optInt("size") ?: 0) / 1024
-                    Row(
-                        Modifier.fillMaxWidth().heightIn(min = 44.dp).padding(horizontal = 16.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Icon(Icons.Outlined.AttachFile, contentDescription = null, tint = c.label2, modifier = Modifier.size(18.dp))
-                        Spacer(Modifier.size(8.dp))
-                        Column(Modifier.weight(1f)) {
-                            Text(name, style = t.subhead, color = c.label, maxLines = 1)
-                            Text("${kb.coerceAtLeast(1)} KB", style = t.caption1, color = c.label3)
-                        }
-                        Box(
-                            Modifier.size(32.dp).tapArea {
-                                picks = picks.filterIndexed { idx, _ -> idx != i }
-                                attachments.removeAt(i)
-                            },
-                            contentAlignment = Alignment.Center,
-                        ) { Icon(Icons.Outlined.Close, contentDescription = "移除", tint = c.label3, modifier = Modifier.size(18.dp)) }
+                ToolbarButton(text = "B", weight = FontWeight.Bold) { wrap("**", "**") }
+                ToolbarButton(text = "I", italic = true) { wrap("*", "*") }
+                ToolbarButton(text = "U", underline = true) { wrap("__", "__") }
+                ToolbarIcon(R.drawable.ot_list, "项目符号") { prefixLine("- ") }
+                ToolbarIcon(R.drawable.ot_quote, "引用") { prefixLine("> ") }
+                ToolbarIcon(R.drawable.ot_image, "插入图片") { imagePicker.launch(arrayOf("image/*")) }
+                ToolbarIcon(R.drawable.ot_pencil, "插入签名") {
+                    if (signature.isNotEmpty()) {
+                        val add = (if (body.text.isEmpty()) "" else "\n\n") + signature
+                        body = TextFieldValue(body.text + add, TextRange(body.text.length + add.length))
+                        touched = true
                     }
                 }
-            }
-        }
-        OTGroup(Modifier.padding(horizontal = OTSpace.s4)) {
-            Row(
-                Modifier.fillMaxWidth().height(48.dp).tapArea {
+                ToolbarIcon(R.drawable.ot_attach, "添加附件") {
                     picker.launch(arrayOf("image/*", "application/pdf", "text/plain", "*/*"))
-                }.padding(horizontal = 16.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Icon(Icons.Outlined.AttachFile, contentDescription = null, tint = c.label2, modifier = Modifier.size(20.dp))
-                Spacer(Modifier.size(8.dp))
-                Text(if (picks.isEmpty()) "添加附件" else "添加附件（已选 ${picks.size} 个）", style = t.body, color = c.label)
-                Spacer(Modifier.weight(1f))
-                Text("最多 10 个，单个 ≤5MB", style = t.caption1, color = c.label3)
+                }
+                ToolbarIcon(R.drawable.ot_clear, "清除格式") {
+                    body = TextFieldValue(
+                        body.text.replace("**", "").replace("__", "").replace(Regex("^> ", RegexOption.MULTILINE), "")
+                            .replace(Regex("^[-*] ", RegexOption.MULTILINE), ""),
+                        body.selection,
+                    )
+                    touched = true
+                }
+            }
+            // 右侧渐隐：还有未露出的工具时提示可横向滑动
+            if (toolsScroll.value < toolsScroll.maxValue) {
+                Box(
+                    Modifier
+                        .align(Alignment.CenterEnd)
+                        .fillMaxHeight()
+                        .width(28.dp)
+                        .background(Brush.horizontalGradient(listOf(Color.Transparent, c.bgBar))),
+                )
             }
         }
-        Spacer(Modifier.height(OTSpace.s3))
     }
+}
+
+/** 收件人 tagfield（.tagfield：白底、标签 56 宽、蓝色 pill 标签 + 输入） */
+@Composable
+private fun OTTagField(
+    label: String,
+    tags: List<String>,
+    input: String,
+    onInput: (String) -> Unit,
+    onRemove: (Int) -> Unit,
+) {
+    val t = OT.type
+    val c = OT.colors
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .background(c.bgCard)
+            .heightIn(min = 44.dp)
+            .padding(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(label, style = t.body, color = c.label, modifier = Modifier.width(56.dp))
+        Row(
+            Modifier.weight(1f),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            tags.forEachIndexed { i, tag ->
+                Row(
+                    Modifier
+                        .height(26.dp)
+                        .clip(RoundedCornerShape(999.dp))
+                        .background(c.blue.copy(alpha = 0.12f))
+                        .tapArea { onRemove(i) }
+                        .padding(start = 8.dp, end = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(tag, style = t.footnote, color = c.blue, maxLines = 1)
+                    Spacer(Modifier.width(4.dp))
+                    Icon(Icons.Outlined.Close, contentDescription = "移除", tint = c.blue, modifier = Modifier.size(12.dp))
+                }
+            }
+            Box(Modifier.weight(1f)) {
+                if (input.isEmpty()) Text("再加一个", style = t.footnote, color = c.label3)
+                BasicTextField(
+                    value = input,
+                    onValueChange = onInput,
+                    singleLine = true,
+                    textStyle = t.footnote.copy(color = c.label),
+                    cursorBrush = SolidColor(c.blue),
+                    keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(keyboardType = KeyboardType.Email),
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun ToolbarButton(
+    text: String,
+    weight: FontWeight = FontWeight.Normal,
+    italic: Boolean = false,
+    underline: Boolean = false,
+    onClick: () -> Unit,
+) {
+    Box(
+        Modifier.size(30.dp).clip(RoundedCornerShape(OT.dimens.rSm.dp)).tapArea { onClick() },
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            text,
+            style = OT.type.subhead.copy(
+                fontWeight = weight,
+                fontStyle = if (italic) FontStyle.Italic else FontStyle.Normal,
+                textDecoration = if (underline) TextDecoration.Underline else TextDecoration.None,
+            ),
+            color = OT.colors.label2,
+        )
+    }
+}
+
+@Composable
+private fun ToolbarIcon(@DrawableRes resId: Int, description: String, onClick: () -> Unit) {
+    Box(
+        Modifier.size(30.dp).clip(RoundedCornerShape(OT.dimens.rSm.dp)).tapArea { onClick() },
+        contentAlignment = Alignment.Center,
+    ) {
+        Icon(painterResource(resId), contentDescription = description, tint = OT.colors.label2, modifier = Modifier.size(22.dp))
+    }
+}
+
+private fun escapeHtml(s: String): String = s
+    .replace("&", "&amp;")
+    .replace("<", "&lt;")
+    .replace(">", "&gt;")
+
+/**
+ * 引用原文：去掉 <style>/<script>/注释，只留正文。
+ * 营销邮件（Outlook/Pinterest 这类）正文里带整块 CSS，不去掉的话
+ * 写信页的引用预览会把 `#outlook a{...}` 当正文显示出来。
+ */
+internal fun buildQuoteHtml(name: String, content: String): String {
+    val cleaned = content
+        .replace(Regex("(?is)<style[^>]*>.*?</style>"), "")
+        .replace(Regex("(?is)<script[^>]*>.*?</script>"), "")
+        .replace(Regex("(?is)<!--.*?-->"), "")
+        .trim()
+    return "<blockquote><p>${escapeHtml(name)} 写道：</p>$cleaned</blockquote>"
+}
+
+/** 轻量格式：**粗体**、*斜体*、__下划线__、- 列表、> 引用；没有上标富文本引擎 */
+private fun textToHtml(text: String): String {
+    fun inline(raw: String): String = escapeHtml(raw)
+        .replace(Regex("\\*\\*(.+?)\\*\\*"), "<strong>$1</strong>")
+        .replace(Regex("__([^_]+)__"), "<u>$1</u>")
+        .replace(Regex("\\*([^*]+)\\*"), "<em>$1</em>")
+    val out = StringBuilder()
+    text.split("\n").forEach { line ->
+        when {
+            line.startsWith("> ") -> out.append("<blockquote>${inline(line.removePrefix("> "))}</blockquote>")
+            line.startsWith("- ") || line.startsWith("* ") ->
+                out.append("<p>• ${inline(line.substring(2))}</p>")
+            else -> out.append("<p>${inline(line).ifEmpty { "<br>" }}</p>")
+        }
+    }
+    return out.toString()
 }

@@ -24,9 +24,21 @@ data class OTDimens(
     val sp5: Int = 20,
     val sp6: Int = 24,
     val sp8: Int = 32,
+    val rXs: Int = 4,
     val rSm: Int = 8,
     val rMd: Int = 12,
     val rLg: Int = 16,
+    val rCard: Int = 20,
+    val rDrawer: Int = 28,
+    val rIcon: Int = 7,
+    val rPill: Int = 100,
+    val drawerW: Int = 322,
+    val drawerGap: Int = 8,
+    val mailRowH: Int = 78,
+    val searchH: Int = 44,
+    val fabSize: Int = 52,
+    val actionH: Int = 46,
+    val sheetGrabber: Int = 36,
 )
 
 val LocalOTColors = staticCompositionLocalOf { LightOTColors }

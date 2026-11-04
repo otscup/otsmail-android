@@ -1,7 +1,15 @@
 build/
 .gradle/
+# 发布签名：口令与密钥绝不入库
+keystore.properties
+*.jks
+*.keystore
 local.properties
 .idea/
 *.iml
 captures/
 .kotlin/
+secrets/
+app/google-services.json
+# 真机截图只留本地，不入库
+shots/

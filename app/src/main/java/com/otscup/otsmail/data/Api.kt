@@ -6,8 +6,30 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URL
+import java.net.URLEncoder
 
 class ApiException(val httpCode: Int, override val message: String) : Exception(message)
+
+/** 把底层网络异常翻成用户能看懂的中文，别把 exception message 直接贴到界面上。 */
+fun friendlyError(e: Throwable): String {
+    val m = e.message.orEmpty()
+    return when {
+        // 401 统一由 AuthState + 顶部提示处理：这里返回空串，各页面就不会再各弹一条「登录已失效」
+        e is ApiException && e.httpCode == 401 -> ""
+        e is java.net.UnknownHostException || m.contains("Unable to resolve host", true) ||
+            m.contains("No address associated", true) -> "无法解析服务器地址，请检查网络或服务器地址"
+        m.contains("Network is unreachable", true) || m.contains("No route to host", true) ->
+            "网络不可用，请检查网络连接"
+        m.contains("Failed to connect", true) || m.contains("Connection refused", true) ->
+            "连接不上服务器，请检查网络或服务器地址"
+        m.contains("SSL", true) || m.contains("certificate", true) -> "安全连接失败，请检查服务器证书"
+        m.contains("end of stream", true) || m.contains("unexpected", true) ->
+            "服务器响应异常，请稍后重试"
+        m.contains("timeout", true) || m.contains("timed out", true) -> "网络超时，请稍后重试"
+        e is ApiException -> e.message.ifEmpty { "请求失败" }
+        else -> "请求失败，请稍后重试"
+    }
+}
 
 data class MailItem(
     val emailId: Long,
@@ -21,7 +43,12 @@ data class MailItem(
     val category: String = "",
     val type: Int = 0,
     val status: Int = 0,
+    val accountId: Long = 0,
+    /** 收件地址（服务端 recipient 数组里的第一个）；发件行为收件人列表首项，展示时按 type 区分 */
+    val recipient: String = "",
 )
+
+data class MailAtt(val filename: String, val key: String)
 
 data class MailDetail(
     val emailId: Long,
@@ -32,8 +59,16 @@ data class MailDetail(
     val content: String,
     val unread: Boolean,
     val starred: Boolean,
-    val attachments: List<String>,
+    val attachments: List<MailAtt>,
     val category: String = "",
+)
+
+/** 翻译结果：成功时服务端返回 translatedContent；alreadyInTargetLang=true 表示正文本来就是目标语言。 */
+data class Translation(
+    val subject: String,
+    val content: String,
+    val sourceLang: String,
+    val alreadyInTargetLang: Boolean,
 )
 
 data class AiAction(val type: String, val ok: Boolean, val error: String)
@@ -46,6 +81,9 @@ data class Me(
     val permKeys: List<String>,
     val signature: String = "",
     val sendOnEnter: String = "enter",
+    val avatar: String = "",
+    val twoFactor: Boolean = false,
+    val twoFactorRequired: Boolean = false,
 )
 
 /**
@@ -58,14 +96,25 @@ object Api {
 
     @Volatile var token: String = ""
 
-    private suspend fun raw(method: String, path: String, body: JSONObject? = null, auth: Boolean = true): JSONObject =
+    /** 站点存储域名（websiteConfig 的 r2Domain），附件下载拼 URL 用。 */
+    @Volatile var r2Domain: String = ""
+
+    private suspend fun raw(
+        method: String,
+        path: String,
+        body: JSONObject? = null,
+        auth: Boolean = true,
+        headers: Map<String, String> = emptyMap(),
+        readTimeoutMs: Int = 20_000,
+    ): JSONObject =
         withContext(Dispatchers.IO) {
             val conn = (URL(base.trimEnd('/') + path).openConnection() as HttpURLConnection).apply {
                 requestMethod = method
                 connectTimeout = 15_000
-                readTimeout = 20_000
+                readTimeout = readTimeoutMs
                 setRequestProperty("Content-Type", "application/json")
                 if (auth && token.isNotEmpty()) setRequestProperty("Authorization", token)
+                headers.forEach { (k, v) -> setRequestProperty(k, v) }
                 if (body != null) {
                     doOutput = true
                     outputStream.use { it.write(body.toString().toByteArray()) }
@@ -77,27 +126,108 @@ object Api {
             conn.disconnect()
             val json = if (text.isBlank()) JSONObject() else JSONObject(text)
             val bizCode = json.optInt("code", code)
+            // 业务错误码优先：服务端 2FA 用 428 表达「缺验证码」，HTTP 状态仍是 200
+            val failCode = if (code in 200..299) bizCode else code
+            // 401 只在这里登记一次，界面统一显示顶部「登录已过期」；token 与缓存都不清
+            if (auth && failCode == 401) AuthState.expire()
             if (code !in 200..299 || bizCode != 200) {
-                throw ApiException(code, json.optString("message").ifEmpty { "HTTP $code" })
+                throw ApiException(failCode, json.optString("message").ifEmpty { "HTTP $code" })
             }
             json
         }
 
-    private suspend fun obj(method: String, path: String, body: JSONObject? = null): JSONObject =
-        raw(method, path, body).optJSONObject("data") ?: JSONObject()
+    private suspend fun obj(
+        method: String,
+        path: String,
+        body: JSONObject? = null,
+        readTimeoutMs: Int = 20_000,
+    ): JSONObject = raw(method, path, body, readTimeoutMs = readTimeoutMs).optJSONObject("data") ?: JSONObject()
 
     private suspend fun arr(method: String, path: String, body: JSONObject? = null): JSONArray =
         raw(method, path, body).optJSONArray("data") ?: JSONArray()
 
     // ---- 会话 ----
 
-    suspend fun login(email: String, password: String): String {
-        val data = raw(
-            "POST", "/login",
-            JSONObject().put("email", email).put("password", password),
-            auth = false,
-        ).optJSONObject("data") ?: JSONObject()
+    suspend fun login(email: String, password: String, twoFactorCode: String = ""): String {
+        val body = JSONObject().put("email", email).put("password", password)
+        if (twoFactorCode.isNotEmpty()) body.put("twoFactorCode", twoFactorCode)
+        val data = raw("POST", "/login", body, auth = false).optJSONObject("data") ?: JSONObject()
         return data.optString("token").ifEmpty { throw ApiException(401, "服务器没有返回 token") }
+    }
+
+    /** POST /register：code 为注册码（服务端 regKey=0 必填、=2 可选），token 为人机验证 token。 */
+    suspend fun register(email: String, password: String, code: String, turnstileToken: String = "") {
+        val body = JSONObject().put("email", email).put("password", password)
+        if (code.isNotEmpty()) body.put("code", code)
+        if (turnstileToken.isNotEmpty()) body.put("token", turnstileToken)
+        raw("POST", "/register", body, auth = false)
+    }
+
+    /** GET /setting/websiteConfig：登录前可读的站点配置（注册开关/域名/第三方登录等）。 */
+    suspend fun websiteConfig(): JSONObject = obj("GET", "/setting/websiteConfig").also {
+        r2Domain = it.optString("r2Domain")
+    }
+
+    /** GET /oauth/oidc/config：企业 SSO 授权端点与公开 clientId。 */
+    suspend fun oidcConfig(providerId: String): JSONObject {
+        val q = if (providerId.isEmpty()) "/oauth/oidc/config" else "/oauth/oidc/config?provider=$providerId"
+        return obj("GET", q)
+    }
+
+    /**
+     * 第三方登录换 token。服务端用 Cookie 里的 oauth_nonce 校验 state，
+     * 浏览器里由登录页写 cookie，原生端只能自己带同名 Cookie 头。
+     */
+    suspend fun oauthLogin(
+        provider: String,
+        code: String,
+        state: String,
+        nonce: String,
+        providerId: String = "",
+        codeVerifier: String = "",
+    ): String {
+        val body = JSONObject().put("code", code).put("state", state).put("nonce", nonce)
+        if (providerId.isNotEmpty()) body.put("provider", providerId)
+        if (codeVerifier.isNotEmpty()) body.put("codeVerifier", codeVerifier)
+        val data = raw(
+            "POST", "/oauth/$provider/login", body,
+            auth = false,
+            headers = mapOf("Cookie" to "oauth_nonce=$nonce"),
+        ).optJSONObject("data") ?: JSONObject()
+        return data.optString("token")
+    }
+
+    /** 附件下载地址：服务端只存 key，和网页端 cvtR2Url 同一套规则拼 URL。 */
+    fun fileUrl(key: String): String {
+        val k = key.trim()
+        if (k.isEmpty()) return ""
+        if (k.startsWith("http://") || k.startsWith("https://")) return k
+        val domain = r2Domain.trim()
+        if (domain.isEmpty()) return base.removeSuffix("/api") + "/" + k
+        val d = if (domain.startsWith("http")) domain else "https://$domain"
+        return d.trimEnd('/') + "/" + k
+    }
+
+    // ---- 推送设备登记（服务端接口尚未实现，失败由 PushManager 静默处理）----
+
+    suspend fun pushRegister(token: String, deviceId: String, appVersion: String) {
+        val body = JSONObject()
+            .put("token", token)
+            .put("platform", "android")
+            .put("deviceId", deviceId)
+            .put("appVersion", appVersion)
+        raw("POST", PushScaffold.REGISTER_PATH, body)
+    }
+
+    suspend fun pushUnregister(authToken: String, token: String) {
+        if (authToken.isEmpty() || token.isEmpty()) return
+        raw(
+            "DELETE",
+            PushScaffold.REGISTER_PATH + "?token=" + URLEncoder.encode(token, "UTF-8"),
+            null,
+            auth = false,
+            headers = mapOf("Authorization" to authToken),
+        )
     }
 
     suspend fun me(): Me {
@@ -111,6 +241,9 @@ object Api {
             permKeys = d.optJSONArray("permKeys").toStringList(),
             signature = d.optString("signature"),
             sendOnEnter = d.optString("sendOnEnter").ifEmpty { "enter" },
+            avatar = d.optString("avatar"),
+            twoFactor = d.optBoolean("twoFactor", false),
+            twoFactorRequired = d.optBoolean("twoFactorRequired", false),
         )
     }
 
@@ -121,6 +254,60 @@ object Api {
             JSONObject().put("signature", signature).put("sendOnEnter", sendOnEnter),
         )
         return me()
+    }
+
+    // ---- 个人设置（对应网页端 /my/*）----
+
+    /** PUT /my/resetPassword：服务端只校验长度 >= 6。 */
+    suspend fun resetPassword(password: String) {
+        obj("PUT", "/my/resetPassword", JSONObject().put("password", password))
+    }
+
+    /** POST /my/setAvatar：只接受 http(s) 外链。 */
+    suspend fun setAvatar(url: String): String {
+        val d = obj("POST", "/my/setAvatar", JSONObject().put("avatar", url))
+        return d.optString("avatar")
+    }
+
+    /** POST /my/uploadAvatar：data:image/...;base64, 前缀，服务端存 R2 后回外链。 */
+    suspend fun uploadAvatar(base64: String): String {
+        val d = obj("POST", "/my/uploadAvatar", JSONObject().put("base64", base64))
+        return d.optString("url")
+    }
+
+    /** PUT /account/setName：网页端个人资料页的「用户名」改的就是这个。 */
+    suspend fun setAccountName(accountId: Long, name: String) {
+        obj("PUT", "/account/setName", JSONObject().put("accountId", accountId).put("name", name))
+    }
+
+    suspend fun twoFactorStatus(): Pair<Boolean, Boolean> {
+        val d = obj("GET", "/my/2fa/status")
+        return d.optBoolean("enabled", false) to d.optBoolean("required", false)
+    }
+
+    suspend fun twoFactorSetup(): Pair<String, String> {
+        val d = obj("POST", "/my/2fa/setup")
+        return d.optString("secret") to d.optString("otpauthUrl")
+    }
+
+    suspend fun twoFactorEnable(code: String) {
+        obj("POST", "/my/2fa/enable", JSONObject().put("code", code))
+    }
+
+    /** 验证码或登录密码任一即可关闭（对应网页端 /my/2fa/disable）。 */
+    suspend fun twoFactorDisable(code: String = "", password: String = "") {
+        val body = JSONObject()
+        if (code.isNotEmpty()) body.put("code", code)
+        if (password.isNotEmpty()) body.put("password", password)
+        obj("POST", "/my/2fa/disable", body)
+    }
+
+    suspend fun setTwoFactorRequired(required: Boolean) {
+        obj("PUT", "/my/2fa/required", JSONObject().put("required", required))
+    }
+
+    suspend fun deleteMyAccount() {
+        obj("DELETE", "/my/delete")
     }
 
     // ---- 邮件 ----
@@ -164,27 +351,36 @@ object Api {
         return out
     }
 
-    suspend fun emails(accountId: Long, page: Int, mailbox: String? = null, keyword: String = "", category: String = ""): Pair<List<MailItem>, Long> {
+    suspend fun emails(accountId: Long, page: Int, mailbox: String? = null, keyword: String = "", category: String = "", allAccounts: Boolean = false): Pair<List<MailItem>, Long> =
+        parseList(emailsRaw(accountId, page, mailbox, keyword, category, allAccounts))
+
+    suspend fun emailsRaw(accountId: Long, page: Int, mailbox: String? = null, keyword: String = "", category: String = "", allAccounts: Boolean = false): JSONObject {
         val q = buildString {
-            append("/email/list?accountId=").append(accountId)
+            if (allAccounts) {
+                append("/email/list?accountId=0&allReceive=1")
+            } else {
+                append("/email/list?accountId=").append(accountId).append("&allReceive=0")
+            }
             append("&size=20&page=").append(page)
-            append("&allReceive=0&emailId=0&timeSort=1&type=0")
+            append("&emailId=0&timeSort=0&type=0")
             if (!mailbox.isNullOrEmpty()) append("&mailbox=").append(mailbox)
             if (category.isNotEmpty()) append("&category=").append(category)
             if (keyword.isNotEmpty()) append("&searchType=all&text=").append(java.net.URLEncoder.encode(keyword, "UTF-8"))
         }
-        val d = obj("GET", q)
-        val list = d.optJSONArray("list").toMailItems()
-        return list to d.optLong("total")
+        return obj("GET", q)
     }
 
     /** 星标邮件：服务端要 size/page，且返回的 list 与 email/list 字段一致。 */
-    suspend fun starred(page: Int): Pair<List<MailItem>, Long> {
-        val d = obj("GET", "/star/list?size=20&page=$page")
-        return d.optJSONArray("list").toMailItems() to d.optLong("total")
-    }
+    suspend fun starred(page: Int): Pair<List<MailItem>, Long> = parseList(starredRaw(page))
 
-    /** AI 对话：/ai/command 接收 text + accountId + history，返回 {reply, actions[]}。 */    suspend fun ai(text: String, accountId: Long, history: List<Pair<String, String>>, emailId: Long? = null): Pair<String, List<AiAction>> {
+    suspend fun starredRaw(page: Int): JSONObject = obj("GET", "/star/list?size=20&page=$page")
+
+    /**
+     * AI 对话：/ai/command 接收 text + accountId + history，返回 {reply, actions[]}。
+     * 服务端要先扫描候选邮件再走模型，实测一次 25 秒以上，所以这里单独放宽读超时到 60 秒，
+     * 否则客户端 20 秒必然先超时（旧版「AI 没回话」的真正原因）。
+     */
+    suspend fun ai(text: String, accountId: Long, history: List<Pair<String, String>>, emailId: Long? = null): Pair<String, List<AiAction>> {
         val hist = org.json.JSONArray()
         history.takeLast(20).forEach { (role, t) ->
             hist.put(JSONObject().put("role", if (role == "me") "user" else "assistant").put("text", t))
@@ -194,7 +390,7 @@ object Api {
             .put("accountId", accountId)
             .put("history", hist)
         if (emailId != null) body.put("emailId", emailId)
-        val d = obj("POST", "/ai/command", body)
+        val d = obj("POST", "/ai/command", body, readTimeoutMs = 60_000)
         val acts = mutableListOf<AiAction>()
         d.optJSONArray("actions")?.let { arr ->
             for (i in 0 until arr.length()) {
@@ -217,28 +413,50 @@ object Api {
 
     // ---- 管理页（全部邮件 / 用户 / 权限 / 注册密钥 / 分析）----
 
-    /** GET /email/list 全量（accountId=0 表示不限）。type/mailbox/status 对应全部邮件页的分组 pills（全部/收件/发件/已删除/无人收件）。 */
+    /**
+     * GET /email/list 全量（allReceive=1 表示不限账号）。type/mailbox/status 对应全部邮件页的分组 pills。
+     * timeSort=0 才是服务端的时间倒序；1 是升序（最旧在前，这就是「全部邮件全是去年的」根因）。
+     * mailbox=all 走的是「除已删除外的全部收件箱+全部分类」，已删除是独立 pills。
+     */
     suspend fun allEmails(
         page: Int,
         keyword: String = "",
         type: Int? = 0,
         mailbox: String? = null,
         status: Int? = null,
-    ): Pair<List<MailItem>, Long> {
-        var q = "/email/list?size=20&page=$page&allReceive=1&timeSort=1" +
-            if (type == null) "" else "&type=$type" +
-            if (mailbox == null) "" else "&mailbox=$mailbox" +
-            if (status == null) "" else "&status=$status"
-        if (keyword.isNotBlank()) q += "&text=" + java.net.URLEncoder.encode(keyword, "UTF-8") + "&searchType=all"
-        val data = obj("GET", q)
-        return data.optJSONArray("list").toMailItems() to data.optLong("total")
+    ): Pair<List<MailItem>, Long> = parseList(allEmailsRaw(page, keyword, type, mailbox, status))
+
+    suspend fun allEmailsRaw(
+        page: Int,
+        keyword: String = "",
+        type: Int? = 0,
+        mailbox: String? = null,
+        status: Int? = null,
+    ): JSONObject {
+        val q = StringBuilder("/email/list?size=20&page=$page&allReceive=1&timeSort=0")
+        if (type != null) q.append("&type=$type")
+        if (mailbox != null) q.append("&mailbox=$mailbox")
+        if (status != null) q.append("&status=$status")
+        if (keyword.isNotBlank()) {
+            q.append("&text=").append(java.net.URLEncoder.encode(keyword, "UTF-8")).append("&searchType=all")
+        }
+        return obj("GET", q.toString())
     }
 
     /** GET /analysis/echarts：总览计数、15 天用户/邮件增长、发件人占比、今日发送。 */
     suspend fun analysisEcharts(): JSONObject = obj("GET", "/analysis/echarts")
 
-    suspend fun users(page: Int, status: Int = -1): Pair<List<JSONObject>, Long> {
-        val data = obj("GET", "/user/list?size=20&page=$page&status=$status&sort=desc")
+    /**
+     * GET /user/list：服务端分页参数是 num（第几页）+ size，排序用 timeSort（0=userId 倒序），
+     * 之前传 page/sort 全被忽略 → num=NaN，列表为空或报错。status=-1 表示不过滤。
+     */
+    suspend fun users(page: Int, status: Int = -1, keyword: String = ""): Pair<List<JSONObject>, Long> {
+        val q = StringBuilder("/user/list?size=20&num=$page&timeSort=0")
+        if (status >= 0) q.append("&status=$status")
+        if (keyword.isNotBlank()) {
+            q.append("&email=").append(java.net.URLEncoder.encode(keyword, "UTF-8"))
+        }
+        val data = obj("GET", q.toString())
         val arr = data.optJSONArray("list") ?: org.json.JSONArray()
         val list = (0 until arr.length()).map { arr.getJSONObject(it) }
         return list to data.optLong("total")
@@ -291,29 +509,106 @@ object Api {
     /** 菜单计数：{inbox, sent, deleted, spam, …}，分析页与收件箱标题共用。 */
     suspend fun counts(): JSONObject = obj("GET", "/email/menu-counts").also { }
 
-    /** POST /translation/translate：lang 只收 zh/en/ja/ko/fr/de/es/ru/pt/it。 */
-    suspend fun translate(emailId: Long, lang: String): String {
+    /**
+     * POST /translation/translate：lang 只收 zh/en/ja/ko/fr/de/es/ru/pt/it。
+     * 服务端返回字段是 translatedSubject / translatedContent / sourceLang / alreadyInTargetLang，
+     * 之前误读 content/text → 成功也被当成空串，界面才误报「正文已经是中文」。
+     */
+    suspend fun translate(emailId: Long, lang: String): Translation {
         val data = obj("POST", "/translation/translate", JSONObject().put("emailId", emailId).put("targetLang", lang))
-        return data.optString("content", data.optString("text", ""))
+        return Translation(
+            subject = data.optString("translatedSubject", ""),
+            content = data.optString("translatedContent", ""),
+            sourceLang = data.optString("sourceLang", ""),
+            alreadyInTargetLang = data.optBoolean("alreadyInTargetLang", false),
+        )
     }
 
-    suspend fun detail(emailId: Long): MailDetail {        val d = obj("GET", "/email/detail?emailId=$emailId")
+    suspend fun detail(emailId: Long): MailDetail = parseDetail(detailRaw(emailId))
+
+    suspend fun detailRaw(emailId: Long): JSONObject = obj("GET", "/email/detail?emailId=$emailId")
+
+    /**
+     * 服务端 /email/detail 返回的字段 → MailDetail；缓存落盘也复用这一份解析。
+     *
+     * 正文按 html(content) → 纯文本(text) 的顺序回退：纯文本邮件的内容只写进 text，
+     * 旧实现只读 content，于是正文区一片空白（用户反馈的「部分邮件进去空白」）。
+     * 存进缓存的是转换后的 HTML，所以离线重开也有正文。
+     */
+    fun parseDetail(d: JSONObject): MailDetail {
+        val html = d.optString("content")
+        val text = d.optString("text")
+        val body = when {
+            htmlHasVisible(html) -> html
+            text.isNotBlank() -> textToHtml(text)
+            else -> ""
+        }
         return MailDetail(
             emailId = d.optLong("emailId"),
             subject = d.optString("subject"),
             from = d.optString("sendEmail"),
             name = d.optString("name").ifEmpty { d.optString("sendEmail") },
             time = d.optString("createTime"),
-            content = d.optString("content"),
+            content = body,
             unread = d.optInt("unread", 1) == 0,
-            starred = d.optInt("isStar", 0) == 1,
-            attachments = d.optJSONArray("attList").mapObjects { it.optString("filename") },
+            starred = d.optInt("isStar", 0) == 1 || d.optLong("starId", 0) > 0,
+            attachments = d.optJSONArray("attList")?.let { a ->
+                (0 until a.length()).mapNotNull { i ->
+                    val o = a.optJSONObject(i) ?: return@mapNotNull null
+                    MailAtt(o.optString("filename"), o.optString("key"))
+                }
+            }.orEmpty(),
             category = d.optString("category"),
         )
     }
 
+    /** HTML 是否有可见内容：只有标签/空白也算空壳；但图片、表格这类非文字结构仍算有正文。 */
+    private fun htmlHasVisible(html: String): Boolean {
+        if (html.isBlank()) return false
+        val plain = html.replace(Regex("<[^>]*>"), "")
+            .replace("&nbsp;", " ")
+            .replace(Regex("\\s+"), "")
+        if (plain.isNotEmpty()) return true
+        return Regex("<(img|video|audio|table|hr|iframe|embed|object)\\b", RegexOption.IGNORE_CASE)
+            .containsMatchIn(html)
+    }
+
+    /** 纯文本正文 → 简单 HTML，保留换行。 */
+    private fun textToHtml(text: String): String {
+        fun esc(s: String) = s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        return text.trim().replace("\r\n", "\n").split("\n").joinToString("") { line ->
+            if (line.isBlank()) "<br>" else "<p>${esc(line)}</p>"
+        }
+    }
+
+    fun parseList(d: JSONObject): Pair<List<MailItem>, Long> =
+        d.optJSONArray("list").toMailItems() to d.optLong("total")
+
     suspend fun markRead(emailId: Long) {
         obj("PUT", "/email/read", JSONObject().put("emailIds", JSONArray().put(emailId)))
+    }
+
+    suspend fun markUnread(emailId: Long) {
+        obj("PUT", "/email/unread", JSONObject().put("emailIds", JSONArray().put(emailId)))
+    }
+
+    /** PUT /email/category：移动到主要/社交/推广/动态。 */
+    suspend fun moveCategory(emailId: Long, category: String) {
+        obj(
+            "PUT", "/email/category",
+            JSONObject().put("emailIds", JSONArray().put(emailId)).put("category", category),
+        )
+    }
+
+    /**
+     * 上下封切换：timeSort=1 取更新的、=0 取更早的，size=1 拿到的就是相邻那封。
+     * 返回 0 表示到头了。
+     */
+    suspend fun neighbor(emailId: Long, newer: Boolean): Long {
+        val q = "/email/list?accountId=0&allReceive=1&size=1&page=1&emailId=$emailId" +
+            "&timeSort=${if (newer) 1 else 0}&type=0"
+        val arr = obj("GET", q).optJSONArray("list") ?: return 0L
+        return arr.optJSONObject(0)?.optLong("emailId") ?: 0L
     }
 
     suspend fun starAdd(emailId: Long) {
@@ -363,8 +658,19 @@ object Api {
 
     suspend fun menuCounts(): Map<String, Int> {
         val d = obj("GET", "/email/menu-counts")
-        return listOf("inbox", "unread", "sent", "deleted", "spam", "draft")
-            .associateWith { d.optInt(it) }
+        // 服务端 menu-counts 只给 inbox/sent/deleted/spam，未读数单查一次列表的 total。
+        val unread = runCatching {
+            obj(
+                "GET",
+                "/email/list?accountId=0&allReceive=1&size=1&page=1&emailId=0&timeSort=0&type=0&mailbox=unread",
+            ).optLong("total").toInt()
+        }.getOrDefault(0)
+        // 星标没有菜单计数接口，用 /star/list 的 total
+        val starred = runCatching {
+            obj("GET", "/star/list?size=1&page=1").optLong("total").toInt()
+        }.getOrDefault(0)
+        return listOf("inbox", "sent", "deleted", "spam", "draft").associateWith { d.optInt(it) } +
+            ("unread" to unread) + ("starred" to starred)
     }
 
     // ---- 解析小工具 ----
@@ -391,11 +697,29 @@ object Api {
                 text = o.optString("text"),
                 time = o.optString("createTime"),
                 unread = o.optInt("unread", 1) == 0,
-                starred = o.optInt("isStar", 0) == 1,
+                starred = o.optInt("isStar", 0) == 1 || o.optLong("starId", 0) > 0,
                 category = o.optString("category"),
                 type = o.optInt("type"),
                 status = o.optInt("status"),
+                accountId = o.optLong("accountId"),
+                recipient = firstAddress(o.optString("recipient")),
             )
         }
+    }
+
+    /** 服务端 recipient 是 JSON 数组，元素可能是 {"address":"a@b"} 或纯字符串；取第一个非空地址。 */
+    private fun firstAddress(raw: String): String {
+        if (raw.isBlank()) return ""
+        return runCatching {
+            val arr = JSONArray(raw)
+            for (i in 0 until arr.length()) {
+                val addr = when (val v = arr.opt(i)) {
+                    is JSONObject -> v.optString("address").ifEmpty { v.optString("email") }
+                    else -> v?.toString().orEmpty()
+                }
+                if (addr.isNotBlank()) return@runCatching addr.trim()
+            }
+            ""
+        }.getOrDefault("")
     }
 }

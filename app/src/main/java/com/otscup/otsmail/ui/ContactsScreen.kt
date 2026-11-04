@@ -32,6 +32,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.res.painterResource
+import com.otscup.otsmail.R
 import com.otscup.otsmail.data.Api
 import com.otscup.otsmail.data.Session
 import com.otscup.otsmail.ui.theme.OT
@@ -136,7 +138,7 @@ fun ContactsScreen(session: Session, onBack: () -> Unit, onWrite: (String) -> Un
                                                 )
                                             }
                                             Icon(
-                                                Icons.Outlined.ChevronRight, contentDescription = null,
+                                                painterResource(R.drawable.ot_chevron_right), contentDescription = null,
                                                 tint = c.label3, modifier = Modifier.size(18.dp),
                                             )
                                         }

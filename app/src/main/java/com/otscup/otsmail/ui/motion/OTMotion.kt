@@ -1,5 +1,6 @@
 package com.otscup.otsmail.ui.motion
 
+import android.provider.Settings
 import androidx.compose.animation.core.SpringSpec
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
@@ -8,8 +9,10 @@ import androidx.compose.foundation.interaction.InteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.platform.LocalContext
 import kotlin.math.PI
 import kotlin.math.abs
 
@@ -58,11 +61,29 @@ fun projectMomentum(velocityPxPerSec: Float, decelerationRate: Float = 0.998f): 
     (velocityPxPerSec / 1000f) * decelerationRate / (1f - decelerationRate)
 
 /**
- * 按下反馈：按下立刻缩（不进社交媒体那种弹跳），松手用弹簧回弹。
- * 列表行不要用它——用 M3 默认 ripple，那是安卓用户的预期。
+ * 系统「移除动画」（设置 → 无障碍 → 移除动画）会把 ANIMATOR_DURATION_SCALE 置 0。
+ * 这时所有位移弹簧都应降级成很短的淡入淡出，而不是照常播放。
+ */
+@Composable
+fun rememberReduceMotion(): Boolean {
+    val context = LocalContext.current
+    return remember {
+        runCatching {
+            Settings.Global.getFloat(
+                context.contentResolver,
+                Settings.Global.ANIMATOR_DURATION_SCALE,
+                1f,
+            )
+        }.getOrDefault(1f) == 0f
+    }
+}
+
+/**
+ * 按下反馈：按下立刻缩，松手用弹簧回弹。系统移除动画时不做缩放，只保留原有的按下底色。
  */
 @Composable
 fun Modifier.pressScale(source: InteractionSource, pressedScale: Float = 0.97f): Modifier {
+    if (rememberReduceMotion()) return this
     val pressed by source.collectIsPressedAsState()
     val scale by animateFloatAsState(
         targetValue = if (pressed) pressedScale else 1f,
