@@ -17,7 +17,9 @@ OTS Mail 的 Android 客户端。Kotlin + Jetpack Compose，Material 3，单 Act
 
 ## 普通用户：下载安装
 
-在仓库的 **Releases** 页面下载最新的 `otsmail-<版本>-release.apk`，传到手机点击安装。首次安装需要在系统设置里允许「安装未知来源应用」。
+从 [Releases](https://github.com/otscup/otsmail-android/releases/tag/v0.2.0) 下载 `otsmail-0.2.0-release.apk`，传到手机点击安装。首次安装需要在系统设置里允许「安装未知来源应用」。
+
+> 仓库是私有的，下载前需要用有访问权限的 GitHub 账号登录。
 
 系统要求：Android 8.0（API 26）及以上。
 
