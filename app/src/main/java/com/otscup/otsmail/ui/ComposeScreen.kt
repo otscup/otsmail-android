@@ -1,6 +1,7 @@
 package com.otscup.otsmail.ui
 
 import android.provider.OpenableColumns
+import android.text.Html
 import android.util.Base64
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -10,6 +11,8 @@ import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -24,10 +27,13 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.ChevronRight
@@ -50,11 +56,18 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEvent
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextAlign
@@ -69,6 +82,7 @@ import com.otscup.otsmail.data.Api
 import com.otscup.otsmail.data.Draft
 import com.otscup.otsmail.data.Drafts
 import com.otscup.otsmail.data.MailCache
+import com.otscup.otsmail.data.MailItem
 import com.otscup.otsmail.data.Session
 import com.otscup.otsmail.data.friendlyError
 import com.otscup.otsmail.ui.theme.OT
@@ -120,6 +134,14 @@ fun ComposeScreen(
     var toInput by remember {
         mutableStateOf(restored?.toInput ?: if (restored == null && toTags.isEmpty() && to.isNotBlank()) to else "")
     }
+    // 收件人格式错误：明确提示，绝不静默吞掉输入的地址
+    var toError by remember { mutableStateOf("") }
+    var ccError by remember { mutableStateOf("") }
+    var bccError by remember { mutableStateOf("") }
+    // 通讯录补全：/contact/list?q= 返回的候选，最多 6 条；索引供上下键选择。
+    // 另外抓最近 40 封收件人做「常用」排序（服务端 contact 表没有往来/频次字段）。
+    var toSuggest by remember { mutableStateOf(listOf<Triple<String, String, String>>()) }
+    var toSuggestIndex by remember { mutableStateOf(0) }
     var ccTags by remember { mutableStateOf(restored?.ccTags ?: listOf()) }
     var bccTags by remember { mutableStateOf(restored?.bccTags ?: listOf()) }
     var ccInput by remember { mutableStateOf(restored?.ccInput.orEmpty()) }
@@ -307,10 +329,170 @@ fun ComposeScreen(
         persist()
     }
 
-    fun commit(input: String, tags: List<String>, setTags: (List<String>) -> Unit, clear: () -> Unit) {
-        val v = input.trim().trim(',', ';', ' ')
-        if (v.contains("@")) setTags(tags + v)
-        clear()
+    val emailRe = remember { Regex("^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$") }
+    val addressSplit = remember { Regex("[,;\\s]+") }
+
+    /** 中文输入法/中文应用粘贴时常见全角逗号、分号和全角空格，统一成半角再拆分。 */
+    fun normalizeAddressText(raw: String): String =
+        raw.replace('，', ',').replace('；', ';').replace('\u3000', ' ')
+
+    /** 拆分一段文本里的多个地址；返回（合法，非法），合法去重保序。 */
+    fun parseAddresses(raw: String): Pair<List<String>, List<String>> {
+        val good = LinkedHashSet<String>()
+        val bad = ArrayList<String>()
+        normalizeAddressText(raw).split(addressSplit).map { it.trim() }.filter { it.isNotEmpty() }.forEach {
+            if (emailRe.matches(it)) good.add(it) else bad.add(it)
+        }
+        return good.toList() to bad
+    }
+
+    /**
+     * 把一段输入锁定成收件人 tag。
+     * 合法地址按逗号/分号/空白拆分，一次可锁多个；非法段不吞掉，留在输入框并给出提示。
+     */
+    fun commitAddresses(
+        raw: String,
+        tags: List<String>,
+        setTags: (List<String>) -> Unit,
+        setInput: (String) -> Unit,
+        setError: (String) -> Unit,
+        keepRest: String? = null,
+    ) {
+        val (good, bad) = parseAddresses(raw)
+        if (good.isNotEmpty()) {
+            val merged = tags.toMutableList()
+            good.forEach { if (!merged.contains(it)) merged.add(it) }
+            setTags(merged)
+            touched = true
+        }
+        if (bad.isNotEmpty()) {
+            setError("邮箱格式不正确：${bad.joinToString("、")}")
+            setInput(keepRest ?: bad.joinToString(", "))
+        } else {
+            setError("")
+            setInput(keepRest.orEmpty())
+        }
+    }
+
+    /**
+     * 输入变化：遇到分隔符（Enter 之外的逗号/分号/空格）或整段粘贴多地址时立即锁定；
+     * 逐字输入时只把最后一个未写完的片段留在输入框，不打断输入。
+     */
+    fun onAddressInput(
+        raw: String,
+        tags: List<String>,
+        setTags: (List<String>) -> Unit,
+        setInput: (String) -> Unit,
+        setError: (String) -> Unit,
+    ) {
+        val v = normalizeAddressText(raw)
+        val endsWithDelimiter = v.isNotEmpty() && v.last().let { it == ',' || it == ';' || it.isWhitespace() }
+        val parts = v.split(addressSplit).map { it.trim() }.filter { it.isNotEmpty() }
+        when {
+            endsWithDelimiter -> commitAddresses(v, tags, setTags, setInput, setError)
+            parts.size > 1 && parts.all { emailRe.matches(it) } ->
+                commitAddresses(v, tags, setTags, setInput, setError)
+            parts.size > 1 -> commitAddresses(
+                parts.dropLast(1).joinToString(","), tags, setTags, setInput, setError,
+                keepRest = parts.last(),
+            )
+            else -> {
+                setInput(v)
+                setError("")
+            }
+        }
+    }
+
+    fun addSuggest(index: Int) {
+        val item = toSuggest.getOrNull(index) ?: return
+        if (toTags.none { it.equals(item.second, true) }) toTags = toTags + item.second
+        toInput = ""
+        toError = ""
+        toSuggest = emptyList()
+        toSuggestIndex = 0
+        touched = true
+    }
+
+    /** Enter / IME 完成：完整地址优先锁定；只输了半截就选高亮候选；都没有才明确报错。 */
+    fun commitTypedTo() {
+        val typed = toInput.trim()
+        when {
+            emailRe.matches(typed) -> commitAddresses(typed, toTags, { toTags = it }, { toInput = it }, { toError = it })
+            toSuggest.isNotEmpty() -> addSuggest(toSuggestIndex)
+            typed.isNotEmpty() -> toError = "邮箱格式不正确：$typed"
+        }
+    }
+
+    // 收件人补全：1 个字符起查 /contact/list?q=（服务端按 name/email LIKE 匹配），250ms 防抖。
+    // contact 表没有最近往来/使用频次字段，额外从最近两页收件箱统计发件人频次做「常用」排序。
+    var frequentContacts by remember { mutableStateOf<Map<String, FrequentContact>>(emptyMap()) }
+    var frequentLoaded by remember { mutableStateOf(false) }
+    var frequentFrom by remember { mutableStateOf(-1L) }
+    // 通知/营销类地址不是「常联系人」，避免补全时排在真人前面
+    fun isAutomatedSender(email: String): Boolean {
+        val local = email.substringBefore("@")
+        return local.contains("noreply") || local.contains("no-reply") ||
+            local.startsWith("notification") || local.startsWith("notify") ||
+            local.startsWith("mailer") || local.startsWith("bounce") ||
+            local.startsWith("donotreply") || local.startsWith("do-not-reply") ||
+            local == "postmaster"
+    }
+    LaunchedEffect(toInput, toTags, fromId) {
+        val q = toInput.trim()
+        if (q.isEmpty()) {
+            toSuggest = emptyList()
+            toSuggestIndex = 0
+            return@LaunchedEffect
+        }
+        delay(250)
+        if (!frequentLoaded || frequentFrom != fromId) {
+            val sourceAccount = if (fromId > 0) fromId else accountId
+            val seen = LinkedHashMap<String, FrequentContact>()
+            for (page in 1..2) {
+                val (list, _) = runCatching { Api.emails(sourceAccount, page) }.getOrDefault(emptyList<MailItem>() to 0L)
+                if (list.isEmpty()) break
+                list.forEach { m ->
+                    val email = m.from.trim().lowercase()
+                    if (email.contains("@") && !isAutomatedSender(email)) {
+                        val prev = seen[email]
+                        seen[email] = FrequentContact(
+                            m.name.ifBlank { email.substringBefore("@") },
+                            email,
+                            (prev?.count ?: 0) + 1,
+                        )
+                    }
+                }
+            }
+            frequentContacts = seen
+            frequentFrom = fromId
+            frequentLoaded = true
+        }
+        val book = runCatching { Api.contacts(q) }.getOrDefault(emptyList())
+        val merged = LinkedHashMap<String, Triple<String, String, String>>()
+        book.forEach { if (it.second.contains("@")) merged.putIfAbsent(it.second.lowercase(), it) }
+        frequentContacts.values
+            .filter { it.email.contains(q, true) || it.name.contains(q, true) }
+            .forEach { merged.putIfAbsent(it.email, Triple(it.name, it.email, "")) }
+        val list = merged.values
+            .filter { c -> toTags.none { tag -> tag.equals(c.second, true) } }
+            .sortedWith(
+                compareBy(
+                    { c -> if ((frequentContacts[c.second.lowercase()]?.count ?: 0) > 0) 0 else 1 },
+                    { c -> -(frequentContacts[c.second.lowercase()]?.count ?: 0) },
+                    { c ->
+                        when {
+                            c.second.startsWith(q, true) -> 0
+                            c.first.startsWith(q, true) -> 1
+                            else -> 2
+                        }
+                    },
+                    { it.first.lowercase() },
+                    { it.second.lowercase() },
+                ),
+            )
+            .take(6)
+        toSuggest = list
+        toSuggestIndex = 0
     }
 
     fun wrap(prefix: String, suffix: String) {
@@ -330,9 +512,59 @@ fun ComposeScreen(
         touched = true
     }
 
+    /** 插入 [文字](地址)：选中文字当标签，光标落在 https:// 上，用户直接接着输入。 */
+    fun insertLink() {
+        val sel = body.selection
+        val start = minOf(sel.start, sel.end)
+        val end = maxOf(sel.start, sel.end)
+        val label = body.text.substring(start, end).ifBlank { "链接文字" }
+        val url = "https://"
+        val snippet = "[$label]($url)"
+        val newText = body.text.substring(0, start) + snippet + body.text.substring(end)
+        val urlStart = start + 1 + label.length + 2
+        body = TextFieldValue(newText, TextRange(urlStart, urlStart + url.length))
+        touched = true
+    }
+
+    /** 清除格式：去掉轻量标记，保留文字与链接地址对应的标签。 */
+    fun clearFormat() {
+        val cleaned = body.text
+            .replace(Regex("\\[([^\\]\\n]+)\\]\\(([^)\\s]+)\\)"), "$1")
+            .replace("**", "")
+            .replace("__", "")
+            .replace(Regex("^#{1,2} ", RegexOption.MULTILINE), "")
+            .replace(Regex("^> ", RegexOption.MULTILINE), "")
+            .replace(Regex("^[-*] ", RegexOption.MULTILINE), "")
+            .replace(Regex("^\\d+\\. ", RegexOption.MULTILINE), "")
+        body = TextFieldValue(cleaned, TextRange(body.selection.start.coerceAtMost(cleaned.length)))
+        touched = true
+    }
+
     fun send() {
         if (busy) return
-        val recipients = toTags + listOfNotNull(toInput.trim().takeIf { it.contains("@") })
+        // 输入框里还没按 Enter 的地址先校验：非法就明确报错，不合规地址不会被悄悄丢掉
+        if (toInput.isNotBlank()) {
+            if (!emailRe.matches(toInput.trim())) {
+                toError = "邮箱格式不正确：${toInput.trim()}"
+                return
+            }
+            commitAddresses(toInput, toTags, { toTags = it }, { toInput = it }, { toError = it })
+        }
+        if (ccInput.isNotBlank()) {
+            if (!emailRe.matches(ccInput.trim())) {
+                ccError = "邮箱格式不正确：${ccInput.trim()}"
+                return
+            }
+            commitAddresses(ccInput, ccTags, { ccTags = it }, { ccInput = it }, { ccError = it })
+        }
+        if (bccInput.isNotBlank()) {
+            if (!emailRe.matches(bccInput.trim())) {
+                bccError = "邮箱格式不正确：${bccInput.trim()}"
+                return
+            }
+            commitAddresses(bccInput, bccTags, { bccTags = it }, { bccInput = it }, { bccError = it })
+        }
+        val recipients = toTags
         if (recipients.isEmpty()) {
             error = "请填写收件人"
             return
@@ -345,15 +577,18 @@ fun ComposeScreen(
             append(body.text)
             if (sig.isNotEmpty()) append(if (body.text.isEmpty()) sig else "\n\n$sig")
         }.ifEmpty { " " }
-        val html = textToHtml(body.text) +
+        // 显式声明 charset=utf-8：引用里可能带原信的旧 charset 声明，缺省声明会让收件端按错编码解
+        val html = "<!DOCTYPE html><html><head><meta charset=\"utf-8\"></head><body>" +
+            textToHtml(body.text) +
             (if (sig.isEmpty()) "" else "<p>${escapeHtml(sig).replace("\n", "<br>")}</p>") +
-            quotedHtml
+            quotedHtml +
+            "</body></html>"
         scope.launch {
             runCatching {
                 Api.send(
                     fromId, recipients, subjectText, plain, html, attachments,
-                    cc = ccTags + listOfNotNull(ccInput.trim().takeIf { it.contains("@") }),
-                    bcc = bccTags + listOfNotNull(bccInput.trim().takeIf { it.contains("@") }),
+                    cc = ccTags,
+                    bcc = bccTags,
                 )
             }
                 .onSuccess {
@@ -525,15 +760,69 @@ fun ComposeScreen(
                 label = "收件人",
                 tags = toTags,
                 input = toInput,
+                error = toError,
                 onInput = { v ->
-                    toInput = v
                     touched = true
-                    if (v.contains(",") || v.contains(";") || v.endsWith(" ")) {
-                        commit(v, toTags, { toTags = it }, { toInput = "" })
-                    }
+                    onAddressInput(v, toTags, { toTags = it }, { toInput = it }, { toError = it })
                 },
-                onRemove = { idx -> toTags = toTags.filterIndexed { i, _ -> i != idx }; touched = true },
+                onCommit = { commitTypedTo() },
+                onRemove = {
+                    toTags = toTags.filterIndexed { i, _ -> i != it }
+                    toError = ""
+                    touched = true
+                },
+                onKeyEvent = { e ->
+                    if (e.type == KeyEventType.KeyDown) {
+                        when (e.key) {
+                            Key.DirectionDown -> if (toSuggest.isNotEmpty()) {
+                                toSuggestIndex = (toSuggestIndex + 1) % toSuggest.size
+                                true
+                            } else false
+                            Key.DirectionUp -> if (toSuggest.isNotEmpty()) {
+                                toSuggestIndex = (toSuggestIndex - 1 + toSuggest.size) % toSuggest.size
+                                true
+                            } else false
+                            Key.Enter, Key.NumPadEnter -> {
+                                commitTypedTo()
+                                true
+                            }
+                            else -> false
+                        }
+                    } else false
+                },
             )
+
+            // 通讯录候选：点选或键盘上下 + Enter 都锁定成 tag
+            if (toSuggest.isNotEmpty()) {
+                Column(Modifier.fillMaxWidth().background(c.bgCard)) {
+                    OTDivider(inset = 16)
+                    toSuggest.forEachIndexed { i, item ->
+                        Row(
+                            Modifier
+                                .fillMaxWidth()
+                                .heightIn(min = 48.dp)
+                                .background(if (i == toSuggestIndex) c.bgInput else c.bgCard)
+                                .tapArea { addSuggest(i) }
+                                .padding(horizontal = 16.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Icon(
+                                Icons.Outlined.Person, contentDescription = null,
+                                tint = c.label3, modifier = Modifier.size(18.dp),
+                            )
+                            Spacer(Modifier.width(10.dp))
+                            Column(Modifier.weight(1f)) {
+                                Text(item.first, style = t.subhead, color = c.label, maxLines = 1)
+                                Text(item.second, style = t.caption1, color = c.label2, maxLines = 1)
+                            }
+                            if (item.third.isNotBlank()) {
+                                Text(item.third, style = t.caption1, color = c.label3, maxLines = 1)
+                            }
+                        }
+                        if (i < toSuggest.lastIndex) OTDivider(inset = 16)
+                    }
+                }
+            }
 
             // 抄送 / 密送控制
             Row(
@@ -566,12 +855,21 @@ fun ComposeScreen(
                     label = "抄送",
                     tags = ccTags,
                     input = ccInput,
+                    error = ccError,
                     onInput = { v ->
-                        ccInput = v
                         touched = true
-                        if (v.contains(",") || v.contains(";")) commit(v, ccTags, { ccTags = it }, { ccInput = "" })
+                        onAddressInput(v, ccTags, { ccTags = it }, { ccInput = it }, { ccError = it })
                     },
-                    onRemove = { idx -> ccTags = ccTags.filterIndexed { i, _ -> i != idx }; touched = true },
+                    onCommit = {
+                        if (ccInput.isNotBlank()) {
+                            commitAddresses(ccInput, ccTags, { ccTags = it }, { ccInput = it }, { ccError = it })
+                        }
+                    },
+                    onRemove = {
+                        ccTags = ccTags.filterIndexed { i, _ -> i != it }
+                        ccError = ""
+                        touched = true
+                    },
                 )
             }
             if (showBcc) {
@@ -580,12 +878,21 @@ fun ComposeScreen(
                     label = "密送",
                     tags = bccTags,
                     input = bccInput,
+                    error = bccError,
                     onInput = { v ->
-                        bccInput = v
                         touched = true
-                        if (v.contains(",") || v.contains(";")) commit(v, bccTags, { bccTags = it }, { bccInput = "" })
+                        onAddressInput(v, bccTags, { bccTags = it }, { bccInput = it }, { bccError = it })
                     },
-                    onRemove = { idx -> bccTags = bccTags.filterIndexed { i, _ -> i != idx }; touched = true },
+                    onCommit = {
+                        if (bccInput.isNotBlank()) {
+                            commitAddresses(bccInput, bccTags, { bccTags = it }, { bccInput = it }, { bccError = it })
+                        }
+                    },
+                    onRemove = {
+                        bccTags = bccTags.filterIndexed { i, _ -> i != it }
+                        bccError = ""
+                        touched = true
+                    },
                 )
             }
 
@@ -621,7 +928,19 @@ fun ComposeScreen(
                         modifier = Modifier.fillMaxWidth().heightIn(min = 260.dp),
                     )
                 }
-                val quote = quotedHtml.replace(Regex("<[^>]+>"), " ").replace(Regex("\\s+"), " ").trim()
+                // 预览只取纯文本：先去掉 style/script 和标签，再交给 Html 解码实体，
+                // 否则 &nbsp;、&#160; 这类实体会被当成正文原样显示（“字面 &amp;lt;”那种表现）
+                val quote = remember(quotedHtml) {
+                    if (quotedHtml.isBlank()) "" else runCatching {
+                        Html.fromHtml(
+                            quotedHtml
+                                .replace(Regex("(?is)<(style|script)[^>]*>.*?</\\1>"), "")
+                                .replace(Regex("(?is)<img[^>]*>"), "")
+                                .take(6000),
+                            Html.FROM_HTML_MODE_LEGACY,
+                        ).toString().replace(Regex("\\s+"), " ").trim().take(300)
+                    }.getOrDefault("")
+                }
                 if (quote.isNotEmpty()) {
                     Spacer(Modifier.height(12.dp))
                     Row(Modifier.fillMaxWidth().height(IntrinsicSize.Min)) {
@@ -675,29 +994,35 @@ fun ComposeScreen(
             Spacer(Modifier.height(16.dp))
         }
 
-        // 格式工具条（.toolbar：44+home、bg-bar、30 按钮 22 图标；项多时横向滑动，不换行）
+        // 格式工具条：56dp 高、每项 48dp 点击区、24dp 图标；项多时横向滑动，不换行
         OTDivider(strong = true)
         val toolsScroll = rememberScrollState()
         Box(
             Modifier
                 .fillMaxWidth()
                 .background(c.bgBar)
-                .height(44.dp),
+                .height(56.dp),
         ) {
             Row(
                 Modifier
                     .fillMaxHeight()
                     .horizontalScroll(toolsScroll)
-                    .padding(start = 8.dp, end = 36.dp),
-                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    .padding(start = 8.dp, end = 44.dp),
+                horizontalArrangement = Arrangement.spacedBy(2.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 ToolbarButton(text = "B", weight = FontWeight.Bold) { wrap("**", "**") }
                 ToolbarButton(text = "I", italic = true) { wrap("*", "*") }
                 ToolbarButton(text = "U", underline = true) { wrap("__", "__") }
-                ToolbarIcon(R.drawable.ot_list, "项目符号") { prefixLine("- ") }
+                ToolbarButton(text = "H", weight = FontWeight.Bold) { prefixLine("# ") }
+                ToolbarIcon(R.drawable.ot_list, "项目符号列表") { prefixLine("- ") }
+                ToolbarButton(text = "1.") { prefixLine("1. ") }
                 ToolbarIcon(R.drawable.ot_quote, "引用") { prefixLine("> ") }
-                ToolbarIcon(R.drawable.ot_image, "插入图片") { imagePicker.launch(arrayOf("image/*")) }
+                ToolbarIcon(R.drawable.ot_link, "插入链接") { insertLink() }
+                ToolbarIcon(R.drawable.ot_image, "插入图片（作为附件）") { imagePicker.launch(arrayOf("image/*")) }
+                ToolbarIcon(R.drawable.ot_attach, "添加附件") {
+                    picker.launch(arrayOf("image/*", "application/pdf", "text/plain", "*/*"))
+                }
                 ToolbarIcon(R.drawable.ot_pencil, "插入签名") {
                     if (signature.isNotEmpty()) {
                         val add = (if (body.text.isEmpty()) "" else "\n\n") + signature
@@ -705,17 +1030,7 @@ fun ComposeScreen(
                         touched = true
                     }
                 }
-                ToolbarIcon(R.drawable.ot_attach, "添加附件") {
-                    picker.launch(arrayOf("image/*", "application/pdf", "text/plain", "*/*"))
-                }
-                ToolbarIcon(R.drawable.ot_clear, "清除格式") {
-                    body = TextFieldValue(
-                        body.text.replace("**", "").replace("__", "").replace(Regex("^> ", RegexOption.MULTILINE), "")
-                            .replace(Regex("^[-*] ", RegexOption.MULTILINE), ""),
-                        body.selection,
-                    )
-                    touched = true
-                }
+                ToolbarIcon(R.drawable.ot_clear, "清除格式") { clearFormat() }
             }
             // 右侧渐隐：还有未露出的工具时提示可横向滑动
             if (toolsScroll.value < toolsScroll.maxValue) {
@@ -723,7 +1038,7 @@ fun ComposeScreen(
                     Modifier
                         .align(Alignment.CenterEnd)
                         .fillMaxHeight()
-                        .width(28.dp)
+                        .width(40.dp)
                         .background(Brush.horizontalGradient(listOf(Color.Transparent, c.bgBar))),
                 )
             }
@@ -731,58 +1046,83 @@ fun ComposeScreen(
     }
 }
 
-/** 收件人 tagfield（.tagfield：白底、标签 56 宽、蓝色 pill 标签 + 输入） */
+/** 收件人 tagfield：白底、标签 pill、输入框；Enter/IME 完成把当前地址锁定成 tag */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun OTTagField(
     label: String,
     tags: List<String>,
     input: String,
     onInput: (String) -> Unit,
+    onCommit: () -> Unit,
     onRemove: (Int) -> Unit,
+    error: String = "",
+    placeholder: String = "再加一个",
+    onKeyEvent: (KeyEvent) -> Boolean = { false },
 ) {
     val t = OT.type
     val c = OT.colors
-    Row(
-        Modifier
-            .fillMaxWidth()
-            .background(c.bgCard)
-            .heightIn(min = 44.dp)
-            .padding(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 8.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Text(label, style = t.body, color = c.label, modifier = Modifier.width(56.dp))
+    Column(Modifier.fillMaxWidth().background(c.bgCard)) {
         Row(
-            Modifier.weight(1f),
+            Modifier
+                .fillMaxWidth()
+                .heightIn(min = 52.dp)
+                .padding(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
         ) {
-            tags.forEachIndexed { i, tag ->
-                Row(
-                    Modifier
-                        .height(26.dp)
-                        .clip(RoundedCornerShape(999.dp))
-                        .background(c.blue.copy(alpha = 0.12f))
-                        .tapArea { onRemove(i) }
-                        .padding(start = 8.dp, end = 6.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Text(tag, style = t.footnote, color = c.blue, maxLines = 1)
-                    Spacer(Modifier.width(4.dp))
-                    Icon(Icons.Outlined.Close, contentDescription = "移除", tint = c.blue, modifier = Modifier.size(12.dp))
+            Text(label, style = t.body, color = c.label, modifier = Modifier.width(56.dp))
+            FlowRow(
+                Modifier.weight(1f),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                tags.forEachIndexed { i, tag ->
+                    Row(
+                        Modifier
+                            .heightIn(min = 30.dp)
+                            .clip(RoundedCornerShape(999.dp))
+                            .background(c.blue.copy(alpha = 0.12f))
+                            .tapArea { onRemove(i) }
+                            .padding(start = 10.dp, end = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(tag, style = t.footnote, color = c.blue, maxLines = 1)
+                        Spacer(Modifier.width(4.dp))
+                        Icon(
+                            Icons.Outlined.Close, contentDescription = "移除 $tag",
+                            tint = c.blue, modifier = Modifier.size(14.dp),
+                        )
+                    }
+                }
+                Box(Modifier.widthIn(min = 140.dp, max = 260.dp)) {
+                    if (input.isEmpty()) Text(placeholder, style = t.footnote, color = c.label3)
+                    BasicTextField(
+                        value = input,
+                        onValueChange = onInput,
+                        singleLine = true,
+                        textStyle = t.footnote.copy(color = c.label),
+                        cursorBrush = SolidColor(c.blue),
+                        // 软键盘声明「下一步/完成」：两种动作都按 Enter 处理，不依赖硬键盘
+                        keyboardOptions = KeyboardOptions(
+                            keyboardType = KeyboardType.Email,
+                            imeAction = ImeAction.Next,
+                        ),
+                        keyboardActions = KeyboardActions(
+                            onNext = { onCommit() },
+                            onDone = { onCommit() },
+                        ),
+                        modifier = Modifier.fillMaxWidth().onPreviewKeyEvent(onKeyEvent),
+                    )
                 }
             }
-            Box(Modifier.weight(1f)) {
-                if (input.isEmpty()) Text("再加一个", style = t.footnote, color = c.label3)
-                BasicTextField(
-                    value = input,
-                    onValueChange = onInput,
-                    singleLine = true,
-                    textStyle = t.footnote.copy(color = c.label),
-                    cursorBrush = SolidColor(c.blue),
-                    keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(keyboardType = KeyboardType.Email),
-                    modifier = Modifier.fillMaxWidth(),
-                )
-            }
+        }
+        if (error.isNotEmpty()) {
+            Text(
+                error,
+                style = t.caption1,
+                color = c.red,
+                modifier = Modifier.padding(start = 72.dp, end = 16.dp, bottom = 8.dp),
+            )
         }
     }
 }
@@ -796,12 +1136,13 @@ private fun ToolbarButton(
     onClick: () -> Unit,
 ) {
     Box(
-        Modifier.size(30.dp).clip(RoundedCornerShape(OT.dimens.rSm.dp)).tapArea { onClick() },
+        Modifier.size(48.dp).clip(RoundedCornerShape(OT.dimens.rSm.dp)).tapArea { onClick() },
         contentAlignment = Alignment.Center,
     ) {
         Text(
             text,
             style = OT.type.subhead.copy(
+                fontSize = 17.sp,
                 fontWeight = weight,
                 fontStyle = if (italic) FontStyle.Italic else FontStyle.Normal,
                 textDecoration = if (underline) TextDecoration.Underline else TextDecoration.None,
@@ -814,10 +1155,10 @@ private fun ToolbarButton(
 @Composable
 private fun ToolbarIcon(@DrawableRes resId: Int, description: String, onClick: () -> Unit) {
     Box(
-        Modifier.size(30.dp).clip(RoundedCornerShape(OT.dimens.rSm.dp)).tapArea { onClick() },
+        Modifier.size(48.dp).clip(RoundedCornerShape(OT.dimens.rSm.dp)).tapArea { onClick() },
         contentAlignment = Alignment.Center,
     ) {
-        Icon(painterResource(resId), contentDescription = description, tint = OT.colors.label2, modifier = Modifier.size(22.dp))
+        Icon(painterResource(resId), contentDescription = description, tint = OT.colors.label2, modifier = Modifier.size(24.dp))
     }
 }
 
@@ -826,33 +1167,79 @@ private fun escapeHtml(s: String): String = s
     .replace("<", "&lt;")
     .replace(">", "&gt;")
 
+/** 从最近收件箱统计出的常用发件人（服务端 contact 表没有频次字段，只能本地算） */
+private data class FrequentContact(val name: String, val email: String, val count: Int)
+
 /**
- * 引用原文：去掉 <style>/<script>/注释，只留正文。
- * 营销邮件（Outlook/Pinterest 这类）正文里带整块 CSS，不去掉的话
- * 写信页的引用预览会把 `#outlook a{...}` 当正文显示出来。
+ * 引用原文：去掉 <style>/<script>/注释/文档外壳，只留正文。
+ *
+ * 乱码根因：
+ * 1) 原信 HTML 里常带 `<meta charset="gb2312">`（Outlook/国内客户端常见）。它跟着引用被塞进
+ *    新邮件正文，而新邮件实际是 UTF-8；收件端看到这个旧声明就按 GBK 解 UTF-8 字节，中文成 `�`。
+ * 2) `<html>/<head>/<body>` 外壳、`<title>`、`<base>` 嵌进 <blockquote> 会打乱解析。
+ * 3) 详情页旧路径直接把 content 拼进 blockquote，CSS 会当正文显示，name 也没转义。
+ * 所以这里必须剔除 charset/Content-Type 声明与文档外壳，name 统一 escape。
  */
 internal fun buildQuoteHtml(name: String, content: String): String {
     val cleaned = content
         .replace(Regex("(?is)<style[^>]*>.*?</style>"), "")
         .replace(Regex("(?is)<script[^>]*>.*?</script>"), "")
         .replace(Regex("(?is)<!--.*?-->"), "")
+        .replace(Regex("(?is)<meta[^>]*charset[^>]*>"), "")
+        .replace(Regex("(?is)<meta[^>]*http-equiv\\s*=\\s*[\"']?content-type[^>]*>"), "")
+        .replace(Regex("(?is)<base[^>]*>"), "")
+        .replace(Regex("(?is)<title[^>]*>.*?</title>"), "")
+        .replace(Regex("(?is)</?(html|head|body)[^>]*>"), "")
         .trim()
     return "<blockquote><p>${escapeHtml(name)} 写道：</p>$cleaned</blockquote>"
 }
 
-/** 轻量格式：**粗体**、*斜体*、__下划线__、- 列表、> 引用；没有上标富文本引擎 */
+/** 轻量格式：**粗体**、*斜体*、__下划线__、[文字](链接)、# 标题、- / 1. 列表、> 引用 */
 private fun textToHtml(text: String): String {
     fun inline(raw: String): String = escapeHtml(raw)
+        .replace(Regex("\\[([^\\]\\n]+)\\]\\((https?://[^)\\s]+)\\)"), "<a href=\"$2\">$1</a>")
         .replace(Regex("\\*\\*(.+?)\\*\\*"), "<strong>$1</strong>")
         .replace(Regex("__([^_]+)__"), "<u>$1</u>")
         .replace(Regex("\\*([^*]+)\\*"), "<em>$1</em>")
+
+    val lines = text.replace("\r\n", "\n").split("\n")
     val out = StringBuilder()
-    text.split("\n").forEach { line ->
+    var i = 0
+    while (i < lines.size) {
+        val line = lines[i]
         when {
-            line.startsWith("> ") -> out.append("<blockquote>${inline(line.removePrefix("> "))}</blockquote>")
-            line.startsWith("- ") || line.startsWith("* ") ->
-                out.append("<p>• ${inline(line.substring(2))}</p>")
-            else -> out.append("<p>${inline(line).ifEmpty { "<br>" }}</p>")
+            line.startsWith("## ") -> {
+                out.append("<h3>${inline(line.removePrefix("## "))}</h3>")
+                i++
+            }
+            line.startsWith("# ") -> {
+                out.append("<h2>${inline(line.removePrefix("# "))}</h2>")
+                i++
+            }
+            line.startsWith("> ") -> {
+                out.append("<blockquote>${inline(line.removePrefix("> "))}</blockquote>")
+                i++
+            }
+            line.startsWith("- ") || line.startsWith("* ") -> {
+                out.append("<ul>")
+                while (i < lines.size && (lines[i].startsWith("- ") || lines[i].startsWith("* "))) {
+                    out.append("<li>${inline(lines[i].substring(2))}</li>")
+                    i++
+                }
+                out.append("</ul>")
+            }
+            Regex("^\\d+\\. ").containsMatchIn(line) -> {
+                out.append("<ol>")
+                while (i < lines.size && Regex("^\\d+\\. ").containsMatchIn(lines[i])) {
+                    out.append("<li>${inline(lines[i].replaceFirst(Regex("^\\d+\\. "), ""))}</li>")
+                    i++
+                }
+                out.append("</ol>")
+            }
+            else -> {
+                out.append("<p>${inline(line).ifEmpty { "<br>" }}</p>")
+                i++
+            }
         }
     }
     return out.toString()

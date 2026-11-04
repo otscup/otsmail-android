@@ -431,7 +431,10 @@ fun DetailScreen(
                                 val quote = hex(c.separator)
                                 val marker = if (html.isNotBlank()) "1" else "0"
                                 // 左右留白交给 Compose 的 16dp，HTML 自己不再加 padding，图片才能贴满内容区
-                                val shell = """<html><head><meta name="viewport" content="width=device-width,initial-scale=1">
+                                // 显式声明 UTF-8 必须排在 viewport 之前、也是整篇第一个 meta：
+                                // 原信正文自带 <meta charset="gb2312"> 时，浏览器会按那个声明解我们写进去的
+                                // UTF-8 字节，中文就成乱码；先出现的 charset 才能锁定解码方式。
+                                val shell = """<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <style>*{max-width:100%!important;box-sizing:border-box}html,body{width:100%;overflow-x:hidden;-webkit-text-size-adjust:100%}
 body{margin:0;padding:0;background:transparent;color:$fg;
 font:15px/20px -apple-system,"Noto Sans SC",sans-serif;letter-spacing:-0.24px;word-break:break-word}

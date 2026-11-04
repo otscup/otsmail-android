@@ -288,7 +288,9 @@ fun OtsApp() {
                         emailId = r.id,
                         onBack = { goBack() },
                         onReply = { m ->
-                            val quoted = "<blockquote><p>${m.name} 写道：</p>${m.content}</blockquote>"
+                            // 详情页回复也走 buildQuoteHtml：原内容里的 <style>、charset 声明、
+                            // html/head/body 外壳和未转义的 name 都会污染引用，导致收发两端乱码。
+                            val quoted = buildQuoteHtml(m.name.ifEmpty { m.from }, m.content)
                             go(Route.Compose(m.from, if (m.subject.startsWith("Re:")) m.subject else "Re: ${m.subject}", quoted))
                         },
                         onToast = toast,

@@ -39,8 +39,8 @@ android {
         applicationId = "com.otscup.otsmail"
         minSdk = 26          // targetSdk 35；26 起步可以直接用 adaptive icon 与深色主题
         targetSdk = 35
-        versionCode = 4
-        versionName = "0.2.2"
+        versionCode = 5
+        versionName = "0.2.3"
     }
 
     signingConfigs {

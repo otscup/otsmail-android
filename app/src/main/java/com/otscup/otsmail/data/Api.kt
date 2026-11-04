@@ -341,9 +341,15 @@ object Api {
         return obj("POST", "/account/add", body)
     }
 
-    /** 通讯录：/contact/list 的 data 是 { list, total }，取 list。返回 名称/邮箱/分组。 */
-    suspend fun contacts(): List<Triple<String, String, String>> {
-        val list = obj("GET", "/contact/list?page=1&size=200").optJSONArray("list") ?: JSONArray()
+    /**
+     * 通讯录：/contact/list 的 data 是 { list, total }，取 list。返回 名称/邮箱/分组。
+     * q 走服务端 LIKE（name/email 包含匹配），联系人表里没有「最近往来 / 使用频次」字段，
+     * 所以写信页的候选只能按前缀/包含程度排序，不做假的“常用”排序。
+     */
+    suspend fun contacts(q: String = ""): List<Triple<String, String, String>> {
+        val query = StringBuilder("/contact/list?page=1&size=200")
+        if (q.isNotBlank()) query.append("&q=").append(URLEncoder.encode(q, "UTF-8"))
+        val list = obj("GET", query.toString()).optJSONArray("list") ?: JSONArray()
         val out = ArrayList<Triple<String, String, String>>()
         for (i in 0 until list.length()) {
             val o = list.optJSONObject(i) ?: continue
