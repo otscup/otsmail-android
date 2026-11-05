@@ -256,6 +256,8 @@ fun InboxScreen(
     var selected by remember { mutableStateOf<Set<Long>>(emptySet()) }
     var batchBusy by remember { mutableStateOf(false) }
     var moveSheet by remember { mutableStateOf(false) }
+    // 移动到分类时的进度（已完成 / 总数）；服务端只有单封接口，逐条串行时要让用户看到进展
+    var moveProgress by remember { mutableStateOf<Pair<Int, Int>?>(null) }
     // 「清空已删除」的二次确认：不可恢复，必须明确告知
     var clearDeletedConfirm by remember { mutableStateOf(false) }
     fun exitSelect() {
@@ -495,15 +497,24 @@ fun InboxScreen(
     fun runMove(target: String) {
         if (batchBusy || selected.isEmpty()) return
         val ids = selected.toList()
+        val label = categories.firstOrNull { it.first == target }?.second ?: target
         batchBusy = true
-        moveSheet = false
+        moveProgress = 0 to ids.size
         scope.launch {
-            val failed = MailBatchOps.move(target, ids)
+            val failed = MailBatchOps.move(target, ids) { done, total -> moveProgress = done to total }
             // 在某个分类里把邮件移走：该视图不再包含它们
             if (category.isNotEmpty() && target != category) ids.forEach { MailCache.removeRow(listKey, it) }
+            // 分类是服务端状态：通知列表/计数重新拉，别只改本地缓存
+            MailSync.changed()
             batchBusy = false
+            moveProgress = null
+            moveSheet = false
             exitSelect()
-            notice = if (failed > 0) "$failed 封失败，其余已处理" else "已移动 ${ids.size} 封"
+            notice = if (failed > 0) {
+                "已移到「$label」${ids.size - failed} 封，$failed 封失败"
+            } else {
+                "已移到「$label」${ids.size} 封"
+            }
             loadCounts()
         }
     }
@@ -1075,9 +1086,14 @@ fun InboxScreen(
     }
 
     if (moveSheet) {
-        OTSheet(onDismiss = { moveSheet = false }) {
+        OTSheet(onDismiss = { if (!batchBusy) moveSheet = false }) {
             Text(
-                "移动到",
+                if (batchBusy) {
+                    val p = moveProgress
+                    if (p != null) "正在移动 ${p.first} / ${p.second} 封…" else "正在移动…"
+                } else {
+                    "移到分类（已选 ${selected.size} 封）"
+                },
                 style = t.title3,
                 color = c.label,
                 modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp),
@@ -1087,11 +1103,11 @@ fun InboxScreen(
                     Modifier
                         .fillMaxWidth()
                         .height(48.dp)
-                        .tapArea { runMove(key) }
+                        .tapArea { if (!batchBusy) runMove(key) }
                         .padding(horizontal = 20.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    Text(label, style = t.body, color = c.label, modifier = Modifier.weight(1f))
+                    Text(label, style = t.body, color = if (batchBusy) c.label3 else c.label, modifier = Modifier.weight(1f))
                     if (batchBusy) CircularProgressIndicator(color = c.blue, strokeWidth = 2.dp, modifier = Modifier.size(16.dp))
                 }
             }

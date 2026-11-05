@@ -92,10 +92,10 @@ internal object MailBatchOps {
         return failed
     }
 
-    /** 批量移动分类，同样逐条。返回失败条数。 */
-    suspend fun move(category: String, ids: List<Long>): Int {
+    /** 批量移动分类，同样逐条；每条结束后回报 (已完成, 总数)，方便界面显示进度。返回失败条数。 */
+    suspend fun move(category: String, ids: List<Long>, onProgress: (Int, Int) -> Unit = { _, _ -> }): Int {
         var failed = 0
-        for (id in ids) {
+        ids.forEachIndexed { index, id ->
             try {
                 Api.moveCategory(id, category)
                 MailCache.setCategory(id, category)
@@ -104,6 +104,7 @@ internal object MailBatchOps {
             } catch (_: Throwable) {
                 failed++
             }
+            onProgress(index + 1, ids.size)
         }
         return failed
     }
@@ -167,7 +168,7 @@ internal fun MailSelectionActions(
         SelectionAction(Icons.Outlined.MarkEmailUnread, "未读", busy) { onAction(MailBatch.UNREAD) }
         SelectionAction(Icons.Outlined.Star, "星标", busy) { onAction(MailBatch.STAR) }
         SelectionAction(Icons.Outlined.StarBorder, "取消星标", busy) { onAction(MailBatch.UNSTAR) }
-        SelectionAction(Icons.Outlined.LocalOffer, "移动", busy, onClick = onMove)
+        SelectionAction(Icons.Outlined.LocalOffer, "移到分类", busy, onClick = onMove)
         SelectionAction(Icons.Outlined.Delete, "删除", busy, tint = c.red) { onAction(MailBatch.DELETE) }
     }
 }
