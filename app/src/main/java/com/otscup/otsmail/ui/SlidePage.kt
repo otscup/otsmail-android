@@ -1,18 +1,11 @@
 package com.otscup.otsmail.ui
 
 import androidx.compose.animation.core.Animatable
-import androidx.compose.animation.core.CubicBezierEasing
-import androidx.compose.animation.core.FastOutLinearInEasing
-import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.ui.Alignment
-import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.layout.fillMaxHeight
-import androidx.compose.foundation.layout.padding
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -23,6 +16,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.changedToUpIgnoreConsumed
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChange
@@ -37,11 +31,14 @@ import kotlin.math.abs
 /**
  * 从右滑入、右滑可拖拽返回的页面容器（模仿 UINavigationController push）。
  *
- * 与手势有关的决定：
- * 1. 只有**左缘 20dp 起手**的手势才可能触发转场；内容区（含 WebView 正文、竖向滚动）完全不挂横向手势。
- *    之前把 drag 挂在整块内容区上，斜着上下滑时 dx 会被直接注入 translationX → 整页左右晃、滚动被打断。
- * 2. 起手后先做主轴判定：|dx| 必须超过 8dp 且大于 1.6 倍 |dy| 才接管；竖向意图更明显时立刻放弃，把事件留给内容区。
- * 3. 拖拽期间直接跟手（dx 每帧同步更新），抬手才用 spring 决定回弹还是退出；松手阈值 32% 屏宽。
+ * 手势接在页面根节点上、只在 Initial 阶段观察，不再用透明热区覆盖左缘：
+ * 1. 起手点必须在**左缘 24dp** 内；更靠里的横向手势留给内容（WebView 横向滚动、列表行左右滑）。
+ * 2. 只认**向右**的主轴位移：|dx| > 8dp 且 |dx| > |dy|（约 45°内）才接管，斜着滑也能返回；
+ *    竖向或向左的意图立刻放弃，事件原样交给列表/正文，不会出现"斜滑整页晃"。
+ * 3. 接管后在 Initial 阶段消费事件，子层（WebView/列表）收不到，不会边返回边滚动。
+ * 4. 不消费起手 tap：左缘的返回按钮、输入框照常可点（旧实现用 20dp 热区+顶部让出 96dp，
+ *    导致顶部边缘滑不动，也是"右滑返回时好时坏"的来源之一）。
+ * 5. 松手阈值 32% 屏宽，回弹用弹簧；减少动画时只淡出。
  *
  * shortcut: 拖拽时底下的页面不会跟着视差后移（iOS 是这样做的），等需要更强的层次感再补。
  */
@@ -64,27 +61,33 @@ fun SlidePage(onDismiss: () -> Unit, content: @Composable () -> Unit) {
     }
 
     val edgeDrag = Modifier.pointerInput(widthPx) {
+        val edge = 24.dp.toPx()
         val slop = 8.dp.toPx()
         awaitEachGesture {
-            val down = awaitFirstDown(requireUnconsumed = false)
+            val down = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
+            // 起手不在左缘：这不是返回手势，直接等这一轮指针结束
+            if (down.position.x > edge) return@awaitEachGesture
             var sumX = 0f
             var sumY = 0f
             var cur = anim.value
             var accepted = false
             dx = cur
             while (true) {
-                val event = awaitPointerEvent()
+                val event = awaitPointerEvent(PointerEventPass.Initial)
                 val change = event.changes.firstOrNull { it.id == down.id } ?: break
                 if (change.changedToUpIgnoreConsumed()) break
                 val delta = change.positionChange()
                 if (!accepted) {
                     sumX += delta.x
                     sumY += delta.y
-                    if (abs(sumX) > slop && abs(sumX) > abs(sumY) * 1.6f) {
+                    if (sumX > slop && sumX > abs(sumY)) {
                         accepted = true
                         dragging = true
                     } else if (abs(sumY) > slop && abs(sumY) > abs(sumX)) {
                         // 竖向意图明确：不接管，让正文/列表继续滚
+                        break
+                    } else if (sumX < -slop && abs(sumX) > abs(sumY)) {
+                        // 向左滑不是返回：留给内容（例如邮件行左滑删除）
                         break
                     }
                 }
@@ -117,6 +120,7 @@ fun SlidePage(onDismiss: () -> Unit, content: @Composable () -> Unit) {
     Box(
         modifier = Modifier
             .fillMaxSize()
+            .then(edgeDrag)
             .graphicsLayer {
                 translationX = if (reduce) 0f else if (dragging) dx else anim.value
                 // 轻微淡出：位移越大越透，避免整页像贴纸一样平移
@@ -124,17 +128,6 @@ fun SlidePage(onDismiss: () -> Unit, content: @Composable () -> Unit) {
                 else ((enterAlpha.value * dismissAlpha.value) * (1f - 0.2f * (translationX / widthPx)).coerceIn(0f, 1f))
             },
     ) {
-        Box(Modifier.fillMaxSize()) { content() }
-        // 左缘 20dp 的透明热区：WebView 自绘会吃掉落在它身上的横向手势，只有这一条能稳定抢到。
-        // 顶部让出 96dp，否则会盖住导航栏左上角的返回/取消按钮，点按永远到不了底层。
-        Box(
-            Modifier
-                .fillMaxHeight()
-                .width(20.dp)
-                .align(Alignment.CenterStart)
-                .padding(top = 96.dp),
-        ) {
-            Box(Modifier.fillMaxSize().then(edgeDrag))
-        }
+        content()
     }
 }
