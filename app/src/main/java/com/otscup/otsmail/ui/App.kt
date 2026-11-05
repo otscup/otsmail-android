@@ -26,7 +26,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import com.otscup.otsmail.BuildConfig
+import com.otscup.otsmail.data.Api
 import com.otscup.otsmail.data.AuthState
+import com.otscup.otsmail.data.Demo
 import com.otscup.otsmail.data.MailCache
 import com.otscup.otsmail.data.PushManager
 import com.otscup.otsmail.data.Session
@@ -67,7 +70,23 @@ fun OtsApp() {
     val context = LocalContext.current
     // 列表/详情缓存要在 Session 之前初始化：退出登录时会清空它
     MailCache.init(context.applicationContext)
-    val session = remember { Session(context).also { it.apply() } }
+    val session = remember {
+        Session(context).also {
+            it.apply()
+            // 演示构建：不填服务器地址、不登录，直接进入本地虚构数据的收件箱
+            if (BuildConfig.DEMO) {
+                it.base = "https://demo.local/api"
+                it.token = Demo.TOKEN
+                it.loginDomain = "demo.local"
+                it.accountId = Demo.accounts[0].id
+                it.email = Demo.accounts[0].email
+                it.name = "Demo Lin"
+                it.signature = "— 发自 OTSMail 演示账户"
+                Api.base = it.base
+                Api.token = it.token
+            }
+        }
+    }
     // 旧版本允许保存 http:// 地址；明文流量已被全局禁用，这里把这类用户直接带到改地址页，
     // 而不是让他们在收件箱里看一串「网络错误」。
     val legacyInsecureBase = remember { session.base.startsWith("http://", ignoreCase = true) }

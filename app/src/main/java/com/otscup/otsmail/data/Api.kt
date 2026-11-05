@@ -1,5 +1,6 @@
 package com.otscup.otsmail.data
 
+import com.otscup.otsmail.BuildConfig
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
@@ -116,6 +117,9 @@ object Api {
         readTimeoutMs: Int = 20_000,
     ): JSONObject =
         withContext(Dispatchers.IO) {
+            // 演示构建（-Pdemo=true，独立 applicationId）：全部请求由本地虚构数据应答，
+            // 不连服务器、不碰真实账户。正式包 BuildConfig.DEMO=false，这里不会命中。
+            if (BuildConfig.DEMO) return@withContext Demo.respond(method, path, body)
             val conn = (URL(base.trimEnd('/') + path).openConnection() as HttpURLConnection).apply {
                 requestMethod = method
                 connectTimeout = 15_000

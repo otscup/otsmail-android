@@ -6,8 +6,16 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
+/**
+ * 演示构建开关：`./gradlew assembleDebug -Pdemo=true`。
+ * 只用于拍 README 截图——全部邮件/账户/头像都是本地虚构数据，不连真实服务器；
+ * 演示包 applicationId 带 .demo 后缀，可与正式包并存。默认 false，正式包不受影响。
+ */
+val demoBuild = (project.findProperty("demo") as String?)?.toBoolean() == true
+
 // 没有 google-services.json 就不启用推送配置：APK 照常构建，只是收不到推送
-if (file("google-services.json").exists()) {
+// 演示包 applicationId 带后缀，google-services.json 里没有对应包名，直接跳过推送插件
+if (!demoBuild && file("google-services.json").exists()) {
     apply(plugin = "com.google.gms.google-services")
 }
 
@@ -64,6 +72,7 @@ android {
         targetSdk = 35
         versionCode = tagVersionCode
         versionName = tagVersionName
+        buildConfigField("boolean", "DEMO", demoBuild.toString())
     }
 
     signingConfigs {
@@ -78,6 +87,10 @@ android {
     }
 
     buildTypes {
+        debug {
+            // 演示包单独 applicationId，安装时不会顶掉用户正在用的正式包
+            if (demoBuild) applicationIdSuffix = ".demo"
+        }
         release {
             isMinifyEnabled = false
             if (signingReady) {

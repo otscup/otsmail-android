@@ -15,6 +15,36 @@ OTS Mail 的 Android 客户端。Kotlin + Jetpack Compose，Material 3，单 Act
 - AI：自然语言命令（汇总未读、搜索、整理等），结果以动作回执呈现
 - 其它：深色模式跟随系统、账号切换、签名与「回车发送」设置
 
+## 界面预览
+
+以下截图来自 `-Pdemo=true` 的演示构建（包名带 `.demo` 后缀），**邮件、账户、头像全部是本地虚构数据**，与任何真实邮箱无关；截图在真机（Samsung Galaxy S10e，1080×2164）以系统字体 100% 拍摄。
+
+| 收件箱 | 侧边栏 |
+|---|---|
+| ![收件箱](docs/screenshots/01-inbox.png) | ![侧边栏](docs/screenshots/02-drawer.png) |
+| 收件箱列表：未读点、星标、发件人头像与账户后缀 | 抽屉：多账户切换、未读/星标/垃圾箱计数、分类入口 |
+
+| 详情页 | 写信页 |
+|---|---|
+| ![详情页](docs/screenshots/03-detail.png) | ![写信页](docs/screenshots/04-compose.png) |
+| 读信页：左列固定宽度标签、右列值，HTML 正文默认屏蔽外部图片 | 写信页：多收件人 chip、抄送/密送、签名与格式工具条 |
+
+| 个人设置 | 系统设置 |
+|---|---|
+| ![个人设置](docs/screenshots/05-profile.png) | ![系统设置](docs/screenshots/06-system.png) |
+| 个人设置：头像、用户名、邮箱、两步验证、签名 | 系统设置：头像显示、回车发送、推送状态与后台数据入口 |
+
+深色模式下的收件箱：
+
+![深色模式收件箱](docs/screenshots/07-inbox-dark.png)
+
+演示数据由 [`app/src/main/java/com/otscup/otsmail/data/Demo.kt`](app/src/main/java/com/otscup/otsmail/data/Demo.kt) 提供，只在演示构建里生效；正式包 `BuildConfig.DEMO=false`，不会进入这段代码。要重新拍摄：
+
+```bash
+./gradlew assembleDebug -Pdemo=true
+# 产物与普通 debug 包相同，但包名为 com.otscup.otsmail.demo，可与正式包同时安装
+```
+
 ## 普通用户：下载安装
 
 从 [Releases](https://github.com/otscup/otsmail-android/releases/tag/v0.2.3) 下载 `otsmail-0.2.3-release.apk`，传到手机点击安装。首次安装需要在系统设置里允许「安装未知来源应用」。

@@ -354,8 +354,9 @@ fun DetailScreen(
                         )
                     }
                 }
-                // 图片开关：默认屏蔽远程图片（防 IP/已读回执泄露），用户显式点开才加载
-                if (bodyHtml.isNotBlank()) {
+                // 图片开关：默认屏蔽远程图片（防 IP/已读回执泄露），用户显式点开才加载。
+                // 正文里没有 <img> 就不显示这条——避免「外部图片已屏蔽」出现在纯文字邮件里。
+                if (bodyHtml.isNotBlank() && bodyHtml.contains("<img", ignoreCase = true)) {
                     Row(
                         Modifier
                             .fillMaxWidth()
