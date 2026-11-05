@@ -1,7 +1,7 @@
 package com.otscup.otsmail.ui
 
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
@@ -19,7 +19,6 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -95,21 +94,12 @@ fun ServerSetupScreen(
             .padding(horizontal = 16.dp),
     ) {
         Column(Modifier.fillMaxWidth().padding(top = 56.dp, bottom = 32.dp)) {
-            Box(
-                Modifier
-                    .size(56.dp)
-                    .clip(RoundedCornerShape(OT.dimens.rLg.dp))
-                    .background(c.bgCard)
-                    .border(1.dp, c.separatorSoft, RoundedCornerShape(OT.dimens.rLg.dp)),
-                contentAlignment = androidx.compose.ui.Alignment.Center,
-            ) {
-                Icon(
-                    painterResource(R.drawable.ot_mail),
-                    contentDescription = null,
-                    tint = c.label,
-                    modifier = Modifier.size(26.dp),
-                )
-            }
+            // 品牌图标：与登录页同一套 v2 矢量（深色实底 + 反白 @）
+            Image(
+                painter = painterResource(R.drawable.ic_brand_mark),
+                contentDescription = null,
+                modifier = Modifier.size(56.dp),
+            )
             Spacer(Modifier.height(22.dp))
             Text("连接服务器", style = t.title1, color = c.label)
             Spacer(Modifier.height(8.dp))

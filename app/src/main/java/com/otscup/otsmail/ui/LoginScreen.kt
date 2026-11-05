@@ -7,6 +7,7 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.Toast
 import androidx.browser.customtabs.CustomTabsIntent
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.border
@@ -426,21 +427,12 @@ fun LoginScreen(session: Session, onLoggedIn: () -> Unit) {
         Column(
             Modifier.fillMaxWidth().padding(top = 28.dp, bottom = 32.dp),
         ) {
-            Box(
-                Modifier
-                    .size(56.dp)
-                    .clip(RoundedCornerShape(OT.dimens.rLg.dp))
-                    .background(c.bgCard)
-                    .border(1.dp, c.separatorSoft, RoundedCornerShape(OT.dimens.rLg.dp)),
-                contentAlignment = Alignment.Center,
-            ) {
-                Icon(
-                    painterResource(R.drawable.ot_mail),
-                    contentDescription = null,
-                    tint = c.label,
-                    modifier = Modifier.size(26.dp),
-                )
-            }
+            // 品牌图标：v2 超椭圆实底 + 反白 @，双色矢量，不能用 Icon（会被整体 tint）
+            Image(
+                painter = painterResource(R.drawable.ic_brand_mark),
+                contentDescription = null,
+                modifier = Modifier.size(56.dp),
+            )
             Spacer(Modifier.height(22.dp))
             Text("OTSMail", style = t.largeTitle, color = c.label)
             Spacer(Modifier.height(8.dp))

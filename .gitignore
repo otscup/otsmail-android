@@ -13,3 +13,5 @@ secrets/
 app/google-services.json
 # 真机截图只留本地，不入库
 shots/
+# 图标等预览产物只留本地，不入库
+preview/
