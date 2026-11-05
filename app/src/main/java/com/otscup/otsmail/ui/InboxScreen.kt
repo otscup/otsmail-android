@@ -155,6 +155,11 @@ internal object InboxUi {
     var keyword by mutableStateOf("")
     var allAccounts by mutableStateOf(true)
     var accountTick by mutableStateOf(0)
+    /**
+     * 搜索范围：0 当前文件夹 / 1 全部邮件（我的所有邮箱，allReceive=1）/ 2 全站（需 all-email:query）。
+     * 只在有关键词时生效；换范围会改 listKey，上一份快照与请求都不会被复用。
+     */
+    var searchScope by mutableStateOf(0)
     /** 「全部帐户」已选中时再点一次 = 强制重拉（不改变 listKey，只用来打破「空列表卡住」）。 */
     var forceTick by mutableStateOf(0)
 }
@@ -246,14 +251,28 @@ fun InboxScreen(
     var showAvatars by remember { mutableStateOf(session.showAvatars) }
     // 多帐户混合列表用：accountId → 邮箱地址（/account/list 已有，不新增服务端依赖）
     val accountEmails = remember(accounts) { accounts.toMap() }
-    // 行内收件邮箱：只有「全部帐户」才显示，单帐户列表每行都是同一个地址，不重复刷屏
+    // 行内收件邮箱：多帐户 / 跨帐户搜索 / 全站搜索都必须标明归属，否则分不清是哪封信
     fun mailboxLabelOf(mail: com.otscup.otsmail.data.MailItem): String? {
-        if (!allAccounts) return null
+        if (!allAccounts && InboxUi.searchScope == 0) return null
         accountEmails[mail.accountId]?.takeIf { it.isNotBlank() }?.let { return it }
+        mail.toEmail.takeIf { it.isNotBlank() }?.let { return it }
+        mail.userEmail.takeIf { it.isNotBlank() }?.let { return it }
         return mail.recipient.takeIf { it.isNotBlank() && mail.type != 1 }
     }
     var addSheet by remember { mutableStateOf(false) }
     var newEmail by remember { mutableStateOf("") }
+
+    // 全站搜索入口的门槛与设置页「全部邮件」同一规则：permKeys 含 all-email:query / *，或系统管理员。
+    // 初值 false（fail-closed）：拿不到权限就不显示这个范围，也不拿 403 冒充「没有结果」。
+    var canSiteSearch by remember { mutableStateOf(false) }
+    LaunchedEffect(Unit) {
+        canSiteSearch = runCatching { Api.me() }.getOrNull()?.let { me ->
+            me.type == 0L || me.permKeys.contains("all-email:query") || me.permKeys.contains("*")
+        } ?: false
+    }
+    LaunchedEffect(canSiteSearch) {
+        if (!canSiteSearch && InboxUi.searchScope == 2) InboxUi.searchScope = 0
+    }
 
     // 多选：长按某行进入，标题栏变「已选 N 封」，返回键退出并保持滚动位置
     var selectMode by remember { mutableStateOf(false) }
@@ -278,6 +297,8 @@ fun InboxScreen(
         append("|mb:").append(current.key)
         append("|cat:").append(category)
         append("|kw:").append(keyword.trim())
+        // 搜索范围参与 key：全站/全部邮箱/当前文件夹是三套数据，绝不能共用同一份快照
+        if (keyword.isNotBlank()) append("|scope:").append(InboxUi.searchScope)
     }
     val store = MailCache.list(listKey, if (allAccounts) 0L else accountId)
     val items = store.items
@@ -393,6 +414,13 @@ fun InboxScreen(
     }
 
     suspend fun fetchRaw(next: Int): org.json.JSONObject {
+        // 搜索时按用户选的范围取数：全站 / 我的全部邮箱 / 当前文件夹
+        if (keyword.isNotBlank()) {
+            when (InboxUi.searchScope) {
+                1 -> return Api.emailsRaw(0, next, null, keyword, "", allAccounts = true)
+                2 -> return Api.siteEmailsRaw(next, keyword, type = "all")
+            }
+        }
         // 已发送不是服务端的 mailbox 值：传 type=1、mailbox 留空（默认排除垃圾/已删除）
         val mb = if (current.key == "sent" || current.key == "spam") null else current.key
         val cat = when {
@@ -848,6 +876,20 @@ fun InboxScreen(
                             }
                         }
                     }
+                    // 搜索范围：只在有关键词时出现；没站点权限就整块不显示「全站」，不留一个点进去 403 的选项
+                    if (keyword.isNotBlank()) {
+                        Row(
+                            Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 2.dp),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            SearchScopeChip("当前文件夹", InboxUi.searchScope == 0) { InboxUi.searchScope = 0 }
+                            SearchScopeChip("全部邮件", InboxUi.searchScope == 1) { InboxUi.searchScope = 1 }
+                            if (canSiteSearch) {
+                                SearchScopeChip("全站", InboxUi.searchScope == 2) { InboxUi.searchScope = 2 }
+                            }
+                        }
+                    }
                 }
                 val visibleTitle = when {
                     selectMode -> ""
@@ -909,12 +951,16 @@ fun InboxScreen(
                 items.isEmpty() ->
                     Box(Modifier.fillMaxSize()) {
                         val (icon, title, text) = when {
+                            keyword.isNotBlank() && InboxUi.searchScope == 2 ->
+                                Triple(R.drawable.ot_search, "全站没有匹配的邮件", "换个关键词，或缩小到自己的邮箱")
+                            keyword.isNotBlank() && InboxUi.searchScope == 1 ->
+                                Triple(R.drawable.ot_search, "你名下邮箱里没有匹配的邮件", "换个关键词试试")
+                            keyword.isNotBlank() -> Triple(R.drawable.ot_search, "没有匹配的邮件", "换个关键词试试")
                             current.key == "sent" -> Triple(R.drawable.ot_send, "还没有已发送邮件", "写信并发出后，邮件会出现在这里")
                             current.key == "spam" -> Triple(R.drawable.ot_alert, "垃圾箱是空的", "被判定为垃圾的邮件会收在这里")
                             current.key == "deleted" -> Triple(R.drawable.ot_trash, "没有已删除的邮件", "删除的邮件会先放到这里")
                             current.key == "starred" -> Triple(R.drawable.ot_star, "还没有标星邮件", "在邮件上点星标即可收藏")
                             current.key == "unread" -> Triple(R.drawable.ot_mail, "没有未读邮件", "都看过了")
-                            keyword.isNotBlank() -> Triple(R.drawable.ot_search, "没有匹配的邮件", "换个关键词试试")
                             else -> Triple(R.drawable.ot_inbox, "还没有邮件", "换个邮箱，或稍后再试")
                         }
                         OTEmptyState(
@@ -1176,6 +1222,22 @@ fun InboxScreen(
             }
             Spacer(Modifier.height(12.dp))
         }
+    }
+}
+
+/** 搜索范围胶囊：选中态用底色区分，样式和分类 pill 一致。 */
+@Composable
+private fun SearchScopeChip(label: String, selected: Boolean, onClick: () -> Unit) {
+    val c = OT.colors
+    val t = OT.type
+    Box(
+        Modifier
+            .clip(RoundedCornerShape(OT.dimens.rPill.dp))
+            .background(if (selected) c.bgPressed else c.bgInput)
+            .tapArea { onClick() }
+            .padding(horizontal = 10.dp, vertical = 4.dp),
+    ) {
+        Text(label, style = t.caption1, color = if (selected) c.label else c.label2)
     }
 }
 
