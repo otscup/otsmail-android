@@ -4,6 +4,8 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <!-- Android 13+ 弹不弹通知取决于这个运行时权限 -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- 新邮件通知渠道默认开启震动；不给 VIBRATE 系统会静默忽略震动 -->
+    <uses-permission android:name="android.permission.VIBRATE" />
 
     <!-- Android 11+ 包可见性：不声明的话 CustomTabsClient 找不到任何浏览器，
          resolveActivity 也永远返回 null，第三方登录会被误判成"设备没有浏览器"而落到 WebView。 -->

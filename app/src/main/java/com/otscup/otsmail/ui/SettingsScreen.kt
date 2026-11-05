@@ -58,6 +58,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import com.otscup.otsmail.push.PushSettings
 import com.otscup.otsmail.BuildConfig
 import com.otscup.otsmail.R
 import com.otscup.otsmail.data.Api
@@ -651,6 +652,17 @@ fun SystemSettingsScreen(
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
+    // 通知偏好：改完立刻写 prefs，下一条推送就按新设置走
+    var pushEnabled by remember { mutableStateOf(PushSettings.enabled(context)) }
+    var pushSound by remember { mutableStateOf(PushSettings.sound(context)) }
+    var pushVibrate by remember { mutableStateOf(PushSettings.vibrate(context)) }
+    var mutedSenders by remember { mutableStateOf(PushSettings.mutedSenders(context)) }
+    var dndOn by remember { mutableStateOf(PushSettings.dndEnabled(context)) }
+    var dndStart by remember { mutableStateOf(PushSettings.dndStart(context)) }
+    var dndEnd by remember { mutableStateOf(PushSettings.dndEnd(context)) }
+    var muteSheet by remember { mutableStateOf(false) }
+    var dndSheet by remember { mutableStateOf(false) }
+
     // 全站邮件入口的门槛：permKeys 含 all-email:query / *，或 user.type === 0（系统管理员）。
     // 初值 null = 还没拿到权限 → 整行不渲染（fail-closed），不先闪一下再消失。
     var canSiteMail by remember { mutableStateOf<Boolean?>(null) }
@@ -692,8 +704,53 @@ fun SystemSettingsScreen(
 
             OTGroupHeader("通知")
             OTGroup(Modifier.padding(horizontal = OTSpace.s4)) {
+                OTSwitchRow(
+                    title = "接收新邮件通知",
+                    subtitle = "关闭后邮件照常同步、列表照常更新，只是不弹通知",
+                    checked = pushEnabled,
+                ) { next ->
+                    pushEnabled = next
+                    PushSettings.setEnabled(context, next)
+                }
+                OTDivider(inset = 16)
+                OTSwitchRow(
+                    title = "声音",
+                    subtitle = "使用系统的默认通知音",
+                    checked = pushSound,
+                ) { next ->
+                    pushSound = next
+                    PushSettings.setSound(context, next)
+                }
+                OTDivider(inset = 16)
+                OTSwitchRow(
+                    title = "震动",
+                    subtitle = "声音与震动独立控制",
+                    checked = pushVibrate,
+                ) { next ->
+                    pushVibrate = next
+                    PushSettings.setVibrate(context, next)
+                }
+                OTDivider(inset = 16)
                 SettingRow(
-                    title = "新邮件推送",
+                    title = "按发件人静音",
+                    value = if (mutedSenders.isEmpty()) "未设置" else "${mutedSenders.size} 个",
+                    onClick = { muteSheet = true },
+                    showChevron = true,
+                )
+                OTDivider(inset = 16)
+                SettingRow(
+                    title = "免打扰时段",
+                    value = if (dndOn) {
+                        "${PushSettings.formatTime(dndStart)} – ${PushSettings.formatTime(dndEnd)}"
+                    } else {
+                        "未开启"
+                    },
+                    onClick = { dndSheet = true },
+                    showChevron = true,
+                )
+                OTDivider(inset = 16)
+                SettingRow(
+                    title = "系统通知权限",
                     value = if (notifEnabled) "已启用" else "已关闭",
                     onClick = {
                         runCatching {
@@ -709,7 +766,8 @@ fun SystemSettingsScreen(
                 )
             }
             Text(
-                "推送走单独的「新邮件」通知渠道（低打扰、不响铃）；Android 13+ 首次登录后只问一次权限，关掉后需要在这里去系统设置重新打开。",
+                "声音/震动会切换对应的通知渠道（安卓 8 以后渠道属性由系统保存，App 不能改已建渠道）；" +
+                    "总开关与发件人静音会在发通知前拦掉，不影响列表与未读数。Android 13+ 首次登录后只问一次通知权限。",
                 style = t.footnote, color = c.label2,
                 modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp),
             )
@@ -785,6 +843,101 @@ fun SystemSettingsScreen(
                     if (sendOnEnter == mode.first) Text("当前", style = t.footnote, color = c.label3)
                 }
             }
+            Spacer(Modifier.height(12.dp))
+        }
+    }
+
+    if (muteSheet) {
+        OTSheet(onDismiss = { muteSheet = false }) {
+            Text(
+                "按发件人静音",
+                style = t.title3,
+                color = c.label,
+                modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp),
+            )
+            Text(
+                "被静音的发件人不再弹通知；邮件仍进列表，未读数照常。可在通知的「静音此发件人」按钮里添加。",
+                style = t.footnote,
+                color = c.label2,
+                modifier = Modifier.padding(horizontal = 20.dp, vertical = 4.dp),
+            )
+            if (mutedSenders.isEmpty()) {
+                Text(
+                    "还没有静音的发件人",
+                    style = t.body,
+                    color = c.label3,
+                    modifier = Modifier.padding(horizontal = 20.dp, vertical = 16.dp),
+                )
+            } else {
+                mutedSenders.sorted().forEachIndexed { i, sender ->
+                    if (i > 0) OTDivider(inset = 16)
+                    Row(
+                        Modifier.fillMaxWidth().heightIn(min = 48.dp).padding(horizontal = 20.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(sender, style = t.body, color = c.label, modifier = Modifier.weight(1f))
+                        Text(
+                            "移除",
+                            style = t.subhead,
+                            color = c.red,
+                            modifier = Modifier.tapArea {
+                                PushSettings.unmute(context, sender)
+                                mutedSenders = PushSettings.mutedSenders(context)
+                            },
+                        )
+                    }
+                }
+            }
+            Spacer(Modifier.height(12.dp))
+        }
+    }
+
+    if (dndSheet) {
+        OTSheet(onDismiss = { dndSheet = false }) {
+            Text(
+                "免打扰时段",
+                style = t.title3,
+                color = c.label,
+                modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp),
+            )
+            OTSwitchRow(
+                title = "开启免打扰",
+                subtitle = "时段内不发通知，邮件照常同步",
+                checked = dndOn,
+            ) { next ->
+                dndOn = next
+                PushSettings.setDndEnabled(context, next)
+            }
+            OTDivider(inset = 16)
+            SettingRow(
+                title = "开始时间",
+                value = PushSettings.formatTime(dndStart),
+                onClick = {
+                    pickTime(context, dndStart) {
+                        dndStart = it
+                        PushSettings.setDndStart(context, it)
+                    }
+                },
+                showChevron = true,
+            )
+            OTDivider(inset = 16)
+            SettingRow(
+                title = "结束时间",
+                value = PushSettings.formatTime(dndEnd),
+                onClick = {
+                    pickTime(context, dndEnd) {
+                        dndEnd = it
+                        PushSettings.setDndEnd(context, it)
+                    }
+                },
+                showChevron = true,
+            )
+            Text(
+                "按设备本地时区判断；22:00–07:00 这种跨午夜区间会正确覆盖。",
+                style = t.footnote,
+                color = c.label2,
+                modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp),
+            )
             Spacer(Modifier.height(12.dp))
         }
     }
@@ -865,6 +1018,17 @@ fun SystemSettingsScreen(
 /** 系统层面该 App 的通知是否打开（Android 13+ 还包含 POST_NOTIFICATIONS 的结果）。 */
 private fun notificationsEnabled(context: Context): Boolean =
     context.getSystemService(NotificationManager::class.java)?.areNotificationsEnabled() ?: true
+
+/** 免打扰时间选择：用系统时钟对话框，分钟数存回 prefs。 */
+private fun pickTime(context: Context, initialMinutes: Int, onPicked: (Int) -> Unit) {
+    android.app.TimePickerDialog(
+        context,
+        { _, hour, minute -> onPicked(hour * 60 + minute) },
+        initialMinutes / 60,
+        initialMinutes % 60,
+        true,
+    ).show()
+}
 
 /** 设置页标准行：标题 + 右侧值（可选 chevron）。整页统一无行首图标。 */
 @Composable

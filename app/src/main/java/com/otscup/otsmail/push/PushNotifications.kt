@@ -7,35 +7,88 @@ import android.app.PendingIntent
 import android.app.RemoteInput
 import android.content.Context
 import android.content.Intent
+import android.media.AudioAttributes
 import android.net.Uri
+import android.provider.Settings
+import android.util.Log
 import com.otscup.otsmail.MainActivity
 import com.otscup.otsmail.R
 
 /**
- * 新邮件通知：独立渠道（低打扰、无声音/震动），按发件人分组，
+ * 新邮件通知：按「声音 × 震动」预建四条渠道，按发件人分组，
  * 点击带着 emailId 直达详情页，而不是只落到收件箱。
+ *
+ * 安卓 8 以后渠道的声音/震动由系统保存，App 无法修改已建渠道，
+ * 所以只能组合预建，发通知时按当前设置选一条。
  */
 object PushNotifications {
 
-    const val CHANNEL_ID = "ot_mail_push"
+    const val CHANNEL_SOUND_VIBRATE = "ot_mail_push_sv"
+    const val CHANNEL_SOUND = "ot_mail_push_s"
+    const val CHANNEL_VIBRATE = "ot_mail_push_v"
+    const val CHANNEL_SILENT = "ot_mail_push_silent"
+
+    /** 0.2.4 及以前的静音渠道，以及中途出现过的 v2，启动时一并删除，避免设置页堆一堆。 */
+    private val LEGACY_CHANNELS = listOf("ot_mail_push", "ot_mail_push_v2")
+
+    private const val TAG = "OtsFcm"
     const val EXTRA_EMAIL_ID = "emailId"
 
     /** 通知 action 的 Intent action / extras，Receiver 与这里共用。 */
     const val ACTION_READ = "com.otscup.otsmail.push.READ"
     const val ACTION_DELETE = "com.otscup.otsmail.push.DELETE"
     const val ACTION_REPLY = "com.otscup.otsmail.push.REPLY"
+    const val ACTION_MUTE_SENDER = "com.otscup.otsmail.push.MUTE_SENDER"
     const val EXTRA_REPLY_TEXT = "replyText"
     const val EXTRA_SENDER = "sender"
     const val EXTRA_SUBJECT = "subject"
 
-    /** 渠道要在发通知前建好；MainActivity 与 MessagingService 都会调（幂等）。 */
+    /** 四条渠道要在发通知前建好；MainActivity 与 MessagingService 都会调（幂等）。 */
     fun ensureChannel(context: Context) {
         val nm = context.getSystemService(NotificationManager::class.java) ?: return
-        if (nm.getNotificationChannel(CHANNEL_ID) != null) return
-        val channel = NotificationChannel(CHANNEL_ID, "新邮件", NotificationManager.IMPORTANCE_LOW).apply {
-            description = "收到新邮件时提醒，不响铃、不震动"
-            setSound(null, null)
-            enableVibration(false)
+        LEGACY_CHANNELS.forEach { runCatching { nm.deleteNotificationChannel(it) } }
+        createChannel(
+            nm, CHANNEL_SOUND_VIBRATE, "OTSMail 新邮件（有声震动）", "响铃并震动（默认）",
+            sound = true, vibrate = true, lowImportance = false,
+        )
+        createChannel(
+            nm, CHANNEL_SOUND, "OTSMail 新邮件（有声）", "只响铃，不震动",
+            sound = true, vibrate = false, lowImportance = false,
+        )
+        createChannel(
+            nm, CHANNEL_VIBRATE, "OTSMail 新邮件（静音震动）", "不响铃，只震动",
+            sound = false, vibrate = true, lowImportance = false,
+        )
+        createChannel(
+            nm, CHANNEL_SILENT, "OTSMail 新邮件（静音）", "不响铃也不震动",
+            sound = false, vibrate = false, lowImportance = true,
+        )
+    }
+
+    private fun createChannel(
+        nm: NotificationManager,
+        id: String,
+        name: String,
+        description: String,
+        sound: Boolean,
+        vibrate: Boolean,
+        lowImportance: Boolean,
+    ) {
+        if (nm.getNotificationChannel(id) != null) return
+        // 渠道一旦创建，声音/震动就归用户掌握；这里只在首次创建时写入默认值。
+        val attrs = AudioAttributes.Builder()
+            .setUsage(AudioAttributes.USAGE_NOTIFICATION)
+            .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+            .build()
+        val channel = NotificationChannel(
+            id,
+            name,
+            if (lowImportance) NotificationManager.IMPORTANCE_LOW else NotificationManager.IMPORTANCE_DEFAULT,
+        ).apply {
+            this.description = description
+            if (sound) setSound(Settings.System.DEFAULT_NOTIFICATION_URI, attrs) else setSound(null, null)
+            enableVibration(vibrate)
+            if (vibrate) vibrationPattern = longArrayOf(0, 250, 200, 250)
             enableLights(false)
             setShowBadge(true)
             lockscreenVisibility = Notification.VISIBILITY_PRIVATE
@@ -87,6 +140,20 @@ object PushNotifications {
     ) {
         if (emailId <= 0L) return
         ensureChannel(context)
+
+        // 「要不要发」在进入通知构建前就拦掉，列表/未读仍照常由 MailSync 刷新，
+        // 不靠静音渠道假装关闭，避免角标与通知对不上。
+        val blocked = when {
+            !PushSettings.enabled(context) -> "总开关关闭"
+            PushSettings.isMuted(context, from) -> "发件人已静音"
+            PushSettings.inDnd(context) -> "免打扰时段"
+            else -> null
+        }
+        if (blocked != null) {
+            Log.i(TAG, "通知被设置拦截 emailId=$emailId reason=$blocked")
+            return
+        }
+
         val nm = context.getSystemService(NotificationManager::class.java) ?: return
 
         val who = name.trim().ifEmpty { from.trim() }.ifEmpty { "新邮件" }
@@ -107,7 +174,7 @@ object PushNotifications {
 
         val group = "sender:" + from.trim().lowercase().ifEmpty { "unknown" }
 
-        // 三个快捷操作：已读、删除、快速回复（RemoteInput 允许在通知栏直接输入）
+        // 四个快捷操作：已读、删除、快速回复（RemoteInput 允许在通知栏直接输入）、静音发件人
         val readPending = actionIntent(context, emailId, ACTION_READ, mutable = false)
         val deletePending = actionIntent(context, emailId, ACTION_DELETE, mutable = false)
         val replyPending = actionIntent(
@@ -120,8 +187,15 @@ object PushNotifications {
             .addRemoteInput(replyInput)
             .setAllowGeneratedReplies(true)
             .build()
+        // 没有发件人地址就没法静音，这种情况不挂这个按钮
+        val muteAction = from.trim().takeIf { it.isNotEmpty() }?.let { sender ->
+            Notification.Action.Builder(
+                0, "静音此发件人",
+                actionIntent(context, emailId, ACTION_MUTE_SENDER, mutable = false, from = sender),
+            ).build()
+        }
 
-        val builder = Notification.Builder(context, CHANNEL_ID)
+        val builder = Notification.Builder(context, PushSettings.channelId(context))
             .setSmallIcon(R.drawable.ot_mail)
             .setColor(0xFF2F6FED.toInt())
             .setContentTitle(senderLine)
@@ -139,6 +213,7 @@ object PushNotifications {
             .addAction(readAction)
             .addAction(deleteAction)
             .addAction(replyAction)
+            .apply { if (muteAction != null) addAction(muteAction) }
 
         runCatching { nm.notify(notificationId(emailId), builder.build()) }
     }
