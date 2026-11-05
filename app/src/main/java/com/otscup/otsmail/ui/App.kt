@@ -32,6 +32,7 @@ import com.otscup.otsmail.data.AuthState
 import com.otscup.otsmail.data.Demo
 import com.otscup.otsmail.data.MailCache
 import com.otscup.otsmail.data.MailDetail
+import com.otscup.otsmail.data.OAuthTiming
 import com.otscup.otsmail.data.PushManager
 import com.otscup.otsmail.data.Session
 import com.otscup.otsmail.push.PushRouter
@@ -163,6 +164,12 @@ fun OtsApp() {
         ) {
             session.notifAsked = true
             notifLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
+        // 第三方登录耗时的最后一段：收件箱真正画出第一帧（没在计时就不打印）
+        if (route is Route.Inbox) {
+            androidx.compose.runtime.withFrameNanos { }
+            OAuthTiming.mark(context, "inbox-visible")
+            OAuthTiming.finish(context)
         }
     }
 

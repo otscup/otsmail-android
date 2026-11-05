@@ -152,6 +152,11 @@ fun LoginScreen(session: Session, onLoggedIn: () -> Unit) {
     var oauthWeb by remember { mutableStateOf<OAuthRequest?>(null) }
     // 深链拿到 code 后到换 token/进收件箱之间：给一个可见的「正在登录…」，别让用户以为卡死
     var oauthBusy by remember { mutableStateOf(false) }
+    // 阻塞遮罩：点第三方入口或 App 回到前台就开始计时，直到登录成功/失败/超时才解除
+    var oauthBlocking by remember { mutableStateOf(false) }
+    var oauthWaitSecs by remember { mutableIntStateOf(0) }
+    // 同一个回调只换一次 token：Custom Tabs 关闭后再来一条深链时直接忽略
+    var oauthExchanging by remember { mutableStateOf(false) }
     // Custom Tabs 会把 App 切到后台；回来时若还没收到回调就走兜底
     var tabOpen by remember { mutableStateOf(false) }
     var tabStopped by remember { mutableStateOf(false) }
@@ -165,6 +170,7 @@ fun LoginScreen(session: Session, onLoggedIn: () -> Unit) {
         Api.token = token
         try {
             val me = Api.me()
+            OAuthTiming.mark(context, "me-ok")
             session.token = token
             session.accountId = me.accountId
             session.name = me.name
@@ -252,6 +258,8 @@ fun LoginScreen(session: Session, onLoggedIn: () -> Unit) {
         }
         // 3) 设备上真没有浏览器：内置 WebView 兜底，并提前说明限制
         tabOpen = false
+        // 内置授权页是 App 自己的 Dialog，遮罩会让它没法操作，这里解除阻塞
+        oauthBlocking = false
         toast("设备上没有可用浏览器，已改用内置浏览器；内置浏览器不支持通行密钥")
         OAuthTiming.mark(context, "browser:webview")
         oauthWeb = req
@@ -262,7 +270,10 @@ fun LoginScreen(session: Session, onLoggedIn: () -> Unit) {
      * Android WebView 不支持 WebAuthn，passkey 只有在 Chrome 这类浏览器里才可能被调起。
      */
     fun startOAuth(p: OAuthProvider) {
-        if (oauthPending != null) return
+        // 遮罩期间/上一次授权还在途：直接忽略，避免连点发起两轮 OAuth
+        if (oauthPending != null || oauthBlocking || oauthExchanging) return
+        // 点入口就立刻进阻塞态：请求发出前先把页面锁住
+        oauthBlocking = true
         OAuthTiming.start(context, "provider:${p.key}")
         scope.launch {
             // nonce 末尾带 app 标记：站点回调页据此把 code 转回 otsmail://oauth/callback
@@ -298,7 +309,10 @@ fun LoginScreen(session: Session, onLoggedIn: () -> Unit) {
                 oauthPending = it
                 oauthStore.save(it)
                 openInBrowser(it)
-            }.onFailure { toast(friendlyError(it)) }
+            }.onFailure {
+                oauthBlocking = false
+                toast(friendlyError(it))
+            }
         }
     }
 
@@ -306,11 +320,16 @@ fun LoginScreen(session: Session, onLoggedIn: () -> Unit) {
         oauthPending = null
         oauthFallback = null
         oauthWeb = null
+        oauthBlocking = false
+        oauthBusy = false
+        oauthExchanging = false
         oauthStore.clear()
     }
 
     /** 自定义 scheme 回调：校验 state 后拿 code 换 token（不打印 code / verifier）。 */
     fun handleOAuthCallback(u: String) {
+        // 同一个回调可能来两次（浏览器关掉后深链又到一次）：已经换过 token 就不再换
+        if (oauthExchanging) return
         val req = oauthPending ?: return
         OAuthTiming.mark(context, "callback-arrived")
         val uri = Uri.parse(u)
@@ -330,6 +349,7 @@ fun LoginScreen(session: Session, onLoggedIn: () -> Unit) {
         OAuthTiming.mark(context, "callback-verified")
         oauthPending = null
         oauthStore.clear()
+        oauthExchanging = true
         oauthBusy = true
         scope.launch {
             val token = runCatching {
@@ -338,25 +358,54 @@ fun LoginScreen(session: Session, onLoggedIn: () -> Unit) {
                 Api.oauthLogin(req.provider, code, state, req.nonce, req.providerId, req.verifier)
             }.onFailure { toast(friendlyError(it)) }.getOrNull() ?: run {
                 oauthBusy = false
+                oauthExchanging = false
+                oauthBlocking = false
+                OAuthTiming.finish(context)
                 return@launch
             }
             OAuthTiming.mark(context, "token-exchanged")
             if (token.isEmpty()) {
                 oauthBusy = false
+                oauthExchanging = false
+                oauthBlocking = false
                 toast("该第三方账号还没绑定邮箱，请先在网页版完成绑定")
+                OAuthTiming.finish(context)
                 return@launch
             }
             runCatching {
                 applyLogin(token, "")
-                OAuthTiming.mark(context, "session-ready")
+                OAuthTiming.mark(context, "session-saved")
                 oauthBusy = false
+                oauthExchanging = false
+                oauthBlocking = false
                 onLoggedIn()
-                OAuthTiming.mark(context, "inbox")
             }.onFailure {
                 oauthBusy = false
+                oauthExchanging = false
+                oauthBlocking = false
                 toast(friendlyError(it))
+                OAuthTiming.finish(context)
             }
-            OAuthTiming.finish(context)
+        }
+    }
+
+    // 阻塞遮罩的计时与超时：5s/15s 换文案，45s 必须解除阻塞给「重试/取消」
+    LaunchedEffect(oauthBlocking) {
+        if (!oauthBlocking) {
+            oauthWaitSecs = 0
+            return@LaunchedEffect
+        }
+        val started = android.os.SystemClock.elapsedRealtime()
+        while (true) {
+            oauthWaitSecs = ((android.os.SystemClock.elapsedRealtime() - started) / 1000).toInt()
+            if (oauthWaitSecs >= 45) {
+                // 超时：先解除阻塞，再把「重试/取消」交给兜底面板（正在换 token 时只提示可重试）
+                oauthBlocking = false
+                val req = oauthPending
+                if (req != null) oauthFallback = req else error = "登录超时，请重试"
+                break
+            }
+            kotlinx.coroutines.delay(250)
         }
     }
 
@@ -383,10 +432,16 @@ fun LoginScreen(session: Session, onLoggedIn: () -> Unit) {
         OAuthTiming.mark(context, "app-foreground")
         tabOpen = false
         if (tabStopped && oauthPending != null) {
+            // 回到前台立刻进阻塞态：授权可能已经在路上，别让用户继续点登录发第二轮
+            oauthBlocking = true
             // 深链有时比 ON_RESUME 晚几十毫秒到：等一小会儿再弹兜底，别在成功路径上闪一个「未完成」
             scope.launch {
                 kotlinx.coroutines.delay(1200)
-                if (oauthPending != null && !oauthBusy) oauthFallback = oauthPending
+                if (oauthPending != null && !oauthBusy) {
+                    oauthFallback = oauthPending
+                    // 兜底面板要能点，遮罩先撤
+                    oauthBlocking = false
+                }
             }
         }
         tabStopped = false
@@ -634,13 +689,21 @@ fun LoginScreen(session: Session, onLoggedIn: () -> Unit) {
             onUseBrowser = { openInBrowser(req) },
         )
     }
-    // 换 token 期间给明确进度，别让用户盯着空白登录页等
-    if (oauthBusy) {
+    // 第三方登录阻塞遮罩：点入口或 App 回前台就出现，整页不可操作（含返回键），
+    // 文案随等待时间升级；45 秒由上面的计时器解除并转成「重试/取消」，不会永远卡住。
+    if (oauthBlocking) {
         Dialog(
             onDismissRequest = { },
-            properties = DialogProperties(usePlatformDefaultWidth = false, dismissOnBackPress = false, dismissOnClickOutside = false),
+            properties = DialogProperties(
+                usePlatformDefaultWidth = false,
+                dismissOnBackPress = false,
+                dismissOnClickOutside = false,
+            ),
         ) {
-            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            Box(
+                Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.45f)),
+                contentAlignment = Alignment.Center,
+            ) {
                 Column(
                     Modifier
                         .clip(RoundedCornerShape(OT.dimens.rCard.dp))
@@ -654,9 +717,21 @@ fun LoginScreen(session: Session, onLoggedIn: () -> Unit) {
                         modifier = Modifier.size(28.dp),
                     )
                     Spacer(Modifier.height(14.dp))
-                    Text("正在登录…", style = t.body, color = c.label)
+                    Text(
+                        if (oauthWaitSecs >= 5) "正在验证账号…" else "正在登录…",
+                        style = t.body,
+                        color = c.label,
+                    )
                     Spacer(Modifier.height(4.dp))
-                    Text("正在用授权的账号完成登录", style = t.footnote, color = c.label3)
+                    Text(
+                        when {
+                            oauthWaitSecs >= 15 -> "连接较慢，请稍候"
+                            oauthWaitSecs >= 5 -> "正在用授权的账号完成登录"
+                            else -> "正在等待浏览器授权完成"
+                        },
+                        style = t.footnote,
+                        color = c.label3,
+                    )
                 }
             }
         }
