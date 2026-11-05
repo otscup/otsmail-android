@@ -225,6 +225,7 @@ fun OtsApp() {
                     onOpenSettings = { go(Route.Settings) },
                     onOpenContacts = { go(Route.Contacts) },
                     onOpenAi = { go(Route.Ai) },
+                    onOpenDrafts = { go(Route.Drafts) },
                 )
 
                 Route.Contacts -> SlidePage(onDismiss = { goBack() }) {

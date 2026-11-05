@@ -126,6 +126,8 @@ private val mailboxes = listOf(
     Mailbox("收件箱", "receive"),
     Mailbox("未读", "unread"),
     Mailbox("已标星", "starred"),
+    // 已发送：/email/list 的 type=1（服务端 mailbox 只有 all/unread/deleted/spam，没有 sent）
+    Mailbox("已发送", "sent"),
     Mailbox("垃圾箱", "spam"),
     Mailbox("已删除", "deleted"),
 )
@@ -197,6 +199,8 @@ fun InboxScreen(
     onOpenSettings: () -> Unit,
     onOpenContacts: () -> Unit,
     onOpenAi: () -> Unit,
+    /** 抽屉里的「草稿箱」：本地草稿不进服务端列表，交给 App 打开 DraftsScreen */
+    onOpenDrafts: () -> Unit = {},
     /** 行内右滑 → 回复：由 App 负责拿原文并进写信页 */
     onSwipeReply: (MailItem) -> Unit = {},
 ) {
@@ -389,7 +393,8 @@ fun InboxScreen(
     }
 
     suspend fun fetchRaw(next: Int): org.json.JSONObject {
-        val mb = if (current.key == "spam") null else current.key
+        // 已发送不是服务端的 mailbox 值：传 type=1、mailbox 留空（默认排除垃圾/已删除）
+        val mb = if (current.key == "sent" || current.key == "spam") null else current.key
         val cat = when {
             current.key == "spam" -> "spam"
             current.key == "receive" -> category
@@ -397,6 +402,7 @@ fun InboxScreen(
         }
         return when {
             current.key == "starred" -> Api.starredRaw(next)
+            current.key == "sent" -> Api.emailsRaw(accountId, next, null, keyword, "", allAccounts, type = 1)
             else -> Api.emailsRaw(accountId, next, mb, keyword, cat, allAccounts)
         }
     }
@@ -717,6 +723,16 @@ fun InboxScreen(
                                         },
                                     )
                                 }
+                                // 草稿箱在本地（Drafts 加密落盘），没有服务端计数，也不进 MailCache 列表
+                                DrawerRow(
+                                    icon = painterResource(R.drawable.ot_mail),
+                                    label = "草稿箱",
+                                    selected = false,
+                                    onClick = {
+                                        close()
+                                        onOpenDrafts()
+                                    },
+                                )
                             }
                             OTDash()
                             Column(Modifier.padding(horizontal = 8.dp)) {
@@ -892,10 +908,19 @@ fun InboxScreen(
                     }
                 items.isEmpty() ->
                     Box(Modifier.fillMaxSize()) {
+                        val (icon, title, text) = when {
+                            current.key == "sent" -> Triple(R.drawable.ot_send, "还没有已发送邮件", "写信并发出后，邮件会出现在这里")
+                            current.key == "spam" -> Triple(R.drawable.ot_alert, "垃圾箱是空的", "被判定为垃圾的邮件会收在这里")
+                            current.key == "deleted" -> Triple(R.drawable.ot_trash, "没有已删除的邮件", "删除的邮件会先放到这里")
+                            current.key == "starred" -> Triple(R.drawable.ot_star, "还没有标星邮件", "在邮件上点星标即可收藏")
+                            current.key == "unread" -> Triple(R.drawable.ot_mail, "没有未读邮件", "都看过了")
+                            keyword.isNotBlank() -> Triple(R.drawable.ot_search, "没有匹配的邮件", "换个关键词试试")
+                            else -> Triple(R.drawable.ot_inbox, "还没有邮件", "换个邮箱，或稍后再试")
+                        }
                         OTEmptyState(
-                            icon = if (keyword.isNotBlank()) painterResource(R.drawable.ot_search) else painterResource(R.drawable.ot_inbox),
-                            title = if (keyword.isNotBlank()) "没有匹配的邮件" else "还没有邮件",
-                            text = if (keyword.isNotBlank()) "换个关键词试试" else "换个邮箱，或稍后再试",
+                            icon = painterResource(icon),
+                            title = title,
+                            text = text,
                         )
                     }
                 else -> {
@@ -925,7 +950,12 @@ fun InboxScreen(
                                             OTDivider(inset = 60, endInset = 16)
                                         }
                                         OTMailRow(
-                                            from = mail.name.ifEmpty { mail.from },
+                                            // 已发送箱的行要显示收件人，显示自己没意义
+                                            from = if (mail.type == 1) {
+                                                mail.recipient.ifEmpty { "（无收件人）" }
+                                            } else {
+                                                mail.name.ifEmpty { mail.from }
+                                            },
                                             subject = mail.subject.ifEmpty { "（无主题）" },
                                             snippet = mail.text,
                                             time = TimeFmt.rowTime(mail.time),
@@ -1232,6 +1262,7 @@ private fun boxIcon(key: String): Painter = when (key) {
     "receive" -> painterResource(R.drawable.ot_inbox)
     "unread" -> painterResource(R.drawable.ot_mail)
     "starred" -> painterResource(R.drawable.ot_star)
+    "sent" -> painterResource(R.drawable.ot_send)
     "deleted" -> painterResource(R.drawable.ot_trash)
     "spam" -> painterResource(R.drawable.ot_alert)
     else -> painterResource(R.drawable.ot_mail)

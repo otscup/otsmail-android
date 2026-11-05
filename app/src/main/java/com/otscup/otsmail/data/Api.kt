@@ -447,7 +447,16 @@ object Api {
     suspend fun emails(accountId: Long, page: Int, mailbox: String? = null, keyword: String = "", category: String = "", allAccounts: Boolean = false): Pair<List<MailItem>, Long> =
         parseList(emailsRaw(accountId, page, mailbox, keyword, category, allAccounts))
 
-    suspend fun emailsRaw(accountId: Long, page: Int, mailbox: String? = null, keyword: String = "", category: String = "", allAccounts: Boolean = false): JSONObject {
+    suspend fun emailsRaw(
+        accountId: Long,
+        page: Int,
+        mailbox: String? = null,
+        keyword: String = "",
+        category: String = "",
+        allAccounts: Boolean = false,
+        // emailConst.type：0 收件 / 1 发送。已发送箱只能靠它区分，服务端 mailbox 里没有 sent
+        type: Int = 0,
+    ): JSONObject {
         val q = buildString {
             if (allAccounts) {
                 append("/email/list?accountId=0&allReceive=1")
@@ -455,7 +464,7 @@ object Api {
                 append("/email/list?accountId=").append(accountId).append("&allReceive=0")
             }
             append("&size=20&page=").append(page)
-            append("&emailId=0&timeSort=0&type=0")
+            append("&emailId=0&timeSort=0&type=").append(type)
             if (!mailbox.isNullOrEmpty()) append("&mailbox=").append(mailbox)
             if (category.isNotEmpty()) append("&category=").append(category)
             if (keyword.isNotEmpty()) append("&searchType=all&text=").append(java.net.URLEncoder.encode(keyword, "UTF-8"))
