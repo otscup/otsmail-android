@@ -1,11 +1,16 @@
 ﻿package com.otscup.otsmail.ui
 
 import android.net.Uri
+import android.content.Intent
 import android.util.Base64
+import android.webkit.CookieManager
+import android.webkit.WebChromeClient
+import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.Toast
+import androidx.browser.customtabs.CustomTabsClient
 import androidx.browser.customtabs.CustomTabsIntent
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -16,6 +21,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -32,11 +38,13 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Mail
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -65,6 +73,7 @@ import com.otscup.otsmail.data.ApiException
 import com.otscup.otsmail.data.OAuthCallbackBus
 import com.otscup.otsmail.data.OAuthPendingStore
 import com.otscup.otsmail.data.OAuthRequest
+import com.otscup.otsmail.data.OAuthTiming
 import com.otscup.otsmail.data.Session
 import com.otscup.otsmail.data.ServerAddress
 import com.otscup.otsmail.data.friendlyError
@@ -141,6 +150,8 @@ fun LoginScreen(session: Session, onLoggedIn: () -> Unit) {
     // 浏览器里没拿到回调时的兜底 / 内置 WebView 授权页
     var oauthFallback by remember { mutableStateOf<OAuthRequest?>(null) }
     var oauthWeb by remember { mutableStateOf<OAuthRequest?>(null) }
+    // 深链拿到 code 后到换 token/进收件箱之间：给一个可见的「正在登录…」，别让用户以为卡死
+    var oauthBusy by remember { mutableStateOf(false) }
     // Custom Tabs 会把 App 切到后台；回来时若还没收到回调就走兜底
     var tabOpen by remember { mutableStateOf(false) }
     var tabStopped by remember { mutableStateOf(false) }
@@ -216,18 +227,34 @@ fun LoginScreen(session: Session, onLoggedIn: () -> Unit) {
         }
     }
 
-    /** 有浏览器就用 Custom Tabs；没有可用浏览器再退回内置 WebView（并说明通行密钥不可用）。 */
+    /** 有 Custom Tabs 就用 Custom Tabs；没有就交给系统浏览器；连浏览器都没有才用内置 WebView。 */
     fun openInBrowser(req: OAuthRequest) {
         oauthFallback = null
         tabStopped = false
         tabOpen = true
-        val intent = CustomTabsIntent.Builder().setShowTitle(true).build()
-        runCatching { intent.launchUrl(context, Uri.parse(req.url)) }
-            .onFailure {
-                tabOpen = false
-                toast("当前设备没有可用浏览器，已改用内置浏览器；内置浏览器不支持通行密钥")
-                oauthWeb = req
+        val uri = Uri.parse(req.url)
+        // 1) 首选 Custom Tabs：复用用户已在用的浏览器，自带「返回 App」与更快的冷启动
+        val pkg = runCatching { CustomTabsClient.getPackageName(context, null) }.getOrNull()
+        if (pkg != null) {
+            val tabs = CustomTabsIntent.Builder().setShowTitle(true).build().apply { intent.setPackage(pkg) }
+            if (runCatching { tabs.launchUrl(context, uri) }.isSuccess) {
+                OAuthTiming.mark(context, "browser:custom-tabs")
+                return
             }
+        }
+        // 2) 没有 Custom Tabs：普通的系统浏览器 Intent，不把授权页塞进 WebView
+        val view = Intent(Intent.ACTION_VIEW, uri)
+            .addCategory(Intent.CATEGORY_BROWSABLE)
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        if (runCatching { context.startActivity(view) }.isSuccess) {
+            OAuthTiming.mark(context, "browser:system")
+            return
+        }
+        // 3) 设备上真没有浏览器：内置 WebView 兜底，并提前说明限制
+        tabOpen = false
+        toast("设备上没有可用浏览器，已改用内置浏览器；内置浏览器不支持通行密钥")
+        OAuthTiming.mark(context, "browser:webview")
+        oauthWeb = req
     }
 
     /**
@@ -236,6 +263,7 @@ fun LoginScreen(session: Session, onLoggedIn: () -> Unit) {
      */
     fun startOAuth(p: OAuthProvider) {
         if (oauthPending != null) return
+        OAuthTiming.start(context, "provider:${p.key}")
         scope.launch {
             // nonce 末尾带 app 标记：站点回调页据此把 code 转回 otsmail://oauth/callback
             val nonce = UUID.randomUUID().toString().replace("-", "") + "app"
@@ -284,6 +312,7 @@ fun LoginScreen(session: Session, onLoggedIn: () -> Unit) {
     /** 自定义 scheme 回调：校验 state 后拿 code 换 token（不打印 code / verifier）。 */
     fun handleOAuthCallback(u: String) {
         val req = oauthPending ?: return
+        OAuthTiming.mark(context, "callback-arrived")
         val uri = Uri.parse(u)
         val code = uri.getQueryParameter("code")
         val state = uri.getQueryParameter("state").orEmpty()
@@ -298,22 +327,36 @@ fun LoginScreen(session: Session, onLoggedIn: () -> Unit) {
             toast(err ?: "第三方授权没有返回 code")
             return
         }
+        OAuthTiming.mark(context, "callback-verified")
         oauthPending = null
         oauthStore.clear()
+        oauthBusy = true
         scope.launch {
             val token = runCatching {
                 session.base = base.trim()
                 session.apply()
                 Api.oauthLogin(req.provider, code, state, req.nonce, req.providerId, req.verifier)
-            }.onFailure { toast(friendlyError(it)) }.getOrNull() ?: return@launch
+            }.onFailure { toast(friendlyError(it)) }.getOrNull() ?: run {
+                oauthBusy = false
+                return@launch
+            }
+            OAuthTiming.mark(context, "token-exchanged")
             if (token.isEmpty()) {
+                oauthBusy = false
                 toast("该第三方账号还没绑定邮箱，请先在网页版完成绑定")
                 return@launch
             }
             runCatching {
                 applyLogin(token, "")
+                OAuthTiming.mark(context, "session-ready")
+                oauthBusy = false
                 onLoggedIn()
-            }.onFailure { toast(friendlyError(it)) }
+                OAuthTiming.mark(context, "inbox")
+            }.onFailure {
+                oauthBusy = false
+                toast(friendlyError(it))
+            }
+            OAuthTiming.finish(context)
         }
     }
 
@@ -329,11 +372,23 @@ fun LoginScreen(session: Session, onLoggedIn: () -> Unit) {
         handleOAuthCallback(u)
     }
     // Custom Tabs 把 App 切到后台；回到前台还没拿到回调就走兜底
-    LifecycleEventEffect(Lifecycle.Event.ON_STOP) { if (tabOpen) tabStopped = true }
+    LifecycleEventEffect(Lifecycle.Event.ON_STOP) {
+        if (tabOpen) {
+            tabStopped = true
+            OAuthTiming.mark(context, "app-background")
+        }
+    }
     LifecycleEventEffect(Lifecycle.Event.ON_RESUME) {
         if (!tabOpen) return@LifecycleEventEffect
+        OAuthTiming.mark(context, "app-foreground")
         tabOpen = false
-        if (tabStopped && oauthPending != null) oauthFallback = oauthPending
+        if (tabStopped && oauthPending != null) {
+            // 深链有时比 ON_RESUME 晚几十毫秒到：等一小会儿再弹兜底，别在成功路径上闪一个「未完成」
+            scope.launch {
+                kotlinx.coroutines.delay(1200)
+                if (oauthPending != null && !oauthBusy) oauthFallback = oauthPending
+            }
+        }
         tabStopped = false
     }
 
@@ -576,7 +631,35 @@ fun LoginScreen(session: Session, onLoggedIn: () -> Unit) {
             callbackUrl = req.callback,
             onCallback = { handleOAuthCallback(it) },
             onCancel = { cancelOAuth() },
+            onUseBrowser = { openInBrowser(req) },
         )
+    }
+    // 换 token 期间给明确进度，别让用户盯着空白登录页等
+    if (oauthBusy) {
+        Dialog(
+            onDismissRequest = { },
+            properties = DialogProperties(usePlatformDefaultWidth = false, dismissOnBackPress = false, dismissOnClickOutside = false),
+        ) {
+            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                Column(
+                    Modifier
+                        .clip(RoundedCornerShape(OT.dimens.rCard.dp))
+                        .background(c.bgCard)
+                        .padding(horizontal = 28.dp, vertical = 24.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                ) {
+                    CircularProgressIndicator(
+                        color = c.label2,
+                        strokeWidth = 2.dp,
+                        modifier = Modifier.size(28.dp),
+                    )
+                    Spacer(Modifier.height(14.dp))
+                    Text("正在登录…", style = t.body, color = c.label)
+                    Spacer(Modifier.height(4.dp))
+                    Text("正在用授权的账号完成登录", style = t.footnote, color = c.label3)
+                }
+            }
+        }
     }
     oauthFallback?.let { req ->
         OAuthFallbackSheet(
@@ -826,41 +909,114 @@ private fun OAuthFallbackSheet(
     }
 }
 
-/** 第三方授权页：拦截回调 URL，拿到 code 后由调用方换 token。 */
+/**
+ * 内置浏览器兜底：只有在设备完全没有浏览器时才走到这里。
+ *
+ * 之前的版本只拦 callbackUrl 前缀，站点用 `location.replace('otsmail://...')` 回传时
+ * WebView 会去加载未知 scheme 并以 ERR_UNKNOWN_URL_SCHEME 白屏失败；现在自定义 scheme
+ * 和回调前缀都拦，且额外用 onReceivedError 兜住"JS 导航没进 shouldOverrideUrlLoading"的情况。
+ * 同时补上第三方 Cookie、UA、超时和失败态，任何一步失败都有可见文案，不会白屏。
+ */
 @Composable
 private fun OAuthWebDialog(
     url: String,
     callbackUrl: String,
     onCallback: (String) -> Unit,
     onCancel: () -> Unit,
+    onUseBrowser: () -> Unit,
 ) {
     val c = OT.colors
     val t = OT.type
+    var loading by remember { mutableStateOf(true) }
+    var progress by remember { mutableIntStateOf(0) }
+    var failure by remember { mutableStateOf<String?>(null) }
+    var navTick by remember { mutableIntStateOf(0) }
+    var web by remember { mutableStateOf<WebView?>(null) }
+
+    // 每次导航重置 45s 计时：站点首屏要拉 ~2 MB 的 SPA 资源，短超时会误判
+    LaunchedEffect(navTick) {
+        if (failure != null) return@LaunchedEffect
+        kotlinx.coroutines.delay(45_000)
+        if (failure == null) {
+            loading = false
+            failure = "授权页加载超时（45 秒没有新进展）。请检查网络后重试，或改用系统浏览器打开。"
+        }
+    }
+
     Dialog(
         onDismissRequest = onCancel,
         properties = DialogProperties(usePlatformDefaultWidth = false),
     ) {
-        Box(Modifier.fillMaxSize().background(c.bgCard).statusBarsPadding()) {
+        Box(Modifier.fillMaxSize().background(c.bgGrouped).statusBarsPadding()) {
             AndroidView(
                 modifier = Modifier.fillMaxSize().padding(top = 44.dp),
                 factory = { ctx ->
                     WebView(ctx).apply {
                         settings.javaScriptEnabled = true
                         settings.domStorageEnabled = true
-                        settings.userAgentString = settings.userAgentString + " otsmail-android"
+                        settings.loadsImagesAutomatically = true
+                        // 去掉 WebView 的 "; wv" 与 "Version/x" 标记：部分 IdP 见到就拒绝
+                        settings.userAgentString = browserLikeUa(settings.userAgentString.orEmpty())
+                        // 第三方 Cookie：Google/GitHub 的授权链路要在多个域之间跳转
+                        val cookie = CookieManager.getInstance()
+                        cookie.setAcceptCookie(true)
+                        cookie.setAcceptThirdPartyCookies(this, true)
+                        webChromeClient = object : WebChromeClient() {
+                            override fun onProgressChanged(view: WebView, newProgress: Int) {
+                                progress = newProgress
+                                if (newProgress >= 100) loading = false
+                            }
+                        }
                         webViewClient = object : WebViewClient() {
-                            override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
-                                val u = request.url.toString()
-                                val target = callbackUrl.substringBefore("?")
-                                if (target.isNotEmpty() && u.startsWith(target, ignoreCase = true)) {
+                            fun deliver(u: String): Boolean {
+                                val explicit = u.startsWith("otsmail://", ignoreCase = true)
+                                val prefix = callbackUrl.substringBefore("?").takeIf { it.isNotEmpty() }
+                                val matched = prefix != null && u.startsWith(prefix, ignoreCase = true)
+                                if (explicit || matched) {
                                     onCallback(u)
                                     return true
                                 }
                                 return false
                             }
+
+                            override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean =
+                                deliver(request.url.toString())
+
+                            @Deprecated("WebView < 24 的回调")
+                            override fun shouldOverrideUrlLoading(view: WebView, target: String): Boolean =
+                                deliver(target)
+
+                            override fun onPageStarted(view: WebView, target: String?, favicon: android.graphics.Bitmap?) {
+                                loading = true
+                                failure = null
+                                navTick++
+                            }
+
+                            override fun onPageFinished(view: WebView, target: String?) {
+                                loading = false
+                            }
+
+                            override fun onReceivedError(view: WebView, request: WebResourceRequest, error: WebResourceError) {
+                                if (!request.isForMainFrame) return
+                                val failedUrl = request.url.toString()
+                                // 自定义 scheme 有时不以页面请求的形式回调 shouldOverrideUrlLoading，
+                                // 而是直接当成加载失败；这里再兜一次，把 code 交回去。
+                                if (failedUrl.startsWith("otsmail://", ignoreCase = true)) {
+                                    onCallback(failedUrl)
+                                    return
+                                }
+                                loading = false
+                                failure = "授权页加载失败（${error.description}）。请检查网络后重试，或改用系统浏览器打开。"
+                            }
                         }
                         loadUrl(url)
+                        web = this
                     }
+                },
+                update = { },
+                onRelease = {
+                    web = null
+                    it.destroy()
                 },
             )
             Text(
@@ -878,6 +1034,73 @@ private fun OAuthWebDialog(
                 color = c.label,
                 modifier = Modifier.align(Alignment.TopCenter).padding(top = 10.dp),
             )
+            if (loading && failure == null) {
+                // 细进度条：轨道 + 自主绘制的前景，避免依赖 M3 进度条的新旧签名差异
+                Box(
+                    Modifier
+                        .align(Alignment.TopCenter)
+                        .fillMaxWidth()
+                        .padding(top = 42.dp)
+                        .height(2.dp)
+                        .background(c.separatorSoft),
+                ) {
+                    Box(
+                        Modifier
+                            .fillMaxWidth((progress / 100f).coerceIn(0f, 1f))
+                            .fillMaxHeight()
+                            .background(c.label2),
+                    )
+                }
+            }
+            when {
+                failure != null -> Column(
+                    Modifier.align(Alignment.Center).padding(horizontal = 32.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                ) {
+                    Text(
+                        failure!!,
+                        style = t.subhead,
+                        color = c.label,
+                    )
+                    Spacer(Modifier.height(18.dp))
+                    LoginPrimaryButton("重试") {
+                        failure = null
+                        loading = true
+                        progress = 0
+                        navTick++
+                        web?.loadUrl(url)
+                    }
+                    Spacer(Modifier.height(10.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                        Text(
+                            "改用系统浏览器",
+                            style = t.subhead,
+                            color = loginAccent(),
+                            modifier = Modifier.clickable { onUseBrowser() }.padding(8.dp),
+                        )
+                        Text(
+                            "取消",
+                            style = t.subhead,
+                            color = c.label2,
+                            modifier = Modifier.clickable { onCancel() }.padding(8.dp),
+                        )
+                    }
+                }
+                loading && progress == 0 -> Column(
+                    Modifier.align(Alignment.Center),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                ) {
+                    CircularProgressIndicator(color = c.label2, strokeWidth = 2.dp, modifier = Modifier.size(26.dp))
+                    Spacer(Modifier.height(12.dp))
+                    Text("正在加载授权页…", style = t.subhead, color = c.label2)
+                }
+            }
         }
     }
+}
+
+/** WebView 默认 UA 带 "; wv" 与 "Version/x.x"，很多 IdP 会识别成内嵌浏览器并拒绝授权。 */
+private fun browserLikeUa(ua: String): String {
+    if (ua.isEmpty()) return ua
+    return ua.replace("; wv", "").replace(Regex("Version/\\d+(?:\\.\\d+)* "), "")
 }

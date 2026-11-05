@@ -8,6 +8,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import com.otscup.otsmail.data.OAuthCallbackBus
+import com.otscup.otsmail.data.OAuthTiming
 import com.otscup.otsmail.push.PushDedupe
 import com.otscup.otsmail.push.PushNotifications
 import com.otscup.otsmail.push.PushRouter
@@ -39,6 +40,7 @@ class MainActivity : ComponentActivity() {
     private fun handleOAuthIntent(intent: Intent?) {
         val data = intent?.data ?: return
         if (data.scheme == "otsmail" && data.host == "oauth") {
+            OAuthTiming.mark(this, "intent-received")
             OAuthCallbackBus.post(data.toString())
         }
     }

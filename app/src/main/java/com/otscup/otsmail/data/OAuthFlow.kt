@@ -1,6 +1,7 @@
 package com.otscup.otsmail.data
 
 import android.content.Context
+import android.util.Log
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
@@ -37,6 +38,47 @@ object OAuthCallbackBus {
         val u = pendingUrl
         pendingUrl = null
         return u
+    }
+}
+
+/**
+ * 第三方登录耗时打点（不上报，只写 logcat）。
+ *
+ * 排查"授权完成后卡很久"时用：`adb logcat -s OAuthTiming` 能看到
+ * 点按钮 → 拉起浏览器 → App 切后台 → 回前台 → 收到深链 → 换 token → 进收件箱
+ * 每段的相对/增量耗时。日志里不含 code、token、state 原文。
+ *
+ * 起点落在 SharedPreferences：浏览期间 App 常被系统回收，深链可能是冷启动进来的，
+ * 只放内存的话新进程算不出总耗时。计时用 elapsedRealtime（跨进程、不受改时间影响）。
+ */
+object OAuthTiming {
+    private const val TAG = "OAuthTiming"
+    private const val PREFS = "otsmail_oauth_timing"
+
+    fun start(context: Context, reason: String) {
+        val now = android.os.SystemClock.elapsedRealtime()
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+            .putLong("start", now)
+            .putLong("last", now)
+            .putString("reason", reason)
+            .apply()
+        Log.i(TAG, "start($reason) t=0")
+    }
+
+    /** 记一段耗时；本轮没开始过就静默跳过，避免别处的生命周期回调刷屏。 */
+    fun mark(context: Context, stage: String) {
+        val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        val start = prefs.getLong("start", 0L)
+        if (start == 0L) return
+        val now = android.os.SystemClock.elapsedRealtime()
+        val last = prefs.getLong("last", start)
+        Log.i(TAG, "$stage +${now - start}ms Δ${now - last}ms")
+        prefs.edit().putLong("last", now).apply()
+    }
+
+    /** 本轮结束：清掉起点，后面的 mark 不再打印。 */
+    fun finish(context: Context) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().clear().apply()
     }
 }
 
