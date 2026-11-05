@@ -505,10 +505,12 @@ fun DetailScreen(
 
             // 内容区占满剩余高度，底部动作条才能贴屏底；正文按可用高度铺满
             BoxWithConstraints(Modifier.weight(1f)) {
-                // 正文：译文命中时看译文，否则看原文；两者都空才显示「没有正文」占位，避免白屏
-                val bodyHtml = sanitizeEmailHtml(
-                    if (translated.isNotEmpty() && !showingOriginal) translated else m.content,
-                )
+                // 正文：译文命中时看译文，否则看原文；两者都空才显示「没有正文」占位，避免白屏。
+                // sanitize 对长 HTML 是纯 CPU 工作：按内容 remember，避免每次重组（滚动/展开）重跑一遍。
+                val baseHtml = remember(m.content, translated, showingOriginal) {
+                    sanitizeEmailHtml(if (translated.isNotEmpty() && !showingOriginal) translated else m.content)
+                }
+                val bodyHtml = baseHtml
                 val extrasHeight = (if (translated.isNotEmpty()) 30.dp else 0.dp) +
                     (if (bodyHtml.isNotBlank()) 30.dp else 0.dp) +
                     (if (m.attachments.isNotEmpty()) (1.dp + 56.dp * m.attachments.size) else 0.dp) +

@@ -100,6 +100,8 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
@@ -186,6 +188,34 @@ private fun flatIndexOf(items: List<MailItem>, emailId: Long): Int? {
     return null
 }
 
+/**
+ * 抽屉徽标计数（信箱总数 + 分类数）的进程级缓存。
+ * 每次切分类/切邮箱/从详情返回都会重新走 loadCounts，但计数只会被写操作改变：
+ * MailSync.rev 一变就失效，60 秒内直接复用，避免来回切换时重复打 4 个接口。
+ */
+internal object CountsCache {
+    private var key = ""
+    private var rev = -1
+    private var at = 0L
+    private var boxes: Map<String, Int> = emptyMap()
+    private var cats: Map<String, Int> = emptyMap()
+
+    fun read(key: String): Pair<Map<String, Int>, Map<String, Int>>? =
+        if (key == this.key && rev == MailSync.rev && System.currentTimeMillis() - at < 60_000) {
+            boxes to cats
+        } else {
+            null
+        }
+
+    fun write(key: String, boxes: Map<String, Int>, cats: Map<String, Int>) {
+        this.key = key
+        rev = MailSync.rev
+        at = System.currentTimeMillis()
+        this.boxes = boxes
+        this.cats = cats
+    }
+}
+
 @Composable
 private fun categoryIcon(key: String): Painter = when (key) {
     "social" -> painterResource(R.drawable.ot_people)
@@ -243,10 +273,28 @@ fun InboxScreen(
      * 「全部帐户」→ accountId=0 + allReceive=1（该 user 名下全部 account 汇总）。
      * 之前不带参数，服务端永远返回用户级总数，切帐户后徽标看起来不刷新。
      */
-    suspend fun loadCounts() {
+    suspend fun loadCounts(force: Boolean = false) {
         val acc = if (allAccounts) 0L else accountId
-        runCatching { Api.menuCounts(acc, allAccounts) }.onSuccess { counts = it }
-        runCatching { Api.categoryCounts(acc, allAccounts) }.onSuccess { catCounts = it }
+        val cacheKey = "$acc|$allAccounts"
+        if (!force) {
+            CountsCache.read(cacheKey)?.let { (cachedBoxes, cachedCats) ->
+                counts = cachedBoxes
+                catCounts = cachedCats
+                return
+            }
+        }
+        // 两组计数互不依赖，并发取；任何一组失败都保留旧值，不把徽标清空
+        coroutineScope {
+            val boxesJob = async { runCatching { Api.menuCounts(acc, allAccounts) }.getOrNull() }
+            val catsJob = async { runCatching { Api.categoryCounts(acc, allAccounts) }.getOrNull() }
+            val freshBoxes = boxesJob.await()
+            val freshCats = catsJob.await()
+            if (freshBoxes != null) counts = freshBoxes
+            if (freshCats != null) catCounts = freshCats
+            if (freshBoxes != null && freshCats != null) {
+                CountsCache.write(cacheKey, freshBoxes, freshCats)
+            }
+        }
     }
     var showAvatars by remember { mutableStateOf(session.showAvatars) }
     // 多帐户混合列表用：accountId → 邮箱地址（/account/list 已有，不新增服务端依赖）
@@ -441,7 +489,8 @@ fun InboxScreen(
      * 拼接会出现重复行和"翻页漂移"。toTop = true 只给「用户手动下拉」用。
      */
     suspend fun refreshFirst(toTop: Boolean = false) {
-        val (freshRaw, total) = Api.parseList(fetchRaw(1))
+        val raw = fetchRaw(1)
+        val (freshRaw, total) = Api.parseList(raw)
         val fresh = MailCache.dedupeByEmailId(freshRaw)
         val anchor = listState.layoutInfo.visibleItemsInfo.firstOrNull { it.key is Long }?.key as? Long
         val anchorOffset = listState.firstVisibleItemScrollOffset
@@ -571,21 +620,35 @@ fun InboxScreen(
                 store.loading = true
             }
         }
+        // 账户标签与抽屉计数跟列表刷新互不依赖：并发拉，不再排在列表请求后面串行等
+        val accountsJob = launch { runCatching { Api.accounts() }.onSuccess { accounts = it } }
+        val countsJob = launch { loadCounts() }
         // MailSync.rev 变过 = 详情/写信对服务端做过写操作，强制刷新
         if (MailSync.rev != store.syncRev) {
             store.syncRev = MailSync.rev
             store.updatedAt = 0L
         }
-        if (items.isEmpty() || System.currentTimeMillis() - store.updatedAt > MailCache.LIST_TTL) {
+        // 有缓存时这是"缓存首帧"：先把行画出来，网络刷新在后台跑，不清列表
+        val needRefresh = items.isEmpty() || System.currentTimeMillis() - store.updatedAt > MailCache.LIST_TTL
+        if (items.isNotEmpty()) store.loading = false
+        if (needRefresh) {
+            store.loading = true
             runCatching { refreshFirst() }
                 .onFailure { if (items.isEmpty()) store.error = friendlyError(it) }
+            store.loading = false
         }
-        store.loading = false
-        runCatching { Api.accounts() }.onSuccess { accounts = it }
-        loadCounts()
+        accountsJob.join()
+        countsJob.join()
     }
 
-    // 已经在「全部帐户·收件箱」时再点抽屉里的「全部帐户」不改变 listKey，
+    // 下一页预取：首屏稳定 2.5s 后若还有下一页，先取回来放着；
+    // 用户滚到底时直接拼接，不用先看一帧转圈再等一次 RTT。搜索不预取（结果页可能很贵）。
+    LaunchedEffect(listKey, items.size, store.total) {
+        if (keyword.isNotBlank()) return@LaunchedEffect
+        if (items.size != 20 || store.page != 1 || store.total <= 20) return@LaunchedEffect
+        delay(2500)
+        if (items.size == 20 && store.page == 1 && !store.loadingMore) loadMore()
+    }
     // 这里单独给一次强制重拉：首屏失败（弱网/超时）后列表会停在空态，重进入口要能恢复。
     // handledTick 记住本页已经处理过的信号，避免「进详情再返回」时又白刷一次。
     var handledForceTick by remember { mutableStateOf(InboxUi.forceTick) }

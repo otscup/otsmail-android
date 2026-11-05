@@ -2,6 +2,8 @@ package com.otscup.otsmail.data
 
 import com.otscup.otsmail.BuildConfig
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
@@ -864,22 +866,25 @@ object Api {
             .associateWith { d.optInt(it) }
     }
 
-    suspend fun menuCounts(accountId: Long = 0L, allReceive: Boolean = true): Map<String, Int> {
-        val d = obj("GET", "/email/menu-counts?accountId=$accountId&allReceive=${if (allReceive) 1 else 0}")
+    suspend fun menuCounts(accountId: Long = 0L, allReceive: Boolean = true): Map<String, Int> = coroutineScope {
+        val scope = "accountId=$accountId&allReceive=${if (allReceive) 1 else 0}"
+        // 三个计数互不依赖，并发取：串行时首屏要白等三次 RTT（实测每次 0.8~1s）
+        val menu = async { obj("GET", "/email/menu-counts?$scope") }
         // 未读数没有计数接口，用列表 total；范围必须与 menu-counts 保持一致
-        val unread = runCatching {
-            obj(
-                "GET",
-                "/email/list?accountId=$accountId&allReceive=${if (allReceive) 1 else 0}" +
-                    "&size=1&page=1&emailId=0&timeSort=0&type=0&mailbox=unread",
-            ).optLong("total").toInt()
-        }.getOrDefault(0)
+        val unread = async {
+            runCatching {
+                obj("GET", "/email/list?$scope&size=1&page=1&emailId=0&timeSort=0&type=0&mailbox=unread")
+                    .optLong("total").toInt()
+            }.getOrDefault(0)
+        }
         // 星标接口只按 userId 统计（/star/list 没有账户参数），切帐户时保持用户级口径
-        val starred = runCatching {
-            obj("GET", "/star/list?size=1&page=1").optLong("total").toInt()
-        }.getOrDefault(0)
-        return listOf("inbox", "sent", "deleted", "spam", "draft").associateWith { d.optInt(it) } +
-            ("unread" to unread) + ("starred" to starred)
+        val starred = async {
+            runCatching { obj("GET", "/star/list?size=1&page=1").optLong("total").toInt() }
+                .getOrDefault(0)
+        }
+        val d = menu.await()
+        listOf("inbox", "sent", "deleted", "spam", "draft").associateWith { d.optInt(it) } +
+            ("unread" to unread.await()) + ("starred" to starred.await())
     }
 
     // ---- 解析小工具 ----
