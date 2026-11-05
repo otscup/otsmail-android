@@ -289,30 +289,35 @@ fun DetailScreen(
                 return@Column
             }
 
-            // 标题 / 日期
+            // 标题 + 信头：标题与「发件人 / 日期」都在 20dp 左边缘起排，
+            // 标签列固定 64dp，值和标签按第一行基线对齐；长地址在值列换行/截断。
             Column(Modifier.fillMaxWidth().padding(start = 20.dp, end = 20.dp, top = 2.dp)) {
                 Text(
                     m.subject.ifEmpty { "（无主题）" },
                     style = t.title3.copy(fontWeight = FontWeight.Medium),
                     color = c.label,
                 )
-                Spacer(Modifier.height(6.dp))
-                Text(TimeFmt.detailTime(m.time), style = t.footnote, color = c.label3)
-            }
-
-            // 发件人 chip + 蓝色「详细信息」
-            Row(
-                Modifier.fillMaxWidth().padding(start = 20.dp, end = 20.dp, top = 12.dp, bottom = 12.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                OTChip(m.name.ifEmpty { m.from }, c.label2, outline = true)
-                Spacer(Modifier.weight(1f))
-                Text(
-                    "详细信息",
-                    style = t.subhead,
-                    color = c.blue,
-                    modifier = Modifier.tapArea { detailSheet = true },
+                Spacer(Modifier.height(8.dp))
+                OTKeyValueRow(
+                    label = "发件人",
+                    value = if (m.name.isBlank() || m.name == m.from) m.from else "${m.name} <${m.from}>",
+                    maxLines = 2,
+                    trailing = {
+                        Text(
+                            "详细信息",
+                            style = t.subhead,
+                            color = c.blue,
+                            modifier = Modifier.alignByBaseline().tapArea { detailSheet = true },
+                        )
+                    },
                 )
+                Spacer(Modifier.height(6.dp))
+                OTKeyValueRow(
+                    label = "日期",
+                    value = TimeFmt.detailTime(m.time),
+                    maxLines = 1,
+                )
+                Spacer(Modifier.height(12.dp))
             }
             OTDivider(strong = true)
 
@@ -731,13 +736,12 @@ private fun MoreItem(text: String, dimmed: Boolean = false, onClick: () -> Unit)
 
 @Composable
 private fun DetailKV(label: String, value: String) {
-    Row(
-        Modifier.fillMaxWidth().heightIn(min = 44.dp).padding(horizontal = 16.dp, vertical = 8.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Text(label, style = OT.type.footnote, color = OT.colors.label2, modifier = Modifier.width(72.dp))
-        Text(value, style = OT.type.body, color = OT.colors.label, modifier = Modifier.weight(1f))
-    }
+    OTKeyValueRow(
+        label = label,
+        value = value,
+        maxLines = 2,
+        modifier = Modifier.heightIn(min = 44.dp).padding(horizontal = 16.dp, vertical = 10.dp),
+    )
 }
 
 // 主题色转 CSS 十六进制，正文 HTML 里用

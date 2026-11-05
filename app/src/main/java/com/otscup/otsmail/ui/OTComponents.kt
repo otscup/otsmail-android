@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -311,6 +312,43 @@ fun OTChip(text: String, tint: Color, outline: Boolean = false) {
             color = if (outline) c.label2 else tint,
             maxLines = 1,
         )
+    }
+}
+
+/**
+ * 「标签—值」行：读信页头部、详细信息 sheet、写信页发件人区共用同一套排版。
+ *
+ * - 左列固定宽度（默认 64dp，容得下「发件人 / 收件人 / 抄送 / 密送 / 邮件 ID」），
+ *   右列占满剩余宽度；长地址只在自己这一列换行或截断，不会把左列挤窄。
+ * - 两列按**第一行基线**对齐（alignByBaseline）；值换行后标签仍停在顶部，
+ *   不会出现标签被垂直居中、跟第二行值对不上的错位。
+ */
+@Composable
+fun OTKeyValueRow(
+    label: String,
+    value: String,
+    modifier: Modifier = Modifier,
+    labelWidth: Dp = 64.dp,
+    maxLines: Int = 2,
+    trailing: (@Composable RowScope.() -> Unit)? = null,
+) {
+    Row(modifier.fillMaxWidth(), verticalAlignment = Alignment.Top) {
+        Text(
+            label,
+            style = OT.type.footnote,
+            color = OT.colors.label2,
+            maxLines = 1,
+            modifier = Modifier.width(labelWidth).alignByBaseline(),
+        )
+        Text(
+            value,
+            style = OT.type.body,
+            color = OT.colors.label,
+            maxLines = maxLines,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f).alignByBaseline(),
+        )
+        trailing?.invoke(this)
     }
 }
 

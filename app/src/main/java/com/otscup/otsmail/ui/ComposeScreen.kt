@@ -73,6 +73,7 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextDecoration
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.Lifecycle
@@ -763,8 +764,9 @@ fun ComposeScreen(
                         Text("发件人", style = t.body, color = c.label, modifier = Modifier.width(56.dp))
                         Text(
                             fromEmail, style = t.body, color = c.label2, maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
                             modifier = Modifier.weight(1f),
-                            textAlign = TextAlign.End,
+                            textAlign = TextAlign.Start,
                         )
                         Icon(Icons.Outlined.ChevronRight, contentDescription = null, tint = c.label3, modifier = Modifier.size(14.dp))
                     }
@@ -1106,9 +1108,11 @@ private fun OTTagField(
                 .fillMaxWidth()
                 .heightIn(min = 52.dp)
                 .padding(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 8.dp),
-            verticalAlignment = Alignment.CenterVertically,
+            // 标签跟第一行 chip 对齐：chip 30dp、行内文字居中，标签补 5dp 上边距后基线一致；
+            // 多行地址时标签停在顶部，不再垂直居中
+            verticalAlignment = Alignment.Top,
         ) {
-            Text(label, style = t.body, color = c.label, modifier = Modifier.width(56.dp))
+            Text(label, style = t.body, color = c.label, modifier = Modifier.width(56.dp).padding(top = 5.dp))
             FlowRow(
                 Modifier.weight(1f),
                 horizontalArrangement = Arrangement.spacedBy(6.dp),
