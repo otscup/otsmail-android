@@ -101,6 +101,8 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 /** 滑动删除的延迟提交作用域：不跟 composition 走，3 秒内退到别的页面也照样提交。 */
 private val swipeUndoScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
@@ -292,10 +294,11 @@ fun InboxScreen(
     }
 
     // 滑动删除：先把行从内存列表拿走，3 秒后才真正调服务端；撤销只是放回原位。
-    // 不立刻写缓存/删接口，撤销才可能是"真的没删过"，而不是本地补一条假数据。
-    var undoMail by remember { mutableStateOf<MailItem?>(null) }
-    var undoIndex by remember { mutableStateOf(0) }
-    var undoJob by remember { mutableStateOf<Job?>(null) }
+    // 每条删除各自排队：新的撤销条不会取消前一条已排队的删除；真正请求用 Mutex 串行发出。
+    data class SwipeUndo(val mail: MailItem, val index: Int) { var job: Job? = null }
+
+    val swipes = remember { mutableStateListOf<SwipeUndo>() }
+    val trashMutex = remember { Mutex() }
 
     fun countKeyFor(box: String): String = when (box) {
         "receive" -> "inbox"
@@ -314,37 +317,37 @@ fun InboxScreen(
     fun swipeDelete(mail: MailItem) {
         val idx = items.indexOfFirst { it.emailId == mail.emailId }
         if (idx < 0) return
-        undoJob?.cancel()
         items.removeAt(idx)
         store.total = (store.total - 1).coerceAtLeast(0)
         bumpCount(countKeyFor(current.key), -1)
-        undoMail = mail
-        undoIndex = idx
-        val at = idx
-        undoJob = swipeUndoScope.launch {
+        val entry = SwipeUndo(mail, idx)
+        swipes.add(entry)
+        entry.job = swipeUndoScope.launch {
             delay(3000)
-            undoMail = null
-            runCatching { Api.trash(listOf(mail.emailId)) }
-                .onSuccess { MailCache.removeItem(mail.emailId) }
-                .onFailure {
-                    // 服务端没删掉：把行放回原位，别让界面和数据对不上
-                    if (items.none { it.emailId == mail.emailId }) {
-                        items.add(at.coerceIn(0, items.size), mail)
+            swipes.remove(entry)
+            trashMutex.withLock {
+                runCatching { Api.trash(listOf(mail.emailId)) }
+                    .onSuccess { MailCache.removeItem(mail.emailId) }
+                    .onFailure {
+                        // 服务端没删掉：把行放回原位，别让界面和数据对不上
+                        if (items.none { it.emailId == mail.emailId }) {
+                            items.add(idx.coerceIn(0, items.size), mail)
+                        }
+                        store.total += 1
+                        bumpCount(countKeyFor(current.key), +1)
+                        notice = "删除失败，已恢复"
                     }
-                    store.total += 1
-                    bumpCount(countKeyFor(current.key), +1)
-                    notice = "删除失败，已恢复"
-                }
+            }
         }
     }
 
     fun undoDelete() {
-        undoJob?.cancel()
-        undoJob = null
-        val mail = undoMail ?: return
-        undoMail = null
-        if (items.none { it.emailId == mail.emailId }) {
-            items.add(undoIndex.coerceIn(0, items.size), mail)
+        // 只撤销当前这一条：取消它自己的定时任务，已经排队的其它删除照常继续
+        val entry = swipes.lastOrNull() ?: return
+        entry.job?.cancel()
+        swipes.remove(entry)
+        if (items.none { it.emailId == entry.mail.emailId }) {
+            items.add(entry.index.coerceIn(0, items.size), entry.mail)
         }
         store.total += 1
         bumpCount(countKeyFor(current.key), +1)
@@ -379,23 +382,21 @@ fun InboxScreen(
     }
 
     /**
-     * 首屏刷新：增量合并而不是重建；自动刷新用当前可见行做锚点，新邮件插进来也不跳走。
-     * toTop = true 只给「用户手动下拉」用——那是明确要回到最新，允许回到顶部。
+     * 首屏刷新：重置为第 1 页，并清掉旧的第 2..N 页缓存。
+     * 不能把新第 1 页和旧的第 2..N 页继续拼在一起——邮件上下位移后，旧页码对应的是另一批数据，
+     * 拼接会出现重复行和"翻页漂移"。toTop = true 只给「用户手动下拉」用。
      */
     suspend fun refreshFirst(toTop: Boolean = false) {
-        val (fresh, total) = Api.parseList(fetchRaw(1))
+        val (freshRaw, total) = Api.parseList(fetchRaw(1))
+        val fresh = MailCache.dedupeByEmailId(freshRaw)
         val anchor = listState.layoutInfo.visibleItemsInfo.firstOrNull { it.key is Long }?.key as? Long
         val anchorOffset = listState.firstVisibleItemScrollOffset
-        val ids = fresh.mapTo(HashSet()) { it.emailId }
-        val merged = ArrayList<MailItem>(fresh.size + items.size)
-        merged.addAll(fresh)
-        items.forEach { if (it.emailId !in ids) merged.add(it) }
         items.clear()
-        items.addAll(merged)
+        items.addAll(fresh)
         store.total = total.toInt()
-        store.page = maxOf(store.page, 1)
+        store.page = 1
         store.error = ""
-        MailCache.savePage(store, 1, fresh, total.toInt())
+        MailCache.savePage(store, 1, fresh, total.toInt(), resetLater = true)
         if (toTop) {
             // 无条件回到列表最顶端：firstVisibleItemIndex 可能已经是 0，但第一行（日期头）还滚出去了一截
             listState.scrollToItem(0, 0)
@@ -404,6 +405,9 @@ fun InboxScreen(
             if (target != null && target != listState.firstVisibleItemIndex) {
                 listState.scrollToItem(target, anchorOffset)
             }
+        } else if (listState.firstVisibleItemIndex >= items.size) {
+            // 之前滚到第 2..N 页、但这封锚点邮件不在新首页了：夹回最后一封，避免越界空白
+            listState.scrollToItem((items.size - 1).coerceAtLeast(0), 0)
         }
     }
 
@@ -939,7 +943,8 @@ fun InboxScreen(
                 }
             }
             // 滑动删除的撤销条：3 秒内可点，FAB 上方，不挡列表最后一行
-            undoMail?.let { m ->
+            swipes.lastOrNull()?.let { entry ->
+                val m = entry.mail
                 Row(
                     Modifier
                         .align(Alignment.BottomCenter)

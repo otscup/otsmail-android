@@ -31,6 +31,7 @@ import androidx.compose.ui.unit.dp
 import com.otscup.otsmail.data.Api
 import com.otscup.otsmail.data.MailCache
 import com.otscup.otsmail.ui.theme.OT
+import kotlinx.coroutines.CancellationException
 
 /** 多选的批量动作。服务端只有单封接口，所以逐条串行调用，不伪造批量。 */
 internal enum class MailBatch(val label: String) {
@@ -47,7 +48,7 @@ internal object MailBatchOps {
     suspend fun run(action: MailBatch, ids: List<Long>): Int {
         var failed = 0
         for (id in ids) {
-            val ok = runCatching {
+            try {
                 when (action) {
                     MailBatch.READ -> {
                         Api.markRead(id)
@@ -74,8 +75,12 @@ internal object MailBatchOps {
                         MailCache.removeItem(id)
                     }
                 }
-            }.isSuccess
-            if (!ok) failed++
+            } catch (e: CancellationException) {
+                // 页面退出/协程取消不是"失败"：直接向上抛，避免残留的取消异常被计进失败条数
+                throw e
+            } catch (_: Throwable) {
+                failed++
+            }
         }
         return failed
     }
@@ -84,11 +89,14 @@ internal object MailBatchOps {
     suspend fun move(category: String, ids: List<Long>): Int {
         var failed = 0
         for (id in ids) {
-            val ok = runCatching {
+            try {
                 Api.moveCategory(id, category)
                 MailCache.setCategory(id, category)
-            }.isSuccess
-            if (!ok) failed++
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Throwable) {
+                failed++
+            }
         }
         return failed
     }

@@ -21,8 +21,6 @@ object AuthState {
     fun reset() {
         expiredAt = 0L
     }
-
-    fun readOnly(): Boolean = expiredAt > 0L
 }
 
 /** 调用方用它判断「这条错误要不要展示」：401 交给全局提示，不要再弹「请求失败」。 */

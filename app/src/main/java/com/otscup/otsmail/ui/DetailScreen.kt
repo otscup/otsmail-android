@@ -2,8 +2,10 @@ package com.otscup.otsmail.ui
 
 import android.app.DownloadManager
 import android.content.Context
+import android.content.Intent
 import android.net.Uri
 import android.os.Environment
+import android.webkit.WebResourceRequest
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.compose.foundation.background
@@ -129,6 +131,9 @@ fun DetailScreen(
     var translated by remember { mutableStateOf("") }
     // 译文默认覆盖原文；false = 显示译文，true = 显示原文。切换只换渲染，不重新请求接口。
     var showingOriginal by remember { mutableStateOf(false) }
+    // 默认屏蔽外部图片：图片 URL 往往带追踪参数，直接加载会把 IP 和"已读时间"暴露给发件人。
+    // 用户主动点「显示图片」才放行，且只影响当前这封。
+    var showImages by remember(emailId) { mutableStateOf(false) }
     var busy by remember { mutableStateOf(false) }
     var detailSheet by remember { mutableStateOf(false) }
     var translatedError by remember { mutableStateOf("") }
@@ -313,7 +318,12 @@ fun DetailScreen(
 
             // 内容区占满剩余高度，底部动作条才能贴屏底；正文按可用高度铺满
             BoxWithConstraints(Modifier.weight(1f)) {
+                // 正文：译文命中时看译文，否则看原文；两者都空才显示「没有正文」占位，避免白屏
+                val bodyHtml = sanitizeEmailHtml(
+                    if (translated.isNotEmpty() && !showingOriginal) translated else m.content,
+                )
                 val extrasHeight = (if (translated.isNotEmpty()) 30.dp else 0.dp) +
+                    (if (bodyHtml.isNotBlank()) 30.dp else 0.dp) +
                     (if (m.attachments.isNotEmpty()) (1.dp + 44.dp * m.attachments.size) else 0.dp) +
                     (if (translatedError.isNotEmpty()) 26.dp else 0.dp)
                 // 正文槽位 = 剩余高度 - 12dp 上边距 - 译文提示/附件/错误占位
@@ -339,28 +349,45 @@ fun DetailScreen(
                         )
                     }
                 }
-                // 正文：不加卡片、不加边框，左右 16dp；图片 max-width 100% 限制在内容区
-                // translated 命中时看译文，否则看原文；两者都空才显示「没有正文」占位，避免白屏
-                val bodyHtml = if (translated.isNotEmpty() && !showingOriginal) translated else m.content
-                // 量正文高度：下一帧回调里量，量不到就等下一帧（最多 10 帧），不用固定延时。
-                // 量到即把骨架拿掉——不依赖 onPageFinished（连续 load 时它可能被取消吞掉）。
+                // 图片开关：默认屏蔽远程图片（防 IP/已读回执泄露），用户显式点开才加载
+                if (bodyHtml.isNotBlank()) {
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .padding(start = 16.dp, end = 16.dp, top = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(
+                            if (showImages) "外部图片已显示" else "外部图片已屏蔽",
+                            style = t.caption1,
+                            color = c.label2,
+                        )
+                        Spacer(Modifier.weight(1f))
+                        Text(
+                            if (showImages) "隐藏图片" else "显示图片",
+                            style = t.caption1.copy(fontWeight = FontWeight.Medium),
+                            color = c.blue,
+                            modifier = Modifier.tapArea { showImages = !showImages },
+                        )
+                    }
+                }
+                // 量正文高度：不跑 JS（正文来自外部邮件，JS 一律关闭）。
+                // WebView.contentHeight 是文档内容高度（CSS px ≈ dp），等价于原来 JS 里的
+                // document.body.scrollHeight；computeVerticalScrollRange() 是 View 的 protected 方法，外部不可调。
+                // 最多等 10 帧；量不到就按槽位全高显示，不空等。
                 fun measureBody(w: WebView) {
                     w.postOnAnimation(object : Runnable {
                         private var tries = 0
                         override fun run() {
-                            w.evaluateJavascript(
-                                "(function(){var b=document.body;return b?Math.max(b.scrollHeight,document.documentElement.scrollHeight):0})()",
-                            ) { v ->
-                                val h = v?.trim('"')?.toFloatOrNull() ?: 0f
-                                if (h > 0f) {
-                                    bodyHeightDp = h.toInt()
-                                    bodyReady = true
-                                    OpenPerf.mark("body_measured")
-                                } else if (tries++ < 10) {
-                                    w.postOnAnimation(this)
-                                } else {
-                                    bodyReady = true
-                                }
+                            val h = w.contentHeight
+                            if (h > 0) {
+                                bodyHeightDp = h
+                                bodyReady = true
+                                OpenPerf.mark("body_measured")
+                            } else if (tries++ < 10) {
+                                w.postOnAnimation(this)
+                            } else {
+                                bodyReady = true
                             }
                         }
                     })
@@ -390,8 +417,10 @@ fun DetailScreen(
                                 OpenPerf.mark("web_created")
                                 // 优先用 App 起好后预热好的实例：省掉引擎初始化的 0.9s+
                                 (WebViewPrewarm.take() ?: WebView(ctx)).apply {
-                                    // 需要 JS 才能读取 body 高度；正文脚本由后端内容决定，仍走最小权限
-                                    settings.javaScriptEnabled = true
+                                    // 外部邮件正文一律不跑 JS：量高、跳转都已经不用 JS 实现
+                                    settings.javaScriptEnabled = false
+                                    // 默认只放行内联 data: 图片；远程图片的 URL 会泄露 IP 与阅读时间
+                                    settings.blockNetworkImage = !showImages
                                     settings.useWideViewPort = false
                                     settings.loadWithOverviewMode = false
                                     settings.setSupportZoom(false)
@@ -399,6 +428,24 @@ fun DetailScreen(
                                     settings.textZoom = 100
                                     setBackgroundColor(android.graphics.Color.TRANSPARENT)
                                     webViewClient = object : WebViewClient() {
+                                        // 任何跳转都不在应用内打开：http(s) 交给系统浏览器，
+                                        // intent://、tel:、自定义 scheme 一律拦截（返回 true 即不加载）
+                                        override fun shouldOverrideUrlLoading(
+                                            view: WebView?,
+                                            request: WebResourceRequest?,
+                                        ): Boolean {
+                                            val uri = request?.url ?: return true
+                                            val scheme = uri.scheme?.lowercase()
+                                            if (scheme == "http" || scheme == "https") {
+                                                runCatching {
+                                                    view?.context?.startActivity(
+                                                        Intent(Intent.ACTION_VIEW, uri)
+                                                            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                                                    )
+                                                }
+                                            }
+                                            return true
+                                        }
                                         // 首帧内容已提交就能量正文，不必等 onPageFinished
                                         // （后者要等所有图片下载完，慢网下会白等 1 秒以上）
                                         override fun onPageCommitVisible(view: WebView?, url: String?) {
@@ -423,13 +470,15 @@ fun DetailScreen(
                                 }
                             },
                             update = { wv ->
-                                // 覆盖而不是追加：译文态只渲染译文，原文态渲染原文
-                                val html = if (translated.isNotEmpty() && !showingOriginal) translated else m.content
+                                // 覆盖而不是追加：译文态只渲染译文，原文态渲染原文；都已做过清洗
+                                val html = bodyHtml
+                                wv.settings.blockNetworkImage = !showImages
                                 val fg = hex(c.label)
                                 val sys = hex(c.label2)
                                 val link = hex(c.blue)
                                 val quote = hex(c.separator)
                                 val marker = if (html.isNotBlank()) "1" else "0"
+                                val imgFlag = if (showImages) "1" else "0"
                                 // 左右留白交给 Compose 的 16dp，HTML 自己不再加 padding，图片才能贴满内容区
                                 // 显式声明 UTF-8 必须排在 viewport 之前、也是整篇第一个 meta：
                                 // 原信正文自带 <meta charset="gb2312"> 时，浏览器会按那个声明解我们写进去的
@@ -440,7 +489,7 @@ body{margin:0;padding:0;background:transparent;color:$fg;
 font:15px/20px -apple-system,"Noto Sans SC",sans-serif;letter-spacing:-0.24px;word-break:break-word}
 p{margin:0 0 12px}img,video{max-width:100%;height:auto}a{color:$link}
 blockquote{margin:8px 0;padding-left:10px;border-left:3px solid $quote;color:$sys}
-</style></head><body data-ots=$marker>$html</body></html>"""
+</style></head><body data-ots=$marker data-img=$imgFlag>$html</body></html>"""
                                 // 内容没变就不重载，避免测量→重组→重载的循环
                                 if (wv.tag != shell) {
                                     wv.tag = shell
@@ -694,6 +743,23 @@ private fun DetailKV(label: String, value: String) {
 // 主题色转 CSS 十六进制，正文 HTML 里用
 private fun hex(color: Color): String = String.format("#%06X", 0xFFFFFF and color.toArgb())
 
+/**
+ * 正文 HTML 清洗：邮件内容完全由外部发件人控制，进 WebView 前先去掉能执行/外联的东西。
+ * - 整段删掉 script / iframe / object / embed / form / base / link / meta（link、meta 会引远程 CSS 或跳转）
+ * - 删掉所有 on* 事件属性（onerror、onclick、onmouseover…）
+ * - 把 javascript: / vbscript: 链接改成 #
+ * 说明：用正则做白名单式清洗，对"邮件正文"这种非对抗性场景足够；不追求完整的 HTML 解析。
+ */
+internal fun sanitizeEmailHtml(raw: String): String {
+    if (raw.isBlank()) return raw
+    return raw
+        .replace(Regex("(?is)<(script|iframe|object|embed|form|base|link|meta)\\b[^>]*>.*?</\\1\\s*>"), "")
+        .replace(Regex("(?is)<(script|iframe|object|embed|form|base|link|meta)\\b[^>]*/?>"), "")
+        .replace(Regex("(?i)\\son[a-z]+\\s*=\\s*(\"[^\"]*\"|'[^']*'|[^\\s>]+)"), "")
+        .replace(Regex("(?i)javascript:"), "#")
+        .replace(Regex("(?i)vbscript:"), "#")
+}
+
 /** 附件下载：key 拼成真实地址后交给系统 DownloadManager，失败给中文提示。 */
 private fun downloadAttachment(
     context: Context,
@@ -707,7 +773,16 @@ private fun downloadAttachment(
         return
     }
     runCatching {
-        val name = filename.ifEmpty { "attachment" }
+        // 文件名来自邮件，可能是 "../../evil" 或带控制字符；只取 basename，交给 DownloadManager 的
+        // 只能是安全的基本名，避免路径穿越/覆盖到别的目录。
+        val name = filename
+            .replace('\\', '/')
+            .substringAfterLast('/')
+            .replace(Regex("[\\u0000-\\u001f\\u007f]"), "")
+            .trim()
+            .trimStart('.')
+            .take(120)
+            .ifEmpty { "attachment" }
         val req = DownloadManager.Request(Uri.parse(url))
             .setTitle(name)
             .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)

@@ -68,11 +68,15 @@ fun OtsApp() {
     // 列表/详情缓存要在 Session 之前初始化：退出登录时会清空它
     MailCache.init(context.applicationContext)
     val session = remember { Session(context).also { it.apply() } }
+    // 旧版本允许保存 http:// 地址；明文流量已被全局禁用，这里把这类用户直接带到改地址页，
+    // 而不是让他们在收件箱里看一串「网络错误」。
+    val legacyInsecureBase = remember { session.base.startsWith("http://", ignoreCase = true) }
     var route by remember {
         mutableStateOf<Route>(
             when {
                 // 没有保存过服务器地址：先走引导页，用户填完并通过校验才进登录页
                 session.base.isEmpty() -> Route.ServerSetup
+                legacyInsecureBase -> Route.ServerSetup
                 session.token.isEmpty() -> Route.Login
                 else -> Route.Inbox
             },
@@ -149,6 +153,13 @@ fun OtsApp() {
                 Route.ServerSetup -> ServerSetupScreen(
                     session = session,
                     onConfigured = { route = Route.Login },
+                    prefill = if (legacyInsecureBase) session.base else "",
+                    notice = if (legacyInsecureBase) {
+                        "检测到旧版本保存的 http 地址（${session.base}）。明文连接已被禁用，" +
+                            "请改成 https 地址后继续；邮箱和密码不会在明文链路上发送。"
+                    } else {
+                        ""
+                    },
                 )
 
                 Route.Login -> LoginScreen(

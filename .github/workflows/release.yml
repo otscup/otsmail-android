@@ -6,29 +6,53 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: '版本号（仅用于产物命名；dry-run 不创建 Release）'
+        description: '版本号（X.Y.Z；workflow_dispatch 只出 artifact，不建 Release）'
         required: false
-        default: '0.2.1'
+        default: '0.2.4'
 
+# 默认只读：只有 release job 需要写权限，避免其它步骤（构建/测试）拿到 contents: write
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   release:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write   # 创建 Release 并上传资产
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Set up JDK 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4
         with:
           distribution: temurin
           java-version: '17'
 
       - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v4
+        uses: gradle/actions/setup-gradle@48b5f213c81028ace310571dc5ec0fbbca0b2947 # v4
+
+      # 版本号必须来自 tag：构建前先解析，并强校验格式，避免包内版本和 tag 脱钩
+      - name: Resolve version from tag
+        id: ver
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            V="${{ inputs.version }}"
+            V="${V#v}"
+          else
+            V="${GITHUB_REF_NAME#v}"
+          fi
+          if ! [[ "$V" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::版本号必须是 X.Y.Z（收到 '$V'）"
+            exit 1
+          fi
+          # 规则：major*10000 + minor*100 + patch，只升不降（0.2.4 -> 204，0.3.0 -> 300）
+          CODE=$(( $(echo "$V" | cut -d. -f1) * 10000 + $(echo "$V" | cut -d. -f2) * 100 + $(echo "$V" | cut -d. -f3) ))
+          echo "value=$V" >> "$GITHUB_OUTPUT"
+          echo "code=$CODE" >> "$GITHUB_OUTPUT"
+          echo "构建版本：$V ($CODE)"
 
       - name: Decode keystore
         shell: bash
@@ -55,28 +79,31 @@ jobs:
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: |
           chmod +x ./gradlew
-          ./gradlew assembleRelease -x lintVitalRelease --console=plain
+          ./gradlew assembleRelease -x lintVitalRelease --console=plain \
+            -PversionName="${{ steps.ver.outputs.value }}" \
+            -PversionCode="${{ steps.ver.outputs.code }}"
 
-      - name: Verify signature and package
+      # 断言「包内版本 == tag 版本」「versionCode == 规则计算值」，不一致直接失败
+      - name: Verify signature and version match tag
         shell: bash
         run: |
           SDK="${ANDROID_HOME:-$ANDROID_SDK_ROOT}"
           BT=$(ls "$SDK/build-tools" | sort -V | tail -1)
           APK=app/build/outputs/apk/release/app-release.apk
           "$SDK/build-tools/$BT/apksigner" verify --print-certs "$APK"
-          "$SDK/build-tools/$BT/aapt" dump badging "$APK" | head -3
-          sha256sum "$APK"
-
-      - name: Resolve version
-        id: ver
-        shell: bash
-        run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            V="${{ inputs.version }}"
-          else
-            V="${GITHUB_REF_NAME#v}"
+          BADGING=$("$SDK/build-tools/$BT/aapt" dump badging "$APK" | head -1)
+          NAME=$(echo "$BADGING" | sed -n "s/.*versionName='\([^']*\)'.*/\1/p")
+          CODE=$(echo "$BADGING" | sed -n "s/.*versionCode='\([^']*\)'.*/\1/p")
+          echo "$BADGING"
+          if [ "$NAME" != "${{ steps.ver.outputs.value }}" ]; then
+            echo "::error::包内 versionName=$NAME，与 tag 版本 ${{ steps.ver.outputs.value }} 不一致"
+            exit 1
           fi
-          echo "value=$V" >> "$GITHUB_OUTPUT"
+          if [ "$CODE" != "${{ steps.ver.outputs.code }}" ]; then
+            echo "::error::包内 versionCode=$CODE，按规则应为 ${{ steps.ver.outputs.code }}"
+            exit 1
+          fi
+          sha256sum "$APK"
 
       - name: Rename APK
         shell: bash
@@ -85,7 +112,7 @@ jobs:
              "otsmail-${{ steps.ver.outputs.value }}-release.apk"
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: otsmail-release
           path: otsmail-${{ steps.ver.outputs.value }}-release.apk

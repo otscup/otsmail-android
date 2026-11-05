@@ -148,14 +148,21 @@ fun LoginScreen(session: Session, onLoggedIn: () -> Unit) {
 
     /** 拿到 token 后统一收口：写会话并通知外层进入收件箱。 */
     suspend fun applyLogin(token: String, fallbackEmail: String) {
-        session.token = token
+        // 不能先落 token 再查资料：/my/loginUserInfo 失败时会把半登录态留在 prefs。
+        // 先在内存里用这个 token 查 me()，成功后才写 Session（失败则回滚内存 token 并抛给调用方）。
         Api.token = token
-        val me = Api.me()
-        session.accountId = me.accountId
-        session.name = me.name
-        session.email = me.email.ifEmpty { fallbackEmail }
-        session.signature = me.signature
-        session.sendOnEnter = me.sendOnEnter
+        try {
+            val me = Api.me()
+            session.token = token
+            session.accountId = me.accountId
+            session.name = me.name
+            session.email = me.email.ifEmpty { fallbackEmail }
+            session.signature = me.signature
+            session.sendOnEnter = me.sendOnEnter
+        } catch (e: Throwable) {
+            Api.token = session.token
+            throw e
+        }
     }
 
     LaunchedEffect(base) {
@@ -280,10 +287,9 @@ fun LoginScreen(session: Session, onLoggedIn: () -> Unit) {
         val code = uri.getQueryParameter("code")
         val state = uri.getQueryParameter("state").orEmpty()
         val err = uri.getQueryParameter("error_description") ?: uri.getQueryParameter("error")
-        // 整串相等 + 最后一段必须就是本地 nonce，任一条不满足直接拒绝
+        // 整串相等 + 最后一段必须就是本地 nonce，任一条不满足直接忽略：
+        // 这是第三方页面能随便构造的伪造回调，既不弹提示，也不取消真正的 pending 授权。
         if (state.isEmpty() || state != req.state || state.substringAfterLast(':') != req.nonce) {
-            cancelOAuth()
-            toast("登录校验失败（state 不一致），已拒绝本次授权")
             return
         }
         if (code.isNullOrEmpty()) {
@@ -680,8 +686,11 @@ private fun encodeQuery(vararg pairs: Pair<String, String>): String =
     pairs.joinToString("&") { (k, v) -> "$k=" + URLEncoder.encode(v, "UTF-8") }
 
 private fun randomVerifier(): String {
+    // PKCE verifier 必须是密码学随机数：Kotlin 的 random() 走的是普通伪随机，
+    // 32 字节 SecureRandom 熵后编码成 64 个 URL 安全字符（RFC 7636 允许的字符集）。
     val chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~"
-    return (1..64).map { chars.random() }.joinToString("")
+    val rnd = java.security.SecureRandom()
+    return (1..64).map { chars[rnd.nextInt(chars.length)] }.joinToString("")
 }
 
 private fun pkceChallenge(verifier: String): String {

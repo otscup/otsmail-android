@@ -75,8 +75,26 @@ class Session(context: Context) {
     fun clear() {
         // 先注销推送设备：内部会捕获当前的 Api.token（下面就把 token 清掉了）
         PushManager.unregisterAsync(appContext)
-        prefs.edit().remove("token").remove("accountId").remove("name").remove("email").apply()
+        // 登录态 + 个人资料 + 登录域名 + 草稿 + OAuth 半成品全部清掉：
+        // 换号/换服务器时不能把上一个账号的签名、头像、草稿、state/verifier 带过去。
+        prefs.edit()
+            .remove("token")
+            .remove("accountId")
+            .remove("name")
+            .remove("email")
+            .remove("loginDomain")
+            .remove("signature")
+            .remove("avatar")
+            .remove("avatarLocal")
+            .apply()
         Api.token = ""
+        Drafts.clearAll(appContext)
+        OAuthPendingStore(appContext).clear()
+        // WebView 里可能残留上一个账号登录过的网页 cookie（正文里的外链、OAuth 页面）
+        runCatching {
+            android.webkit.CookieManager.getInstance().removeAllCookies(null)
+            android.webkit.CookieManager.getInstance().flush()
+        }
         // 退出登录/删除账户：列表与详情缓存一起清，避免换号后串数据
         MailCache.wipe()
     }

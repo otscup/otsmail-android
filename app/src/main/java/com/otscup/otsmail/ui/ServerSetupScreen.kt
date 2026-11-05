@@ -46,12 +46,17 @@ import kotlinx.coroutines.launch
  * 用户必须先填入自己部署的地址（校验通过后才进入登录页）。
  */
 @Composable
-fun ServerSetupScreen(session: Session, onConfigured: () -> Unit) {
+fun ServerSetupScreen(
+    session: Session,
+    onConfigured: () -> Unit,
+    prefill: String = "",
+    notice: String = "",
+) {
     val t = OT.type
     val c = OT.colors
     val scope = rememberCoroutineScope()
     val focus = LocalFocusManager.current
-    var address by remember { mutableStateOf("") }
+    var address by remember { mutableStateOf(prefill) }
     var error by remember { mutableStateOf("") }
     var busy by remember { mutableStateOf(false) }
 
@@ -115,6 +120,20 @@ fun ServerSetupScreen(session: Session, onConfigured: () -> Unit) {
             )
         }
 
+        if (notice.isNotEmpty()) {
+            Text(
+                notice,
+                style = t.footnote,
+                color = c.red,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(OT.dimens.rCard.dp))
+                    .background(c.bgCard)
+                    .padding(horizontal = 16.dp, vertical = 12.dp),
+            )
+            Spacer(Modifier.height(12.dp))
+        }
+
         Column(
             Modifier
                 .fillMaxWidth()
@@ -157,7 +176,8 @@ fun ServerSetupScreen(session: Session, onConfigured: () -> Unit) {
 
         Spacer(Modifier.height(14.dp))
         Text(
-            "只需要填域名，可省略 https://；地址会保存在本机，之后可在登录页右上角「服务器」里修改。",
+            "只需要填域名，可省略 https://；只支持 https 地址（http 明文已被禁用）。" +
+                "地址会保存在本机，之后可在登录页右上角「服务器」里修改。",
             style = t.footnote,
             color = c.label3,
             modifier = Modifier.padding(horizontal = 4.dp),

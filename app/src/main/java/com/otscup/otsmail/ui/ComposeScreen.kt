@@ -3,6 +3,7 @@ package com.otscup.otsmail.ui
 import android.provider.OpenableColumns
 import android.text.Html
 import android.util.Base64
+import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.annotation.DrawableRes
@@ -86,8 +87,12 @@ import com.otscup.otsmail.data.MailItem
 import com.otscup.otsmail.data.Session
 import com.otscup.otsmail.data.friendlyError
 import com.otscup.otsmail.ui.theme.OT
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
 import java.util.UUID
@@ -119,20 +124,15 @@ fun ComposeScreen(
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
 
-    // 从草稿列表点进来的：先把整份草稿读出来，后面所有字段都按它初始化
-    val restored = remember { draftId?.let { Drafts.get(ctx, it) } }
-    // 只存了文件名、没有 content 的附件发不出去，恢复时直接丢掉并在提示里说明
-    val restoredAtts = remember {
-        val arr = runCatching { JSONArray(restored?.attachmentsJson ?: "[]") }.getOrNull() ?: JSONArray()
-        (0 until arr.length()).mapNotNull { arr.optJSONObject(it) }.filter { it.optString("content").isNotEmpty() }
-    }
-
-    var draftIdState by remember { mutableStateOf(restored?.id ?: draftId ?: UUID.randomUUID().toString()) }
+    // 草稿在 IO 线程读，不在组合阶段同步读文件（主线程 IO 会卡首帧）。
+    // draftLoaded 为 false 期间禁止落盘，避免草稿还没加载完就被空内容覆盖。
+    var draftLoaded by remember { mutableStateOf(draftId == null) }
+    var draftIdState by remember { mutableStateOf(draftId ?: UUID.randomUUID().toString()) }
     var toTags by remember {
-        mutableStateOf(restored?.toTags ?: to.split(",", ";", " ").map { it.trim() }.filter { it.contains("@") })
+        mutableStateOf(to.split(",", ";", " ").map { it.trim() }.filter { it.contains("@") })
     }
     var toInput by remember {
-        mutableStateOf(restored?.toInput ?: if (restored == null && toTags.isEmpty() && to.isNotBlank()) to else "")
+        mutableStateOf(if (draftId == null && toTags.isEmpty() && to.isNotBlank()) to else "")
     }
     // 收件人格式错误：明确提示，绝不静默吞掉输入的地址
     var toError by remember { mutableStateOf("") }
@@ -142,31 +142,19 @@ fun ComposeScreen(
     // 另外抓最近 40 封收件人做「常用」排序（服务端 contact 表没有往来/频次字段）。
     var toSuggest by remember { mutableStateOf(listOf<Triple<String, String, String>>()) }
     var toSuggestIndex by remember { mutableStateOf(0) }
-    var ccTags by remember { mutableStateOf(restored?.ccTags ?: listOf()) }
-    var bccTags by remember { mutableStateOf(restored?.bccTags ?: listOf()) }
-    var ccInput by remember { mutableStateOf(restored?.ccInput.orEmpty()) }
-    var bccInput by remember { mutableStateOf(restored?.bccInput.orEmpty()) }
-    var subjectText by remember { mutableStateOf(restored?.subject ?: subject) }
-    var body by remember {
-        val txt = restored?.body.orEmpty()
-        val start = restored?.selStart ?: -1
-        val end = restored?.selEnd ?: -1
-        mutableStateOf(
-            TextFieldValue(
-                txt,
-                if (start in 0..txt.length && end in 0..txt.length) TextRange(start, end) else TextRange(txt.length),
-            ),
-        )
-    }
-    var quotedHtml by remember { mutableStateOf(restored?.quoted.orEmpty().ifEmpty { quoted }) }
+    var ccTags by remember { mutableStateOf(listOf<String>()) }
+    var bccTags by remember { mutableStateOf(listOf<String>()) }
+    var ccInput by remember { mutableStateOf("") }
+    var bccInput by remember { mutableStateOf("") }
+    var subjectText by remember { mutableStateOf(subject) }
+    var body by remember { mutableStateOf(TextFieldValue("")) }
+    var quotedHtml by remember { mutableStateOf(quoted) }
     var busy by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf("") }
     var sendFailed by remember { mutableStateOf(false) }
     var draftSaved by remember { mutableStateOf(false) }
-    var restoreNote by remember {
-        mutableStateOf(if (restored?.attachmentsDropped == true) "部分附件超过 2MB，未能完整保存" else "")
-    }
-    var touched by remember { mutableStateOf(restored != null) }
+    var restoreNote by remember { mutableStateOf("") }
+    var touched by remember { mutableStateOf(false) }
     // 发送成功后禁止再落盘：否则 onDispose 会把刚删掉的草稿又写回来
     var sentOk by remember { mutableStateOf(false) }
     // 右滑回复：缓存没命中时先开页，这里再补原文引用；拿不到就保持无引用，不阻塞发送
@@ -181,16 +169,16 @@ fun ComposeScreen(
             touched = true
         }
     }
-    val attachments = remember { mutableListOf<JSONObject>().also { list -> restoredAtts.forEach(list::add) } }
-    var picks by remember { mutableStateOf(restoredAtts.map { it.optString("filename") }) }
+    val attachments = remember { mutableListOf<JSONObject>() }
+    var picks by remember { mutableStateOf(emptyList<String>()) }
     val signature = remember { Session(ctx).signature }
 
-    var fromId by remember { mutableStateOf(restored?.fromId?.takeIf { it > 0 } ?: accountId) }
+    var fromId by remember { mutableStateOf(accountId) }
     var fromEmail by remember { mutableStateOf("") }
     var accounts by remember { mutableStateOf(listOf<Pair<Long, String>>()) }
     var pickingFrom by remember { mutableStateOf(false) }
-    var showCc by remember { mutableStateOf(restored?.ccTags?.isNotEmpty() == true || restored?.ccInput?.isNotBlank() == true) }
-    var showBcc by remember { mutableStateOf(restored?.bccTags?.isNotEmpty() == true || restored?.bccInput?.isNotBlank() == true) }
+    var showCc by remember { mutableStateOf(false) }
+    var showBcc by remember { mutableStateOf(false) }
     // 新建写信页时提示恢复本账号最近一份未完成草稿（不自动覆盖用户正在写的空白页）
     var offer by remember { mutableStateOf<Draft?>(null) }
 
@@ -208,39 +196,73 @@ fun ComposeScreen(
         }
     }
 
-    fun addFiles(uris: List<android.net.Uri>) {
-        uris.take(10 - picks.size).forEach { uri ->
-            runCatching {
-                val bytes = ctx.contentResolver.openInputStream(uri)?.use { it.readBytes() } ?: return@runCatching
-                if (bytes.size > 5 * 1024 * 1024) return@runCatching
-                val name = ctx.contentResolver
-                    .query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)
-                    ?.use { cur -> if (cur.moveToFirst()) cur.getString(0) else null }
-                    ?: uri.lastPathSegment?.substringAfterLast('/') ?: "attachment"
-                val mime = ctx.contentResolver.getType(uri) ?: "application/octet-stream"
-                attachments.add(
-                    JSONObject()
-                        .put("content", Base64.encodeToString(bytes, Base64.NO_WRAP))
-                        .put("filename", name)
-                        .put("size", bytes.size)
-                        .put("contentType", mime),
-                )
-                picks = picks + name
-                touched = true
+    suspend fun addFiles(uris: List<android.net.Uri>) {
+        if (uris.isEmpty()) return
+        val remainingSlots = 10 - picks.size
+        if (remainingSlots <= 0) {
+            Toast.makeText(ctx, "单封最多 10 个附件", Toast.LENGTH_SHORT).show()
+            return
+        }
+        // 单封累计 10MB：base64 之后请求体会再涨约三分之一，超过就明确报错而不是悄悄丢掉
+        val usedAtStart = attachments.sumOf { it.optLong("size", 0L) }
+        var used = usedAtStart
+        var overLimit = false
+        val loaded = withContext(Dispatchers.IO) {
+            val out = ArrayList<JSONObject>()
+            uris.take(remainingSlots).forEach { uri ->
+                if (overLimit) return@forEach
+                runCatching {
+                    // 读流和 base64 都在 IO 线程，避免大附件卡住写信页
+                    val bytes = ctx.contentResolver.openInputStream(uri)?.use { it.readBytes() }
+                        ?: return@runCatching
+                    if (bytes.size > 5 * 1024 * 1024) return@runCatching
+                    if (used + bytes.size > 10L * 1024 * 1024) {
+                        overLimit = true
+                        return@runCatching
+                    }
+                    val name = ctx.contentResolver
+                        .query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)
+                        ?.use { cur -> if (cur.moveToFirst()) cur.getString(0) else null }
+                        ?: uri.lastPathSegment?.substringAfterLast('/') ?: "attachment"
+                    val mime = ctx.contentResolver.getType(uri) ?: "application/octet-stream"
+                    out.add(
+                        JSONObject()
+                            .put("content", Base64.encodeToString(bytes, Base64.NO_WRAP))
+                            .put("filename", name)
+                            .put("size", bytes.size)
+                            .put("contentType", mime),
+                    )
+                    used += bytes.size
+                }
             }
+            out
+        }
+        if (loaded.isNotEmpty()) {
+            attachments.addAll(loaded)
+            picks = picks + loaded.map { it.optString("filename") }
+            touched = true
+        }
+        if (overLimit) {
+            Toast.makeText(
+                ctx,
+                "附件累计不能超过 10MB，超出的文件没有添加",
+                Toast.LENGTH_LONG,
+            ).show()
         }
     }
 
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
-        addFiles(uris)
+        scope.launch { addFiles(uris) }
     }
     val imagePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
-        addFiles(uris)
+        scope.launch { addFiles(uris) }
     }
 
-    /** 当前输入 → 草稿；空内容不落盘（顺手删掉旧草稿）。 */
-    fun persist(force: Boolean = false): Boolean {
+    /** 当前输入 → 草稿；空内容不落盘（顺手删掉旧草稿）。文件读写都在 IO 线程。 */
+    suspend fun persist(force: Boolean = false): Boolean {
         if (sentOk) return false
+        // 草稿还没加载完就别写：否则空内容会把正在恢复的草稿覆盖掉
+        if (!draftLoaded) return false
         if (!touched && !force) return false
         val atts = JSONArray()
         attachments.forEach { atts.put(it) }
@@ -264,10 +286,10 @@ fun ComposeScreen(
             updatedAt = 0L,
         )
         if (draft.isEmpty()) {
-            Drafts.delete(ctx, draftIdState)
+            withContext(Dispatchers.IO) { Drafts.delete(ctx, draftIdState) }
             return false
         }
-        val saved = Drafts.save(ctx, draft)
+        val saved = withContext(Dispatchers.IO) { Drafts.save(ctx, draft) }
         draftIdState = saved.id
         onDraftId(saved.id)
         if (saved.attachmentsDropped) restoreNote = "部分附件超过 2MB，未能完整保存"
@@ -305,9 +327,20 @@ fun ComposeScreen(
         offer = null
     }
 
+    // 从草稿列表点进来：文件读取放 IO，读完再套用；期间 persist 被 draftLoaded 挡住
+    LaunchedEffect(draftId) {
+        val id = draftId ?: return@LaunchedEffect
+        val d = withContext(Dispatchers.IO) { Drafts.get(ctx, id) }
+        if (d != null) applyDraft(d)
+        draftLoaded = true
+    }
+
+    // 页面销毁后仍要把最后一笔草稿写完，所以不能用 rememberCoroutineScope（它会被取消）
+    val persistScope = remember { CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate) }
+
     // 切后台（onStop）立即落盘一次，不等 800ms 防抖
     val lifecycleOwner = LocalLifecycleOwner.current
-    val saveNow = rememberUpdatedState { persist() }
+    val saveNow = rememberUpdatedState { persistScope.launch { persist() } }
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_STOP) saveNow.value()
@@ -594,7 +627,7 @@ fun ComposeScreen(
                 .onSuccess {
                     sentOk = true
                     touched = true
-                    Drafts.delete(ctx, draftIdState)
+                    withContext(Dispatchers.IO) { Drafts.delete(ctx, draftIdState) }
                     MailSync.changed()
                     onFinished(true)
                 }
@@ -604,7 +637,9 @@ fun ComposeScreen(
                     val saved = persist(force = true)
                     draftSaved = saved
                     sendFailed = true
-                    error = "发送失败：${friendlyError(e)}"
+                    // 401 的 friendlyError 是空串：这时只显示"发送失败"，交给全局登录失效横幅说明原因
+                    val reason = friendlyError(e)
+                    error = if (reason.isEmpty()) "发送失败" else "发送失败：$reason"
                 }
             busy = false
         }
@@ -618,7 +653,7 @@ fun ComposeScreen(
         ) {
             Box(
                 Modifier.width(64.dp).height(44.dp).clip(RoundedCornerShape(OT.dimens.rMd.dp)).tapArea {
-                    persist()
+                    persistScope.launch { persist() }
                     onFinished(false)
                 },
                 contentAlignment = Alignment.CenterStart,
@@ -633,7 +668,10 @@ fun ComposeScreen(
                 textAlign = TextAlign.Center,
             )
             Box(
-                Modifier.width(44.dp).height(44.dp).tapArea { persist(); onOpenDrafts() },
+                Modifier.width(44.dp).height(44.dp).tapArea {
+                    persistScope.launch { persist() }
+                    onOpenDrafts()
+                },
                 contentAlignment = Alignment.Center,
             ) {
                 Text("草稿", style = t.footnote, color = c.blue)

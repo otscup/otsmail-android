@@ -8,7 +8,10 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
@@ -133,8 +136,20 @@ object MailCache {
         snap.updatedAt = System.currentTimeMillis()
     }
 
-    suspend fun savePage(snap: ListSnapshot, page: Int, items: List<MailItem>, total: Int) {
-        snap.page = maxOf(snap.page, page)
+    /**
+     * 写一页缓存。
+     * - 行主键是 (key, email_id)，同一封邮件在库里只会有一行，翻页位移不会叠出重复行。
+     * - resetLater=true 用于「刷新首页」：同时清掉第 2..N 页旧缓存，分页从 1 重新开始。
+     */
+    suspend fun savePage(
+        snap: ListSnapshot,
+        page: Int,
+        items: List<MailItem>,
+        total: Int,
+        resetLater: Boolean = false,
+    ) {
+        val rows = dedupeByEmailId(items)
+        snap.page = if (resetLater) page else maxOf(snap.page, page)
         snap.total = total
         snap.updatedAt = System.currentTimeMillis()
         withContext(Dispatchers.IO) {
@@ -144,7 +159,8 @@ object MailCache {
             w.beginTransaction()
             try {
                 w.delete("list_row", "key=? AND page=?", arrayOf(snap.key, page.toString()))
-                items.forEachIndexed { i, m ->
+                if (resetLater) w.delete("list_row", "key=? AND page>?", arrayOf(snap.key, page.toString()))
+                rows.forEachIndexed { i, m ->
                     val cv = ContentValues().apply {
                         put("key", snap.key)
                         put("page", page)
@@ -153,7 +169,9 @@ object MailCache {
                         put("json", m.toJson().toString())
                         put("updated_at", now)
                     }
-                    w.insertWithOnConflict("list_row", null, cv, SQLiteDatabase.CONFLICT_REPLACE)
+                    // CONFLICT_IGNORE：同一封邮件已经在页码更小的页里存在时保留旧行，
+                    // 不会因为后一页也返回它而被改到后页（"保留首次出现、页码小者优先"）。
+                    w.insertWithOnConflict("list_row", null, cv, SQLiteDatabase.CONFLICT_IGNORE)
                 }
                 val meta = ContentValues().apply {
                     put("key", snap.key)
@@ -187,11 +205,14 @@ object MailCache {
             "list_row", arrayOf("json"), "key=?", arrayOf(key),
             null, null, "page ASC, pos ASC",
         ).use { c ->
-            val out = ArrayList<MailItem>(c.count)
+            // 按 emailId 去重，保留页码小、位置靠前的那一条：
+            // 旧库里可能残留同一封邮件跨页的重复行，直接拼回去会让 LazyColumn 的 key 冲突崩溃。
+            val seen = LinkedHashMap<Long, MailItem>(c.count)
             while (c.moveToNext()) {
-                runCatching { parseItem(JSONObject(c.getString(0))) }.getOrNull()?.let { out.add(it) }
+                val item = runCatching { parseItem(JSONObject(c.getString(0))) }.getOrNull() ?: continue
+                if (!seen.containsKey(item.emailId)) seen[item.emailId] = item
             }
-            out
+            seen.values.toList()
         }
         if (items.isEmpty()) return@withContext null
         Pages(items, meta[0] as Int, meta[1] as Int, meta[2] as Long, meta[3] as Int, meta[4] as Int)
@@ -252,8 +273,8 @@ object MailCache {
     /** 删除/移入垃圾箱：列表行直接移除，详情保留但不再展示。 */
     suspend fun removeItem(emailId: Long) {
         lists.values.forEach { snap ->
-            snap.items.removeAll { it.emailId == emailId }
-            if (snap.total > 0) snap.total -= 1
+            // 只有真的命中这个快照才减 total，否则多个快照会把同一个数字重复减掉
+            if (snap.items.removeAll { it.emailId == emailId } && snap.total > 0) snap.total -= 1
         }
         withContext(Dispatchers.IO) {
             db?.writableDatabase?.delete("list_row", "email_id=?", arrayOf(emailId.toString()))
@@ -263,8 +284,7 @@ object MailCache {
     /** 只从某一个列表快照里移除（例如「已标星」里取消星标），其他 mailbox 不受影响。 */
     suspend fun removeRow(key: String, emailId: Long) {
         lists[key]?.let { snap ->
-            snap.items.removeAll { it.emailId == emailId }
-            if (snap.total > 0) snap.total -= 1
+            if (snap.items.removeAll { it.emailId == emailId } && snap.total > 0) snap.total -= 1
         }
         withContext(Dispatchers.IO) {
             db?.writableDatabase?.delete("list_row", "key=? AND email_id=?", arrayOf(key, emailId.toString()))
@@ -305,17 +325,30 @@ object MailCache {
         }
     }
 
-    /** 同步版本，给退出登录这种非协程上下文用（内存 + 磁盘一起清，避免串号）。 */
+    /** 同步版本，给退出登录这种非协程上下文用（内存立刻清，磁盘交给 IO 线程）。 */
     fun wipe() {
         lists.clear()
         details.clear()
         translations.clear()
-        runCatching {
-            val w = db?.writableDatabase ?: return@runCatching
-            w.delete("list_row", null, null)
-            w.delete("list_meta", null, null)
-            w.delete("detail", null, null)
+        val handle = db
+        ioScope.launch {
+            runCatching {
+                val w = handle?.writableDatabase ?: return@runCatching
+                w.delete("list_row", null, null)
+                w.delete("list_meta", null, null)
+                w.delete("detail", null, null)
+            }
         }
+    }
+
+    /** 后台清理用：不阻塞主线程，退出登录后即使界面已经销毁也能落盘。 */
+    private val ioScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    /** 按 emailId 去重，保留首次出现（首页优先）；写库和内存都用这一份，避免 key 冲突。 */
+    internal fun dedupeByEmailId(items: List<MailItem>): List<MailItem> {
+        if (items.size < 2) return items
+        val seen = HashSet<Long>(items.size)
+        return items.filter { seen.add(it.emailId) }
     }
 
     // ---------------- 序列化 ----------------
@@ -387,19 +420,30 @@ object MailCache {
         category = o.optString("category"),
     )
 
-    private class CacheDb(context: Context) : SQLiteOpenHelper(context, "otsmail_cache.db", null, 1) {
+    private class CacheDb(context: Context) : SQLiteOpenHelper(context, "otsmail_cache.db", null, 2) {
         override fun onCreate(db: SQLiteDatabase) {
-            db.execSQL("CREATE TABLE list_row (key TEXT NOT NULL, page INTEGER NOT NULL, pos INTEGER NOT NULL, email_id INTEGER NOT NULL, json TEXT NOT NULL, updated_at INTEGER NOT NULL, PRIMARY KEY(key, page, pos))")
+            // 主键 (key, email_id)：同一封邮件在一个列表里只允许一行，翻页位移不会叠出重复
+            db.execSQL("CREATE TABLE list_row (key TEXT NOT NULL, email_id INTEGER NOT NULL, page INTEGER NOT NULL, pos INTEGER NOT NULL, json TEXT NOT NULL, updated_at INTEGER NOT NULL, PRIMARY KEY(key, email_id))")
             db.execSQL("CREATE INDEX idx_list_row_email ON list_row(email_id)")
             db.execSQL("CREATE TABLE list_meta (key TEXT PRIMARY KEY, total INTEGER NOT NULL, page INTEGER NOT NULL, updated_at INTEGER NOT NULL, scroll_index INTEGER NOT NULL, scroll_offset INTEGER NOT NULL)")
             db.execSQL("CREATE TABLE detail (email_id INTEGER PRIMARY KEY, json TEXT NOT NULL, updated_at INTEGER NOT NULL)")
         }
 
         override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
-            db.execSQL("DROP TABLE IF EXISTS list_row")
-            db.execSQL("DROP TABLE IF EXISTS list_meta")
-            db.execSQL("DROP TABLE IF EXISTS detail")
-            onCreate(db)
+            if (oldVersion < 2) {
+                // v1 是 (key, page, pos) 主键，同一封邮件可以同时存在第 1、2 页。
+                // 真实迁移而不是直接删库：把旧行搬进新表并按 email_id 去重。
+                // ORDER BY page DESC, pos DESC 配合 INSERT OR REPLACE，最后写入的正是页码最小、位置最前的那条。
+                db.execSQL("DROP INDEX IF EXISTS idx_list_row_email")
+                db.execSQL("ALTER TABLE list_row RENAME TO list_row_v1")
+                db.execSQL("CREATE TABLE list_row (key TEXT NOT NULL, email_id INTEGER NOT NULL, page INTEGER NOT NULL, pos INTEGER NOT NULL, json TEXT NOT NULL, updated_at INTEGER NOT NULL, PRIMARY KEY(key, email_id))")
+                db.execSQL("CREATE INDEX idx_list_row_email ON list_row(email_id)")
+                db.execSQL(
+                    "INSERT OR REPLACE INTO list_row (key, email_id, page, pos, json, updated_at) " +
+                        "SELECT key, email_id, page, pos, json, updated_at FROM list_row_v1 ORDER BY page DESC, pos DESC"
+                )
+                db.execSQL("DROP TABLE list_row_v1")
+            }
         }
     }
 }

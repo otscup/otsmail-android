@@ -35,12 +35,35 @@ android {
     val signingReady =
         signStoreFile != null && signStorePwd != null && signKeyAlias != null && signKeyPwd != null
 
+    /**
+     * 版本号规则（确定性、可校验）：
+     * - versionName 由 tag 派生（CI 传 -PversionName=vX.Y.Z 去掉 v），本地默认 0.2.3；
+     * - versionCode = major*10000 + minor*100 + patch，例如 0.2.3 -> 203，0.3.0 -> 300。
+     *   只升不降：major/minor/patch 任一位递增后都比旧值大。
+     * release.yml 会用 aapt 断言包内版本与 tag 一致，versionCode 与上式一致。
+     */
+    fun versionCodeOf(name: String): Int {
+        val parts = name.split(".")
+        val major = parts.getOrNull(0)?.toIntOrNull() ?: 0
+        val minor = parts.getOrNull(1)?.toIntOrNull() ?: 0
+        val patch = parts.getOrNull(2)?.toIntOrNull() ?: 0
+        return major * 10000 + minor * 100 + patch
+    }
+
+    val tagVersionName = (project.findProperty("versionName") as String?)
+        ?.removePrefix("v")
+        ?.trim()
+        ?.takeIf { it.isNotEmpty() }
+        ?: "0.2.3"
+    val tagVersionCode = (project.findProperty("versionCode") as String?)?.toIntOrNull()
+        ?: versionCodeOf(tagVersionName)
+
     defaultConfig {
         applicationId = "com.otscup.otsmail"
         minSdk = 26          // targetSdk 35；26 起步可以直接用 adaptive icon 与深色主题
         targetSdk = 35
-        versionCode = 5
-        versionName = "0.2.3"
+        versionCode = tagVersionCode
+        versionName = tagVersionName
     }
 
     signingConfigs {

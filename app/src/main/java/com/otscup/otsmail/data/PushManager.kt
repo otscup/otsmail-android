@@ -44,6 +44,12 @@ object PushManager {
     private fun prefs(context: Context) =
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
 
+    /** 登记标记只存指纹：FCM token 与 JWT 都不落 prefs 做去重键。 */
+    private fun fingerprint(value: String): String {
+        val digest = java.security.MessageDigest.getInstance("SHA-256").digest(value.toByteArray())
+        return digest.joinToString("") { "%02x".format(it) }
+    }
+
     /** 设备标识：优先 ANDROID_ID，取不到才生成随机 UUID 并持久化。 */
     fun deviceId(context: Context): String {
         val p = prefs(context)
@@ -134,8 +140,11 @@ object PushManager {
             }
         }
 
-        // 同账号 + 同 token 已经登记过就不再打网络
-        if (p.getString(KEY_OK_TOKEN, "") == token && p.getString(KEY_OK_USER, "") == auth) {
+        // 同账号 + 同 token 已经登记过就不再打网络。
+        // 这里只存 token/登录态的 SHA-256 指纹，不在 prefs 里留 FCM token 和 JWT 原文。
+        if (p.getString(KEY_OK_TOKEN, "") == fingerprint(token) &&
+            p.getString(KEY_OK_USER, "") == fingerprint(auth)
+        ) {
             Log.i(TAG, "该 token 已登记，跳过")
             return
         }
@@ -143,8 +152,8 @@ object PushManager {
         try {
             Api.pushRegister(token, deviceId(context), BuildConfig.VERSION_NAME)
             p.edit()
-                .putString(KEY_OK_TOKEN, token)
-                .putString(KEY_OK_USER, auth)
+                .putString(KEY_OK_TOKEN, fingerprint(token))
+                .putString(KEY_OK_USER, fingerprint(auth))
                 .putLong(KEY_BACKOFF, 0L)
                 .apply()
             Log.i(TAG, "设备登记成功（platform=android, deviceId=${deviceId(context)}, appVersion=${BuildConfig.VERSION_NAME}）")

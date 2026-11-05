@@ -24,6 +24,7 @@ object ServerAddress {
     /**
      * 规范化用户输入，返回可直接写入 [Session.base] 的 API 根地址（形如 https://host/api）。
      * 规则：补协议（默认 https）、去尾部斜杠、拒绝路径/查询串/用户信息；允许显式写 /api 后缀。
+     * 只允许 https：明文 http 会让账号密码和 JWT 在链路上裸奔，v0.2.3 起不再接受。
      */
     fun parse(raw: String): Parsed {
         val s = raw.trim()
@@ -34,8 +35,9 @@ object ServerAddress {
         val uri = runCatching { URI(withScheme) }.getOrNull()
             ?: return Parsed.Fail("服务器地址格式不正确")
         val scheme = uri.scheme?.lowercase().orEmpty()
-        if (scheme != "http" && scheme != "https") {
-            return Parsed.Fail("只支持 http 或 https 地址")
+        if (scheme == "http") return Parsed.Fail("请使用 https 地址")
+        if (scheme != "https") {
+            return Parsed.Fail("只支持 https 地址")
         }
         val host = uri.host.orEmpty()
         if (host.isEmpty()) return Parsed.Fail("服务器地址格式不正确，请填写域名或 IP")

@@ -181,19 +181,18 @@ fun AllMailScreen(onBack: () -> Unit, onOpen: (Long) -> Unit, onToast: (String) 
     )
 
     suspend fun refreshFirst(toTop: Boolean = false) {
-        val (fresh, total) = Api.parseList(fetchRaw(1))
+        val (freshRaw, total) = Api.parseList(fetchRaw(1))
+        // 刷新首页 = 重置为第 1 页：不能把新首页和旧的第 2..N 页继续拼在一起，
+        // 邮件上下位移后旧页码已经是另一批数据，拼接会重复并让分页漂移。
+        val fresh = MailCache.dedupeByEmailId(freshRaw)
         val anchor = listState.layoutInfo.visibleItemsInfo.firstOrNull { it.key is Long }?.key as? Long
         val anchorOffset = listState.firstVisibleItemScrollOffset
-        val ids = fresh.mapTo(HashSet()) { it.emailId }
-        val merged = ArrayList<MailItem>(fresh.size + items.size)
-        merged.addAll(fresh)
-        items.forEach { if (it.emailId !in ids) merged.add(it) }
         items.clear()
-        items.addAll(merged)
+        items.addAll(fresh)
         store.total = total.toInt()
-        store.page = maxOf(store.page, 1)
+        store.page = 1
         store.error = ""
-        MailCache.savePage(store, 1, fresh, total.toInt())
+        MailCache.savePage(store, 1, fresh, total.toInt(), resetLater = true)
         if (toTop) {
             // 无条件回到最顶端：index 可能已是 0，但行偏移还没归零
             listState.scrollToItem(0, 0)
@@ -203,7 +202,12 @@ fun AllMailScreen(onBack: () -> Unit, onOpen: (Long) -> Unit, onToast: (String) 
             if (row >= 0) {
                 val target = row + 1
                 if (target != listState.firstVisibleItemIndex) listState.scrollToItem(target, anchorOffset)
+            } else {
+                // 锚点邮件不在新首页了：夹回最后一封，避免越界空白
+                listState.scrollToItem((items.size).coerceAtLeast(0), 0)
             }
+        } else if (listState.firstVisibleItemIndex >= items.size + 1) {
+            listState.scrollToItem(items.size.coerceAtLeast(0), 0)
         }
     }
 
