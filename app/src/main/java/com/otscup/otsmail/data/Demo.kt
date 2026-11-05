@@ -64,6 +64,22 @@ object Demo {
         DemoAccount(4, "notes@sample-inbox.io", "Sample Notes"),
     )
 
+    private data class DemoContact(
+        val id: Long,
+        var name: String,
+        var email: String,
+        var group: String,
+        var remark: String = "",
+    )
+
+    private val demoContacts = mutableListOf(
+        DemoContact(2, "Hello Studio", "hello@example.org", "Demo"),
+        DemoContact(3, "Demo Team", "team@demo-mail.dev", "Demo"),
+        DemoContact(4, "Priya Raman", "priya.raman@example.net", "客户"),
+        DemoContact(5, "Tomas Lindqvist", "tomas.lindqvist@example.se", "客户"),
+    )
+    private var contactSeq = 6L
+
     private data class Mail(
         val id: Long,
         val accountId: Long,
@@ -538,16 +554,57 @@ object Demo {
         }
     }
 
-    private fun contactsJson(): JSONObject = JSONObject().put(
-        "list",
-        JSONArray().apply {
-            accounts.drop(1).forEach {
-                put(JSONObject().put("name", it.name).put("email", it.email).put("groupName", "Demo"))
+    private fun contactsJson(): JSONObject = JSONObject()
+        .put(
+            "list",
+            JSONArray().apply {
+                demoContacts.forEach {
+                    put(
+                        JSONObject()
+                            .put("contactId", it.id)
+                            .put("name", it.name)
+                            .put("email", it.email)
+                            .put("groupName", it.group)
+                            .put("remark", it.remark),
+                    )
+                }
+            },
+        )
+        // 分组下拉基于全量，和真实服务端一致
+        .put("groups", JSONArray().apply { demoContacts.map { it.group }.distinct().forEach { put(it) } })
+
+    /** 演示包的联系人可增删改：与真实服务端同规则（email 唯一、空分组回落"默认"）。 */
+    private fun contactMutate(path: String, body: JSONObject?): JSONObject {
+        val name = body?.optString("name").orEmpty().trim()
+        val email = body?.optString("email").orEmpty().trim().lowercase()
+        val group = body?.optString("groupName").orEmpty().trim().ifEmpty { "默认" }
+        val remark = body?.optString("remark").orEmpty().trim()
+        when (path) {
+            "/contact/add" -> {
+                val exist = demoContacts.firstOrNull { it.email == email }
+                if (exist != null) {
+                    exist.name = name.ifEmpty { email.substringBefore("@") }
+                    exist.group = group
+                    exist.remark = remark
+                } else {
+                    demoContacts.add(DemoContact(contactSeq++, name.ifEmpty { email.substringBefore("@") }, email, group, remark))
+                }
             }
-            put(JSONObject().put("name", "Priya Raman").put("email", "priya.raman@example.net"))
-            put(JSONObject().put("name", "Tomas Lindqvist").put("email", "tomas.lindqvist@example.se"))
-        },
-    )
+            "/contact/set" -> {
+                val id = body?.optLong("contactId") ?: 0L
+                val exist = demoContacts.firstOrNull { it.id == id } ?: return JSONObject()
+                exist.name = name
+                exist.email = email
+                exist.group = group
+                exist.remark = remark
+            }
+            "/contact/delete" -> {
+                val id = body?.optLong("contactId") ?: 0L
+                demoContacts.removeAll { it.id == id }
+            }
+        }
+        return JSONObject()
+    }
 
     /** [Api.raw] 的唯一入口：按 path 返回和真实服务端同形的 {code,message,data}。 */
     fun respond(method: String, path: String, body: JSONObject?): JSONObject {
@@ -614,6 +671,7 @@ object Demo {
             "/ai/summary", "/ai/polish", "/ai/reply" ->
                 throw ApiException(503, "AI 服务未配置，请联系管理员")
             "/contact/list" -> contactsJson()
+            "/contact/add", "/contact/set", "/contact/delete" -> contactMutate(p, body)
             "/my/2fa/status" -> JSONObject().put("enabled", false).put("required", false)
             "/setting/websiteConfig" -> JSONObject()
                 // 登录页的第三方入口按这些开关渲染；演示包给出 GitHub/Google，方便实拍与文档配图

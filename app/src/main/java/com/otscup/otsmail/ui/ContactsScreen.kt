@@ -17,39 +17,49 @@ import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.rememberLazyListState
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.outlined.ChevronRight
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.unit.dp
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.unit.dp
 import com.otscup.otsmail.R
 import com.otscup.otsmail.data.Api
+import com.otscup.otsmail.data.ApiException
 import com.otscup.otsmail.data.Session
+import com.otscup.otsmail.data.friendlyError
 import com.otscup.otsmail.ui.theme.OT
 import kotlinx.coroutines.launch
 
-private data class Contact(val name: String, val email: String, val group: String = "") {
+/** 邮箱格式只在本地做一次拦截，最终仍以服务端校验为准（服务端规则见 contact-service）。 */
+private val CONTACT_EMAIL_RE = Regex("^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$")
+
+private data class ContactRow(val item: Api.ContactItem) {
     val letter: String
         get() {
-            val ch = name.trim().take(1).uppercase()
+            val ch = item.name.trim().take(1).uppercase()
             return if (ch.isNotEmpty() && ch[0] in 'A'..'Z') ch else "#"
         }
 }
 
 /**
- * 联系人：优先用后端通讯录（/contact/list）；通讯录为空时退回「从收件箱抽出不重复发件人」。
- * 点一行直接写信给这个地址。
+ * 联系人：优先用后端通讯录（/contact/list，字段 contactId/name/email/groupName/remark）。
+ * 点一行进入编辑（可改名/邮箱/分组/备注、可删除）；右上角「＋」新建；编辑面板里也能直接写邮件。
+ * 通讯录为空时退回「从收件箱抽出不重复发件人」，这时没有 contactId，保存会走 /contact/add。
  */
 @Composable
 fun ContactsScreen(session: Session, onBack: () -> Unit, onWrite: (String) -> Unit) {
@@ -57,33 +67,51 @@ fun ContactsScreen(session: Session, onBack: () -> Unit, onWrite: (String) -> Un
     val t = OT.type
     val scope = rememberCoroutineScope()
 
-    var contacts by remember { mutableStateOf<List<Contact>>(emptyList()) }
+    var contacts by remember { mutableStateOf<List<ContactRow>>(emptyList()) }
+    var groups by remember { mutableStateOf<List<String>>(emptyList()) }
     var loading by remember { mutableStateOf(true) }
     var error by remember { mutableStateOf("") }
+    var reloadTick by remember { mutableIntStateOf(0) }
+    // null = 面板关闭；Api.ContactItem(id=0) = 新建；否则是编辑已有联系人
+    var editing by remember { mutableStateOf<Api.ContactItem?>(null) }
+    var deleting by remember { mutableStateOf<Api.ContactItem?>(null) }
     val listState = rememberLazyListState()
 
-    LaunchedEffect(Unit) {
-        runCatching {
-            val book = runCatching { Api.contacts() }.getOrDefault(emptyList())
-            if (book.isNotEmpty()) {
-                contacts = book.map { (name, email, group) -> Contact(name, email, group) }
-                    .sortedBy { it.name.lowercase() }
-                return@runCatching
-            }
-            val seen = LinkedHashMap<String, Contact>()
-            // 两页足够凑出 30–40 个联系人；再多等后端接口
-            for (page in 1..2) {
-                val (list, _) = Api.emails(session.accountId, page)
-                list.forEach { m ->
-                    val email = m.from.trim()
-                    if (email.contains("@") && !seen.containsKey(email)) {
-                        seen[email] = Contact(m.name.ifEmpty { email.substringBefore("@") }, email)
+    LaunchedEffect(reloadTick) {
+        loading = contacts.isEmpty()
+        error = ""
+        runCatching { Api.contactList() }
+            .onSuccess { (list, gs) ->
+                groups = gs
+                if (list.isNotEmpty()) {
+                    contacts = list.map { ContactRow(it) }.sortedBy { it.item.name.lowercase() }
+                } else {
+                    val seen = LinkedHashMap<String, ContactRow>()
+                    // 没有通讯录时用收件人兜底：两页足够凑出 30–40 个联系人
+                    for (page in 1..2) {
+                        val (mails, _) = Api.emails(session.accountId, page)
+                        mails.forEach { m ->
+                            val email = m.from.trim()
+                            if (email.contains("@") && !seen.containsKey(email)) {
+                                seen[email] = ContactRow(
+                                    Api.ContactItem(
+                                        id = 0,
+                                        name = m.name.ifEmpty { email.substringBefore("@") },
+                                        email = email,
+                                        group = "",
+                                    ),
+                                )
+                            }
+                        }
+                        if (mails.isEmpty()) break
                     }
+                    contacts = seen.values.sortedBy { it.item.name.lowercase() }
                 }
-                if (list.isEmpty()) break
             }
-            contacts = seen.values.sortedBy { it.name.lowercase() }
-        }.onFailure { error = it.message ?: "加载失败" }
+            .onFailure { e ->
+                // 401 由 AuthState 统一提示，这里不再重复报错
+                if (!(e is ApiException && e.httpCode == 401)) error = friendlyError(e)
+            }
         loading = false
     }
 
@@ -91,11 +119,17 @@ fun ContactsScreen(session: Session, onBack: () -> Unit, onWrite: (String) -> Un
         Modifier.fillMaxSize().background(c.bgGrouped).statusBarsPadding().navigationBarsPadding(),
     ) {
         OTNavBar(title = "联系人", onLeading = onBack) {
-            Text(
-                if (contacts.isEmpty()) "" else "${contacts.size}",
-                style = t.footnote, color = c.label2,
-                modifier = Modifier.padding(horizontal = OTSpace.s2),
-            )
+            if (contacts.isNotEmpty()) {
+                Text("${contacts.size}", style = t.footnote, color = c.label2)
+            }
+            Box(
+                Modifier.size(44.dp).tapArea {
+                    editing = Api.ContactItem(0, "", "", groups.firstOrNull() ?: "")
+                },
+                contentAlignment = Alignment.Center,
+            ) {
+                Text("＋", style = t.title3, color = c.blue)
+            }
         }
 
         when {
@@ -107,32 +141,33 @@ fun ContactsScreen(session: Session, onBack: () -> Unit, onWrite: (String) -> Un
                 Text("还没有联系人", style = t.footnote, color = c.label2)
             }
             else -> {
-                val groups = contacts.groupBy { it.letter }.toList()
+                val grouped = contacts.groupBy { it.letter }.toList()
                 Box(Modifier.fillMaxSize()) {
                     LazyColumn(state = listState, modifier = Modifier.fillMaxSize()) {
-                        groups.forEach { (letter, rows) ->
+                        grouped.forEach { (letter, rows) ->
                             item(key = "h-$letter") { OTGroupHeader(letter) }
                             item(key = "g-$letter") {
                                 OTGroup(Modifier.padding(horizontal = OTSpace.s4)) {
-                                    rows.forEachIndexed { i, ct ->
+                                    rows.forEachIndexed { i, row ->
                                         if (i > 0) OTDivider(inset = 60)
                                         Row(
                                             Modifier
                                                 .fillMaxWidth()
                                                 .heightIn(min = 60.dp)
-                                                .tapArea { onWrite(ct.email) }
+                                                .tapArea { editing = row.item }
                                                 .padding(horizontal = OTSpace.s4, vertical = OTSpace.s2),
                                             verticalAlignment = Alignment.CenterVertically,
                                             horizontalArrangement = Arrangement.spacedBy(OTSpace.s3),
                                         ) {
-                                            OTAvatar(ct.name, size = 36)
+                                            OTAvatar(row.item.name, size = 36)
                                             Column(Modifier.weight(1f)) {
                                                 Text(
-                                                    ct.name, style = t.body, color = c.label,
+                                                    row.item.name, style = t.body, color = c.label,
                                                     maxLines = 1, overflow = TextOverflow.Ellipsis,
                                                 )
                                                 Text(
-                                                    if (ct.group.isEmpty()) ct.email else "${ct.email} · ${ct.group}",
+                                                    if (row.item.group.isEmpty()) row.item.email
+                                                    else "${row.item.email} · ${row.item.group}",
                                                     style = t.footnote, color = c.label2,
                                                     maxLines = 1, overflow = TextOverflow.Ellipsis,
                                                 )
@@ -154,10 +189,10 @@ fun ContactsScreen(session: Session, onBack: () -> Unit, onWrite: (String) -> Un
                         modifier = Modifier.align(Alignment.CenterEnd).padding(end = 2.dp),
                         horizontalAlignment = Alignment.CenterHorizontally,
                     ) {
-                        groups.forEach { (letter, _) ->
+                        grouped.forEach { (letter, _) ->
                             Box(
                                 modifier = Modifier.width(24.dp).height(18.dp).tapArea {
-                                    val idx = groups.indexOfFirst { it.first == letter }
+                                    val idx = grouped.indexOfFirst { it.first == letter }
                                     // 每组占两项（标题 + 卡片）
                                     if (idx >= 0) scope.launch { listState.animateScrollToItem(idx * 2) }
                                 },
@@ -170,5 +205,174 @@ fun ContactsScreen(session: Session, onBack: () -> Unit, onWrite: (String) -> Un
                 }
             }
         }
+    }
+
+    editing?.let { contact ->
+        ContactEditSheet(
+            contact = contact,
+            groups = groups,
+            onWrite = { email ->
+                editing = null
+                onWrite(email)
+            },
+            onSave = { name, email, group, remark, done ->
+                scope.launch {
+                    val result = runCatching {
+                        if (contact.id > 0) {
+                            Api.contactSet(contact.id, name, email, group, remark)
+                        } else {
+                            Api.contactAdd(name, email, group, remark)
+                        }
+                    }
+                    if (result.isSuccess) {
+                        editing = null
+                        reloadTick++
+                        done("")
+                    } else {
+                        val e = result.exceptionOrNull()
+                        done(if (e == null || (e is ApiException && e.httpCode == 401)) "" else friendlyError(e))
+                    }
+                }
+            },
+            onDelete = { deleting = contact },
+            onDismiss = { editing = null },
+        )
+    }
+
+    deleting?.let { contact ->
+        AlertDialog(
+            onDismissRequest = { deleting = null },
+            title = { Text("删除联系人", color = c.label) },
+            text = {
+                Text("将从通讯录中移除 ${contact.name.ifEmpty { contact.email }}，此操作不可撤销。", color = c.label2)
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    deleting = null
+                    scope.launch {
+                        runCatching { Api.contactDelete(contact.id) }
+                            .onSuccess {
+                                editing = null
+                                reloadTick++
+                            }
+                            .onFailure { e ->
+                                error = if (e is ApiException && e.httpCode == 401) "" else friendlyError(e)
+                            }
+                    }
+                }) { Text("删除", color = c.red) }
+            },
+            dismissButton = {
+                TextButton(onClick = { deleting = null }) { Text("取消", color = c.label2) }
+            },
+            containerColor = c.bgElevated,
+        )
+    }
+}
+
+/** 联系人编辑面板：只放服务端真实支持的字段（姓名/邮箱/分组/备注）。 */
+@Composable
+private fun ContactEditSheet(
+    contact: Api.ContactItem,
+    groups: List<String>,
+    onWrite: (String) -> Unit,
+    onSave: (String, String, String, String, (String) -> Unit) -> Unit,
+    onDelete: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val c = OT.colors
+    val t = OT.type
+    var name by remember(contact) { mutableStateOf(contact.name) }
+    var email by remember(contact) { mutableStateOf(contact.email) }
+    var group by remember(contact) { mutableStateOf(contact.group) }
+    var remark by remember(contact) { mutableStateOf(contact.remark) }
+    var err by remember(contact) { mutableStateOf("") }
+    var busy by remember(contact) { mutableStateOf(false) }
+    val isNew = contact.id <= 0
+    val emailOk = CONTACT_EMAIL_RE.matches(email.trim())
+
+    OTSheet(onDismiss = onDismiss) {
+        Text(
+            if (isNew) "新建联系人" else "编辑联系人",
+            style = t.title3,
+            color = c.label,
+            modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp),
+        )
+        OTFieldRow(label = "姓名", value = name, onValueChange = { name = it }, hint = "张三")
+        OTDivider(inset = 16)
+        OTFieldRow(
+            label = "邮箱地址",
+            value = email,
+            onValueChange = { email = it; err = "" },
+            hint = "name@example.com",
+            singleLine = true,
+            trailing = {
+                if (email.isNotEmpty() && !emailOk) {
+                    Text("格式不正确", style = t.caption1, color = c.red)
+                }
+            },
+        )
+        OTDivider(inset = 16)
+        OTFieldRow(label = "分组", value = group, onValueChange = { group = it }, hint = "默认")
+        if (groups.isNotEmpty()) {
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                groups.take(4).forEach { g ->
+                    val on = g == group
+                    Box(
+                        Modifier
+                            .clip(RoundedCornerShape(OT.dimens.rPill.dp))
+                            .background(if (on) c.bgPressed else c.bgInput)
+                            .tapArea { group = g }
+                            .padding(horizontal = 10.dp, vertical = 5.dp),
+                    ) {
+                        Text(g, style = t.caption1, color = if (on) c.label else c.label2)
+                    }
+                }
+            }
+        }
+        OTDivider(inset = 16)
+        OTFieldRow(label = "备注", value = remark, onValueChange = { remark = it }, hint = "可选", singleLine = false)
+
+        if (err.isNotEmpty()) {
+            Text(err, style = t.footnote, color = c.red, modifier = Modifier.padding(horizontal = 20.dp, vertical = 6.dp))
+        }
+
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Box(Modifier.weight(1f)) {
+                OTPrimaryButton(
+                    if (busy) "保存中…" else "保存",
+                    enabled = !busy && emailOk,
+                ) {
+                    busy = true
+                    onSave(name.trim(), email.trim(), group.trim(), remark.trim()) { message ->
+                        busy = false
+                        err = message
+                    }
+                }
+            }
+            if (emailOk) {
+                Text(
+                    "写信",
+                    style = t.subhead,
+                    color = c.blue,
+                    modifier = Modifier.tapArea { onWrite(email.trim()) }.padding(horizontal = 8.dp, vertical = 6.dp),
+                )
+            }
+            if (!isNew) {
+                Text(
+                    "删除",
+                    style = t.subhead,
+                    color = c.red,
+                    modifier = Modifier.tapArea { onDelete() }.padding(horizontal = 8.dp, vertical = 6.dp),
+                )
+            }
+        }
+        Spacer(Modifier.height(12.dp))
     }
 }

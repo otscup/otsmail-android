@@ -376,24 +376,72 @@ object Api {
      * q 走服务端 LIKE（name/email 包含匹配），联系人表里没有「最近往来 / 使用频次」字段，
      * 所以写信页的候选只能按前缀/包含程度排序，不做假的“常用”排序。
      */
-    suspend fun contacts(q: String = ""): List<Triple<String, String, String>> {
+    suspend fun contacts(q: String = ""): List<Triple<String, String, String>> =
+        contactList(q).first.map { Triple(it.name, it.email, it.group) }
+
+    /** 通讯录条目：服务端 contact/list 的真实字段（contactId/name/email/groupName/remark）。 */
+    data class ContactItem(
+        val id: Long,
+        val name: String,
+        val email: String,
+        val group: String,
+        val remark: String = "",
+    )
+
+    /** 返回联系人列表 + 服务端已有的分组名（分组下拉基于全量，不受 q/group 过滤影响）。 */
+    suspend fun contactList(q: String = "", group: String = ""): Pair<List<ContactItem>, List<String>> {
         val query = StringBuilder("/contact/list?page=1&size=200")
         if (q.isNotBlank()) query.append("&q=").append(URLEncoder.encode(q, "UTF-8"))
-        val list = obj("GET", query.toString()).optJSONArray("list") ?: JSONArray()
-        val out = ArrayList<Triple<String, String, String>>()
+        if (group.isNotBlank()) query.append("&group=").append(URLEncoder.encode(group, "UTF-8"))
+        val data = obj("GET", query.toString())
+        val list = data.optJSONArray("list") ?: JSONArray()
+        val out = ArrayList<ContactItem>()
         for (i in 0 until list.length()) {
             val o = list.optJSONObject(i) ?: continue
             val email = o.optString("email")
             if (!email.contains("@")) continue
             out.add(
-                Triple(
-                    o.optString("name").ifEmpty { email.substringBefore("@") },
-                    email,
-                    o.optString("groupName"),
+                ContactItem(
+                    id = o.optLong("contactId"),
+                    name = o.optString("name").ifEmpty { email.substringBefore("@") },
+                    email = email,
+                    group = o.optString("groupName"),
+                    remark = o.optString("remark"),
                 ),
             )
         }
-        return out
+        val groups = data.optJSONArray("groups") ?: JSONArray()
+        val groupNames = ArrayList<String>()
+        for (i in 0 until groups.length()) {
+            groups.optString(i).takeIf { it.isNotBlank() }?.let { groupNames.add(it) }
+        }
+        return out to groupNames
+    }
+
+    /**
+     * 新增/保存联系人。同名接口服务端按 email 做 upsert，所以 add 也带完整字段。
+     * 分组留空时服务端回落「默认」，这里不做本地默认值，避免和网页端不一致。
+     */
+    suspend fun contactAdd(name: String, email: String, group: String, remark: String) {
+        obj(
+            "POST", "/contact/add",
+            JSONObject()
+                .put("name", name).put("email", email)
+                .put("groupName", group).put("remark", remark),
+        )
+    }
+
+    suspend fun contactSet(id: Long, name: String, email: String, group: String, remark: String) {
+        obj(
+            "POST", "/contact/set",
+            JSONObject()
+                .put("contactId", id).put("name", name).put("email", email)
+                .put("groupName", group).put("remark", remark),
+        )
+    }
+
+    suspend fun contactDelete(id: Long) {
+        obj("POST", "/contact/delete", JSONObject().put("contactId", id))
     }
 
     suspend fun emails(accountId: Long, page: Int, mailbox: String? = null, keyword: String = "", category: String = "", allAccounts: Boolean = false): Pair<List<MailItem>, Long> =
