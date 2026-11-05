@@ -46,7 +46,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
@@ -72,7 +71,6 @@ import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.otscup.otsmail.R
-import com.otscup.otsmail.data.Demo
 import com.otscup.otsmail.ui.theme.OT
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -387,9 +385,6 @@ fun OTAvatar(
                 contentScale = ContentScale.Crop,
                 modifier = Modifier.fillMaxSize(),
             )
-        } else if (Demo.enabled) {
-            // 演示构建专用：按发件人 hash 画确定性几何头像，保证每封信/每个人都不一样
-            DemoAvatarPattern(seed ?: name)
         } else {
             Text(
                 avatarInitial(name),
@@ -397,33 +392,6 @@ fun OTAvatar(
                 color = textColor,
                 maxLines = 1,
             )
-        }
-    }
-}
-
-/**
- * 演示头像：5×5 左右对称的 identicon，颜色/格子全部由 seed 哈希决定。
- * 只在 [Demo.enabled]（-Pdemo=true 的演示包）里绘制，正式包永远走上面的首字母逻辑。
- */
-@Composable
-private fun DemoAvatarPattern(seed: String) {
-    val a = stableAvatarColor(seed)
-    val b = stableAvatarColor("$seed#alt")
-    Canvas(Modifier.fillMaxSize()) {
-        drawRect(Color(0xFFF5F5F7))
-        val cell = size.width / 7f
-        var h = seed.hashCode() or 1
-        for (col in 0..2) {
-            for (row in 0..4) {
-                h = h * 1103515245 + 12345
-                val on = (h ushr 17) and 3 > 0
-                if (!on) continue
-                val color = if ((h ushr 19) and 1 == 0) a else b
-                drawRect(color, topLeft = Offset((col + 1) * cell, (row + 1) * cell), size = Size(cell, cell))
-                if (col != 2) {
-                    drawRect(color, topLeft = Offset((5 - col) * cell, (row + 1) * cell), size = Size(cell, cell))
-                }
-            }
         }
     }
 }
@@ -438,8 +406,10 @@ private fun avatarInitial(name: String): String {
 
 /** seed → 色相（0–359），同人稳定；饱和度/明度固定，避免暗色主题下糊成一片。 */
 private fun stableAvatarColor(seed: String): Color {
+    // 地址大小写不敏感：Foo@Example.com 与 foo@example.com 必须同色，否则同一发件人的
+    // 头像在列表里会前后不一致
     var h = 0
-    for (ch in seed) {
+    for (ch in seed.lowercase()) {
         h = h * 31 + ch.code
         h = h and 0x7fffffff
     }

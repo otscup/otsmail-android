@@ -82,6 +82,8 @@ fun OtsApp() {
                 it.email = Demo.accounts[0].email
                 it.name = "Demo Lin"
                 it.signature = "— 发自 OTSMail 演示账户"
+                // 当前账户头像用演示构建自带的合成人像（正式包没有这张资源，返回空串）
+                it.avatarLocal = Demo.avatarDataUrl(context)
                 Api.base = it.base
                 Api.token = it.token
             }

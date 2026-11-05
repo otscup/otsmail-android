@@ -66,6 +66,12 @@ android {
     val tagVersionCode = (project.findProperty("versionCode") as String?)?.toIntOrNull()
         ?: versionCodeOf(tagVersionName)
 
+    sourceSets {
+        // 演示包专用资源（合成人像）只在 -Pdemo=true 时参与打包；
+        // 正式构建的 res.srcDirs 不含 src/demo/res，APK 里根本没有这张图。
+        if (demoBuild) getByName("main").res.srcDir("src/demo/res")
+    }
+
     defaultConfig {
         applicationId = "com.otscup.otsmail"
         minSdk = 26          // targetSdk 35；26 起步可以直接用 adaptive icon 与深色主题

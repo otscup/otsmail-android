@@ -17,12 +17,12 @@ OTS Mail 的 Android 客户端。Kotlin + Jetpack Compose，Material 3，单 Act
 
 ## 界面预览
 
-以下截图来自 `-Pdemo=true` 的演示构建（包名带 `.demo` 后缀），**邮件、账户、头像全部是本地虚构数据**，与任何真实邮箱无关；截图在真机（Samsung Galaxy S10e，1080×2164）以系统字体 100% 拍摄。
+以下截图来自 `-Pdemo=true` 的演示构建（包名带 `.demo` 后缀），**邮件、账户、头像全部是本地虚构数据**，与任何真实邮箱无关；邮件头像为产品本身的「取色圆底 + 首字母」样式，账户头像是一张 AI 合成的虚拟人像（非真实人物、仅演示构建打包）。截图在真机（Samsung Galaxy S10e，1080×2164）以系统字体 100% 拍摄。
 
 | 收件箱 | 侧边栏 |
 |---|---|
 | ![收件箱](docs/screenshots/01-inbox.png) | ![侧边栏](docs/screenshots/02-drawer.png) |
-| 收件箱列表：未读点、星标、发件人头像与账户后缀 | 抽屉：多账户切换、未读/星标/垃圾箱计数、分类入口 |
+| 收件箱列表：未读点、星标、发件人首字母头像与账户后缀 | 抽屉：当前账户人像、多账户切换、未读/星标/垃圾箱计数、分类入口 |
 
 | 详情页 | 写信页 |
 |---|---|
@@ -32,13 +32,13 @@ OTS Mail 的 Android 客户端。Kotlin + Jetpack Compose，Material 3，单 Act
 | 个人设置 | 系统设置 |
 |---|---|
 | ![个人设置](docs/screenshots/05-profile.png) | ![系统设置](docs/screenshots/06-system.png) |
-| 个人设置：头像、用户名、邮箱、两步验证、签名 | 系统设置：头像显示、回车发送、推送状态与后台数据入口 |
+| 个人设置：头像（可点「更换头像」上传）、用户名、邮箱、两步验证、签名 | 系统设置：头像显示、回车发送、推送状态与后台数据入口 |
 
 深色模式下的收件箱：
 
 ![深色模式收件箱](docs/screenshots/07-inbox-dark.png)
 
-演示数据由 [`app/src/main/java/com/otscup/otsmail/data/Demo.kt`](app/src/main/java/com/otscup/otsmail/data/Demo.kt) 提供，只在演示构建里生效；正式包 `BuildConfig.DEMO=false`，不会进入这段代码。要重新拍摄：
+演示数据由 [`app/src/main/java/com/otscup/otsmail/data/Demo.kt`](app/src/main/java/com/otscup/otsmail/data/Demo.kt) 提供，只在演示构建里生效；正式包 `BuildConfig.DEMO=false`，不会进入这段代码。账户人像（`app/src/demo/res/drawable-nodpi/demo_portrait.jpg`，AI 合成、无真实人物）只在该构建的 `src/demo/res` 里参与打包，正式包不包含该资源。要重新拍摄：
 
 ```bash
 ./gradlew assembleDebug -Pdemo=true

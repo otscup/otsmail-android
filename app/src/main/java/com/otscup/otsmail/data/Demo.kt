@@ -1,8 +1,12 @@
 package com.otscup.otsmail.data
 
+import android.content.Context
+import android.graphics.BitmapFactory
+import android.util.Base64
 import com.otscup.otsmail.BuildConfig
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.ByteArrayOutputStream
 import java.time.LocalDateTime
 import java.time.ZoneOffset
 import java.time.format.DateTimeFormatter
@@ -22,6 +26,26 @@ object Demo {
 
     /** 正式包恒为 false（BuildConfig.DEMO 由 -Pdemo=true 决定）。 */
     val enabled: Boolean get() = BuildConfig.DEMO
+
+    /**
+     * 演示账户的人像：只存在于演示构建的 `src/demo/res/drawable-nodpi/demo_portrait.jpg`
+     * （正式构建不把 `src/demo/res` 加进 res.srcDirs，所以正式包里根本没有这张图）。
+     * 用 getIdentifier 取而不是 R.drawable.xxx：正式包链路上拿不到 id 就返回空串。
+     */
+    @Volatile
+    private var portraitDataUrl: String? = null
+
+    fun avatarDataUrl(context: Context): String {
+        portraitDataUrl?.let { return it }
+        val id = context.resources.getIdentifier("demo_portrait", "drawable", context.packageName)
+        if (id == 0) return ""
+        val bmp = BitmapFactory.decodeResource(context.resources, id) ?: return ""
+        val out = ByteArrayOutputStream()
+        bmp.compress(android.graphics.Bitmap.CompressFormat.JPEG, 88, out)
+        val url = "data:image/jpeg;base64," + Base64.encodeToString(out.toByteArray(), Base64.NO_WRAP)
+        portraitDataUrl = url
+        return url
+    }
 
     data class DemoAccount(val id: Long, val email: String, val name: String)
 
