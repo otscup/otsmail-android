@@ -344,7 +344,8 @@ object Demo {
         when (mailbox) {
             "unread" -> list = list.filter { it.mailbox == "receive" && it.unread }
             "starred" -> list = list.filter { it.mailbox == "receive" && it.starred }
-            "sent", "draft" -> list = emptyList()
+            "sent" -> list = list.filter { it.mailbox == "sent" }
+            "draft" -> list = emptyList()
             else -> if (mailbox.isNotEmpty()) list = list.filter { it.mailbox == mailbox }
         }
         if (category.isNotEmpty()) list = list.filter { it.category == category }
@@ -382,7 +383,7 @@ object Demo {
             "starred" to scope.count { it.starred },
             "spam" to scope.count { it.mailbox == "spam" },
             "deleted" to scope.count { it.mailbox == "deleted" },
-            "sent" to 0, "draft" to 0,
+            "sent" to scope.count { it.mailbox == "sent" }, "draft" to 0,
         )
     }
 
@@ -463,6 +464,37 @@ object Demo {
                 val n = mails.count { it.mailbox == "deleted" }
                 mails.removeAll { it.mailbox == "deleted" }
                 JSONObject().put("total", n)
+            }
+            "/email/send" -> {
+                val accountId = body?.optLong("accountId") ?: 1L
+                val account = accounts.firstOrNull { it.id == accountId } ?: accounts[0]
+                val to = body?.optJSONArray("receiveEmail")?.let { arr ->
+                    (0 until arr.length()).map { arr.optString(it) }
+                }.orEmpty()
+                val cc = body?.optJSONArray("cc")?.let { arr ->
+                    (0 until arr.length()).map { arr.optString(it) }
+                }.orEmpty()
+                val subject = body?.optString("subject").orEmpty()
+                val text = body?.optString("text").orEmpty()
+                // 发出的邮件进「已发送」，方便演示包点验发送/撤销；真实服务端行为由 mail-worker 负责
+                mails.add(
+                    0,
+                    Mail(
+                        id = 9500L + mails.size,
+                        accountId = accountId,
+                        from = account.email,
+                        name = account.name,
+                        subject = subject,
+                        preview = text.replace('\n', ' ').take(120),
+                        html = body?.optString("content").orEmpty(),
+                        minutesAgo = 0,
+                        unread = false,
+                        mailbox = "sent",
+                        recipient = to,
+                        cc = cc,
+                    ),
+                )
+                JSONObject()
             }
             "/email/menu-counts" -> menuCounts(q)
             "/email/category-counts" -> categoryCounts(q)

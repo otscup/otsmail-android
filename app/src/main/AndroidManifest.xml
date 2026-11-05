@@ -48,6 +48,11 @@
             </intent-filter>
         </service>
 
+        <!-- 通知栏快捷操作（标记已读/删除/快速回复）：只由本 App 的 PendingIntent 触发 -->
+        <receiver
+            android:name=".push.NotificationActionReceiver"
+            android:exported="false" />
+
         <!-- 服务端走 data 消息时才用得上这两个兜底（通知栏小图标/渠道） -->
         <meta-data
             android:name="com.google.firebase.messaging.default_notification_icon"

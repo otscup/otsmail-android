@@ -46,6 +46,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -90,6 +91,7 @@ import com.otscup.otsmail.data.friendlyError
 import com.otscup.otsmail.ui.theme.OT
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -162,6 +164,12 @@ fun ComposeScreen(
     var touched by remember { mutableStateOf(false) }
     // 发送成功后禁止再落盘：否则 onDispose 会把刚删掉的草稿又写回来
     var sentOk by remember { mutableStateOf(false) }
+    // 发送后的可撤销窗口（8 秒）：倒计时结束才真正调 /email/send。
+    // 倒计时开始时已把内容落草稿，进程被杀后重进仍是草稿；离开写信页则立即发送。
+    var pendingSend by remember { mutableStateOf<PendingEmail?>(null) }
+    var pendingLeft by remember { mutableIntStateOf(0) }
+    var delivering by remember { mutableStateOf(false) }
+    val sendJob = remember { mutableStateOf<Job?>(null) }
     // 右滑回复：缓存没命中时先开页，这里再补原文引用；拿不到就保持无引用，不阻塞发送
     LaunchedEffect(quoteEmailId) {
         val id = quoteEmailId ?: return@LaunchedEffect
@@ -343,6 +351,20 @@ fun ComposeScreen(
     // 页面销毁后仍要把最后一笔草稿写完，所以不能用 rememberCoroutineScope（它会被取消）
     val persistScope = remember { CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate) }
 
+    /** 离开写信页时的补发：不再写界面状态，失败也保留草稿，重进能接回来。 */
+    suspend fun deliverQuietly(p: PendingEmail) {
+        runCatching {
+            Api.send(
+                p.accountId, p.to, p.subject, p.text, p.html, p.attachments,
+                cc = p.cc,
+                bcc = p.bcc,
+            )
+        }.onSuccess {
+            withContext(Dispatchers.IO) { Drafts.delete(ctx, p.draftId) }
+            MailSync.changed()
+        }
+    }
+
     // 切后台（onStop）立即落盘一次，不等 800ms 防抖
     val lifecycleOwner = LocalLifecycleOwner.current
     val saveNow = rememberUpdatedState { persistScope.launch { persist() } }
@@ -353,8 +375,19 @@ fun ComposeScreen(
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose {
             lifecycleOwner.lifecycle.removeObserver(observer)
-            // 离开写信页（去草稿箱/被 401 拦去登录）也落盘，页面被重建时能原样接回来
-            saveNow.value()
+            // 撤销窗口内离开写信页（取消/去草稿箱/切页）按「仍然发送」处理；
+            // 已经在发（delivering）就不重复提交，等它自己发完。
+            val queued = pendingSend
+            if (queued != null) {
+                sendJob.value?.cancel()
+                sendJob.value = null
+                pendingSend = null
+                if (!delivering) persistScope.launch { deliverQuietly(queued) }
+            } else {
+                // 离开写信页（去草稿箱/被 401 拦去登录）也落盘，页面被重建时能原样接回来。
+                // 有 queued 时不再落盘：草稿在进窗口那一刻已经写过，这时再写会把补发成功删掉的草稿又写回来
+                saveNow.value()
+            }
         }
     }
 
@@ -578,6 +611,69 @@ fun ComposeScreen(
         touched = true
     }
 
+    /** 倒计时结束后的真实发送（带界面反馈）。 */
+    suspend fun deliver(p: PendingEmail) {
+        delivering = true
+        runCatching {
+            Api.send(
+                p.accountId, p.to, p.subject, p.text, p.html, p.attachments,
+                cc = p.cc,
+                bcc = p.bcc,
+            )
+        }
+            .onSuccess {
+                sentOk = true
+                touched = true
+                withContext(Dispatchers.IO) { Drafts.delete(ctx, p.draftId) }
+                MailSync.changed()
+                pendingSend = null
+                pendingLeft = 0
+                busy = false
+                onFinished(true)
+            }
+            .onFailure { e ->
+                // 失败不清空输入：立刻把当前内容落盘，并给出重试入口
+                touched = true
+                val saved = persist(force = true)
+                draftSaved = saved
+                sendFailed = true
+                pendingSend = null
+                pendingLeft = 0
+                busy = false
+                // 401 的 friendlyError 是空串：这时只显示"发送失败"，交给全局登录失效横幅说明原因
+                val reason = friendlyError(e)
+                error = if (reason.isEmpty()) "发送失败" else "发送失败：$reason"
+            }
+        delivering = false
+    }
+
+    /** 进入撤销窗口：先倒计时，结束才真正发；窗口内发送按钮不可点，避免连点发出两封。 */
+    fun queueSend(p: PendingEmail) {
+        pendingSend = p
+        pendingLeft = UNDO_SECONDS
+        busy = true
+        error = ""
+        sendFailed = false
+        sendJob.value?.cancel()
+        sendJob.value = persistScope.launch {
+            repeat(UNDO_SECONDS) {
+                delay(1000)
+                pendingLeft -= 1
+            }
+            pendingSend?.let { deliver(it) }
+        }
+    }
+
+    /** 撤销：取消倒计时，内容与附件原样留在写信页，草稿也还在。 */
+    fun undoSend() {
+        sendJob.value?.cancel()
+        sendJob.value = null
+        pendingSend = null
+        pendingLeft = 0
+        busy = false
+        Toast.makeText(ctx, "已撤销发送，内容仍在写信页", Toast.LENGTH_SHORT).show()
+    }
+
     fun send() {
         if (busy) return
         // 输入框里还没按 Enter 的地址先校验：非法就明确报错，不合规地址不会被悄悄丢掉
@@ -621,32 +717,22 @@ fun ComposeScreen(
             (if (sig.isEmpty()) "" else "<p>${escapeHtml(sig).replace("\n", "<br>")}</p>") +
             quotedHtml +
             "</body></html>"
-        scope.launch {
-            runCatching {
-                Api.send(
-                    fromId, recipients, subjectText, plain, html, attachments,
+        // 先落草稿再进撤销窗口：8 秒内进程被杀，重进还能从草稿接回来，不是静默丢失
+        persistScope.launch {
+            persist(force = true)
+            queueSend(
+                PendingEmail(
+                    accountId = fromId,
+                    to = recipients,
                     cc = ccTags,
                     bcc = bccTags,
-                )
-            }
-                .onSuccess {
-                    sentOk = true
-                    touched = true
-                    withContext(Dispatchers.IO) { Drafts.delete(ctx, draftIdState) }
-                    MailSync.changed()
-                    onFinished(true)
-                }
-                .onFailure { e ->
-                    // 失败不清空输入：立刻把当前内容落盘，并给出重试入口
-                    touched = true
-                    val saved = persist(force = true)
-                    draftSaved = saved
-                    sendFailed = true
-                    // 401 的 friendlyError 是空串：这时只显示"发送失败"，交给全局登录失效横幅说明原因
-                    val reason = friendlyError(e)
-                    error = if (reason.isEmpty()) "发送失败" else "发送失败：$reason"
-                }
-            busy = false
+                    subject = subjectText,
+                    text = plain,
+                    html = html,
+                    attachments = attachments.toList(),
+                    draftId = draftIdState,
+                ),
+            )
         }
     }
 
@@ -1043,6 +1129,41 @@ fun ComposeScreen(
             Spacer(Modifier.height(16.dp))
         }
 
+        // 可撤销发送条：8 秒倒计时期间可撤回，样式对齐列表的删除撤销条
+        if (pendingLeft > 0) {
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 8.dp)
+                    .height(48.dp)
+                    .clip(RoundedCornerShape(OT.dimens.rMd.dp))
+                    .background(c.toastBg)
+                    .padding(start = 16.dp, end = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    "$pendingLeft 秒后发送",
+                    style = t.footnote,
+                    color = c.onAccent,
+                    modifier = Modifier.weight(1f),
+                )
+                Box(
+                    Modifier
+                        .height(48.dp)
+                        .clip(RoundedCornerShape(OT.dimens.rMd.dp))
+                        .tapArea { undoSend() }
+                        .padding(horizontal = 12.dp),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        "撤销",
+                        style = t.subhead.copy(fontWeight = FontWeight.SemiBold),
+                        color = c.onAccent,
+                    )
+                }
+            }
+        }
+
         // 格式工具条：56dp 高、每项 48dp 点击区、24dp 图标；项多时横向滑动，不换行
         OTDivider(strong = true)
         val toolsScroll = rememberScrollState()
@@ -1244,6 +1365,22 @@ internal fun buildQuoteHtml(name: String, content: String): String {
         .trim()
     return "<blockquote><p>${escapeHtml(name)} 写道：</p>$cleaned</blockquote>"
 }
+
+/** 发送撤销窗口的秒数：点发送后 8 秒内可撤回，超时才真正调 /email/send。 */
+private const val UNDO_SECONDS = 8
+
+/** 撤销窗口内的待发载荷：拍下点击发送那一刻的内容，期间界面继续编辑不影响这一封。 */
+private data class PendingEmail(
+    val accountId: Long,
+    val to: List<String>,
+    val cc: List<String>,
+    val bcc: List<String>,
+    val subject: String,
+    val text: String,
+    val html: String,
+    val attachments: List<JSONObject>,
+    val draftId: String,
+)
 
 /** 轻量格式：**粗体**、*斜体*、__下划线__、[文字](链接)、# 标题、- / 1. 列表、> 引用 */
 private fun textToHtml(text: String): String {
