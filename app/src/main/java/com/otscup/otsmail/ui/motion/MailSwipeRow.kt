@@ -56,6 +56,9 @@ fun MailSwipeRow(
     onDelete: () -> Unit,
     modifier: Modifier = Modifier,
     enabled: Boolean = true,
+    /** 右滑动作的图标/说明：已删除列表里右滑是「恢复」，不是「回复」 */
+    rightIcon: Int = R.drawable.ot_reply,
+    rightLabel: String = "回复",
     content: @Composable () -> Unit,
 ) {
     val c = OT.colors
@@ -154,8 +157,8 @@ fun MailSwipeRow(
             contentAlignment = if (replying) Alignment.CenterStart else Alignment.CenterEnd,
         ) {
             Icon(
-                painterResource(if (replying) R.drawable.ot_reply else R.drawable.ot_trash),
-                contentDescription = if (replying) "回复" else "删除",
+                painterResource(if (replying) rightIcon else R.drawable.ot_trash),
+                contentDescription = if (replying) rightLabel else "删除",
                 tint = c.onAccent,
                 modifier = (if (replying) Modifier.padding(start = 24.dp) else Modifier.padding(end = 24.dp)).size(24.dp),
             )

@@ -76,6 +76,9 @@ private val MOVE_TARGETS = listOf(
     "updates" to "动态",
 )
 
+/** 详情底栏的写信入口：回复 / 回复全部 / 转发（App 按它决定收件人、主题与正文）。 */
+enum class ReplyAction { REPLY, REPLY_ALL, FORWARD }
+
 /**
  * 读信页：对标三星/Google 邮件——通栏无卡片、正文左右 16dp、HTML 图片不超出内容区。
  * 头部只有返回 + 上/下封切换；标题常规字重，日期灰色小字；发件人 outline chip + 蓝色「详细信息」。
@@ -85,7 +88,7 @@ private val MOVE_TARGETS = listOf(
 fun DetailScreen(
     emailId: Long,
     onBack: () -> Unit,
-    onReply: (MailDetail) -> Unit,
+    onReply: (MailDetail, ReplyAction) -> Unit,
     onToast: (String) -> Unit = {},
 ) {
     val t = OT.type
@@ -593,9 +596,9 @@ blockquote{margin:8px 0;padding-left:10px;border-left:3px solid $quote;color:$sy
 
             OTActionBar(
                 items = listOf(
-                    Triple("↩", "回复", { onReply(m) }),
-                    Triple("⇉", "回复全部", { onReply(m) }),
-                    Triple("↪", "转发", { onReply(m) }),
+                    Triple("↩", "回复", { onReply(m, ReplyAction.REPLY) }),
+                    Triple("⇉", "回复全部", { onReply(m, ReplyAction.REPLY_ALL) }),
+                    Triple("↪", "转发", { onReply(m, ReplyAction.FORWARD) }),
                     Triple("🗑", "删除", {
                         scope.launch {
                             runCatching { Api.trash(listOf(m.emailId)) }
@@ -629,7 +632,35 @@ blockquote{margin:8px 0;padding-left:10px;border-left:3px solid $quote;color:$sy
                             moreOpen = false
                             scope.launch {
                                 runCatching { Api.spam(m.emailId) }
-                                    .onSuccess { MailCache.removeItem(m.emailId); MailSync.changed(); onToast("已标记为垃圾邮件"); onBack() }
+                                    .onSuccess { MailCache.removeItem(m.emailId); MailCache.expireLists(); MailSync.changed(); onToast("已标记为垃圾邮件"); onBack() }
+                                    .onFailure { onToast(friendlyError(it)) }
+                            }
+                        }
+                        MoreItem("恢复到收件箱") {
+                            moreOpen = false
+                            scope.launch {
+                                runCatching { Api.restore(m.emailId) }
+                                    .onSuccess {
+                                        MailCache.removeItem(m.emailId)
+                                        MailCache.expireLists()
+                                        MailSync.changed()
+                                        onToast("已恢复到收件箱")
+                                        onBack()
+                                    }
+                                    .onFailure { onToast(friendlyError(it)) }
+                            }
+                        }
+                        MoreItem("取消垃圾标记") {
+                            moreOpen = false
+                            scope.launch {
+                                runCatching { Api.spamCancel(m.emailId) }
+                                    .onSuccess {
+                                        MailCache.removeItem(m.emailId)
+                                        MailCache.expireLists()
+                                        MailSync.changed()
+                                        onToast("已取消垃圾标记")
+                                        onBack()
+                                    }
                                     .onFailure { onToast(friendlyError(it)) }
                             }
                         }

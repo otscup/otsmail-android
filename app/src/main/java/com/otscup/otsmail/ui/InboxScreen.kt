@@ -48,6 +48,7 @@ import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material.icons.outlined.StarBorder
 import androidx.compose.material.icons.outlined.Tune
 import androidx.compose.material.icons.outlined.VpnKey
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -55,6 +56,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.ModalDrawerSheet
 import androidx.compose.material3.ModalNavigationDrawer
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.material3.pulltorefresh.PullToRefreshDefaults
 import androidx.compose.material3.pulltorefresh.rememberPullToRefreshState
@@ -254,6 +256,8 @@ fun InboxScreen(
     var selected by remember { mutableStateOf<Set<Long>>(emptySet()) }
     var batchBusy by remember { mutableStateOf(false) }
     var moveSheet by remember { mutableStateOf(false) }
+    // 「清空已删除」的二次确认：不可恢复，必须明确告知
+    var clearDeletedConfirm by remember { mutableStateOf(false) }
     fun exitSelect() {
         selectMode = false
         selected = emptySet()
@@ -354,6 +358,20 @@ fun InboxScreen(
         notice = "已撤销删除"
     }
 
+    /** 已删除列表的行操作：恢复到收件箱。恢复成功只提示，不进删除撤销条（语义不同）。 */
+    fun restoreOne(mail: MailItem) {
+        scope.launch {
+            runCatching { Api.restore(mail.emailId) }
+                .onSuccess {
+                    MailCache.removeItem(mail.emailId)
+                    MailSync.changed()
+                    notice = "已恢复到收件箱"
+                    loadCounts()
+                }
+                .onFailure { notice = friendlyError(it) }
+        }
+    }
+
     // 滚动位置实时写回快照；返回时用这份值初始化 LazyListState，能精确到同一行
     LaunchedEffect(listState, store) {
         snapshotFlow { listState.firstVisibleItemIndex to listState.firstVisibleItemScrollOffset }
@@ -397,7 +415,7 @@ fun InboxScreen(
         store.page = 1
         store.error = ""
         MailCache.savePage(store, 1, fresh, total.toInt(), resetLater = true)
-        if (toTop) {
+        if (toTop && items.isNotEmpty()) {
             // 无条件回到列表最顶端：firstVisibleItemIndex 可能已经是 0，但第一行（日期头）还滚出去了一截
             listState.scrollToItem(0, 0)
         } else if (anchor != null) {
@@ -405,10 +423,25 @@ fun InboxScreen(
             if (target != null && target != listState.firstVisibleItemIndex) {
                 listState.scrollToItem(target, anchorOffset)
             }
-        } else if (listState.firstVisibleItemIndex >= items.size) {
+        } else if (items.isNotEmpty() && listState.firstVisibleItemIndex >= items.size) {
             // 之前滚到第 2..N 页、但这封锚点邮件不在新首页了：夹回最后一封，避免越界空白
+            // 列表变成空时不滚：scrollToItem 要等 LazyColumn 布局，空列表没有可布局的项，会一直挂起
             listState.scrollToItem((items.size - 1).coerceAtLeast(0), 0)
         }
+    }
+
+    /** 清空已删除：服务端物理删除，成功后让本列表快照与 SQLite 缓存整体失效。 */
+    suspend fun clearDeleted() {
+        val removed = runCatching { Api.clearDeleted() }
+            .onFailure { notice = friendlyError(it); return }
+            .getOrNull() ?: return
+        MailCache.clearList(listKey)
+        swipes.clear()
+        restoreToken++
+        runCatching { refreshFirst(toTop = true) }
+        loadCounts()
+        MailSync.changed()
+        notice = if (removed > 0) "已清空 $removed 封" else "垃圾箱已经空了"
     }
 
     suspend fun loadMore() {
@@ -450,7 +483,11 @@ fun InboxScreen(
             val failed = MailBatchOps.run(action, ids)
             batchBusy = false
             exitSelect()
-            notice = if (failed > 0) "$failed 封失败，其余已处理" else "已处理 ${ids.size} 封"
+            notice = when {
+                failed > 0 -> "$failed 封失败，其余已处理"
+                action == MailBatch.RESTORE -> "已恢复 ${ids.size} 封"
+                else -> "已处理 ${ids.size} 封"
+            }
             loadCounts()
         }
     }
@@ -791,7 +828,29 @@ fun InboxScreen(
                     category.isNotEmpty() -> categoryLabel(category)
                     else -> ""
                 }
-                if (visibleTitle.isNotEmpty()) OTViewTitle(visibleTitle)
+                if (visibleTitle.isNotEmpty()) {
+                    if (current.key == "deleted" && !selectMode && items.isNotEmpty()) {
+                        Row(
+                            Modifier.fillMaxWidth().padding(top = 12.dp, bottom = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text(
+                                visibleTitle,
+                                style = t.title3.copy(fontWeight = FontWeight.Bold),
+                                color = c.label,
+                                modifier = Modifier.weight(1f).padding(start = 20.dp),
+                            )
+                            Box(
+                                Modifier.height(36.dp).tapArea { clearDeletedConfirm = true }.padding(horizontal = 16.dp),
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                Text("清空", style = t.subhead, color = c.blue)
+                            }
+                        }
+                    } else {
+                        OTViewTitle(visibleTitle)
+                    }
+                }
                 if (store.error.isNotEmpty()) {
                     Text(store.error, style = t.footnote, color = c.red, modifier = Modifier.padding(16.dp))
                 }
@@ -843,8 +902,11 @@ fun InboxScreen(
                                 item(key = mail.emailId) {
                                     MailSwipeRow(
                                         enabled = !selectMode && !batchBusy,
-                                        onReply = { onSwipeReply(mail) },
+                                        // 已删除列表里右滑 = 恢复到收件箱；其它列表照旧是回复
+                                        onReply = { if (current.key == "deleted") restoreOne(mail) else onSwipeReply(mail) },
                                         onDelete = { swipeDelete(mail) },
+                                        rightIcon = if (current.key == "deleted") R.drawable.ot_inbox else R.drawable.ot_reply,
+                                        rightLabel = if (current.key == "deleted") "恢复" else "回复",
                                     ) {
                                     Column(Modifier.fillMaxWidth().background(c.bgCard)) {
                                         // 发丝线从文字起始处开始，不穿过头像（16 + 头像 34 + 间距 10）
@@ -939,6 +1001,7 @@ fun InboxScreen(
                         busy = batchBusy,
                         onAction = { runBatch(it) },
                         onMove = { moveSheet = true },
+                        showRestore = current.key == "deleted",
                     )
                 }
             }
@@ -986,6 +1049,29 @@ fun InboxScreen(
                 ) { OTFab(onCompose) }
             }
         }
+    }
+
+    if (clearDeletedConfirm) {
+        AlertDialog(
+            onDismissRequest = { clearDeletedConfirm = false },
+            title = { Text("清空已删除", style = t.title3, color = c.label) },
+            text = {
+                Text(
+                    "已删除里的邮件会被彻底删除，且不可恢复。确定继续？",
+                    style = t.subhead, color = c.label2,
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    clearDeletedConfirm = false
+                    scope.launch { clearDeleted() }
+                }) { Text("清空", color = c.red) }
+            },
+            dismissButton = {
+                TextButton(onClick = { clearDeletedConfirm = false }) { Text("取消", color = c.label2) }
+            },
+            containerColor = c.bgElevated,
+        )
     }
 
     if (moveSheet) {

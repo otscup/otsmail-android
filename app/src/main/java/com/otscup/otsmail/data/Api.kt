@@ -68,6 +68,10 @@ data class MailDetail(
     val starred: Boolean,
     val attachments: List<MailAtt>,
     val category: String = "",
+    /** 原 To 列表（服务端 recipient）：回复全部时一并带入 */
+    val recipient: List<String> = emptyList(),
+    /** 原 Cc 列表：回复全部时带入抄送 */
+    val cc: List<String> = emptyList(),
 )
 
 /** 翻译结果：成功时服务端返回 translatedContent；alreadyInTargetLang=true 表示正文本来就是目标语言。 */
@@ -611,7 +615,27 @@ object Api {
                 }
             }.orEmpty(),
             category = d.optString("category"),
+            recipient = parseAddresses(d.optString("recipient")),
+            cc = parseAddresses(d.optString("cc")),
         )
+    }
+
+    /**
+     * recipient / cc 是 JSON 数组，元素可能是 {"address":"a@b","name":"x"} 或纯字符串。
+     * 返回全部可用地址（大小写保持原样，去重交给调用方）。
+     */
+    fun parseAddresses(raw: String): List<String> {
+        if (raw.isBlank()) return emptyList()
+        return runCatching {
+            val arr = JSONArray(raw)
+            (0 until arr.length()).mapNotNull { i ->
+                val addr = when (val v = arr.opt(i)) {
+                    is JSONObject -> v.optString("address").ifEmpty { v.optString("email") }
+                    else -> v?.toString().orEmpty()
+                }.trim()
+                addr.takeIf { it.contains("@") }
+            }
+        }.getOrDefault(emptyList())
     }
 
     /** HTML 是否有可见内容：只有标签/空白也算空壳；但图片、表格这类非文字结构仍算有正文。 */
@@ -678,6 +702,19 @@ object Api {
     suspend fun trash(emailIds: List<Long>) {
         obj("DELETE", "/email/delete?emailIds=" + emailIds.joinToString(","))
     }
+
+    /** POST /email/restore：从已删除恢复到收件箱（服务端只接受单封 emailId）。 */
+    suspend fun restore(emailId: Long) {
+        obj("POST", "/email/restore", JSONObject().put("emailId", emailId))
+    }
+
+    /** POST /email/spamCancel：取消垃圾标记（服务端只接受单封 emailId）。 */
+    suspend fun spamCancel(emailId: Long) {
+        obj("POST", "/email/spamCancel", JSONObject().put("emailId", emailId))
+    }
+
+    /** DELETE /email/clearDeleted：彻底清空当前用户的已删除（服务端返回清除条数）。 */
+    suspend fun clearDeleted(): Int = obj("DELETE", "/email/clearDeleted").optInt("total")
 
     suspend fun send(
         accountId: Long,

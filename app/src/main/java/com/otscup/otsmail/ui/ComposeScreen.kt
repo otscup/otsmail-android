@@ -112,6 +112,10 @@ fun ComposeScreen(
     to: String,
     subject: String,
     quoted: String = "",
+    /** 回复全部带入的原 cc；新写/普通回复为空 */
+    cc: List<String> = emptyList(),
+    /** 标题提示：replyAll=回复全部，forward=转发，空=按是否有引用判断 */
+    mode: String = "",
     /** 右滑回复时列表只给了 emailId：原文没缓存时在这里后台补引用，不阻塞进写信页 */
     quoteEmailId: Long? = null,
     draftId: String? = null,
@@ -143,7 +147,7 @@ fun ComposeScreen(
     // 另外抓最近 40 封收件人做「常用」排序（服务端 contact 表没有往来/频次字段）。
     var toSuggest by remember { mutableStateOf(listOf<Triple<String, String, String>>()) }
     var toSuggestIndex by remember { mutableStateOf(0) }
-    var ccTags by remember { mutableStateOf(listOf<String>()) }
+    var ccTags by remember { mutableStateOf(cc) }
     var bccTags by remember { mutableStateOf(listOf<String>()) }
     var ccInput by remember { mutableStateOf("") }
     var bccInput by remember { mutableStateOf("") }
@@ -178,7 +182,7 @@ fun ComposeScreen(
     var fromEmail by remember { mutableStateOf("") }
     var accounts by remember { mutableStateOf(listOf<Pair<Long, String>>()) }
     var pickingFrom by remember { mutableStateOf(false) }
-    var showCc by remember { mutableStateOf(false) }
+    var showCc by remember { mutableStateOf(cc.isNotEmpty()) }
     var showBcc by remember { mutableStateOf(false) }
     // 新建写信页时提示恢复本账号最近一份未完成草稿（不自动覆盖用户正在写的空白页）
     var offer by remember { mutableStateOf<Draft?>(null) }
@@ -662,7 +666,12 @@ fun ComposeScreen(
                 Text("取消", style = t.body, color = c.blue, modifier = Modifier.padding(start = 12.dp))
             }
             Text(
-                if (quotedHtml.isEmpty()) "写邮件" else "回复",
+                when {
+                    mode == "replyAll" -> "回复全部"
+                    mode == "forward" -> "转发"
+                    quotedHtml.isEmpty() -> "写邮件"
+                    else -> "回复"
+                },
                 style = t.body.copy(fontWeight = FontWeight.SemiBold),
                 color = c.label,
                 modifier = Modifier.weight(1f),

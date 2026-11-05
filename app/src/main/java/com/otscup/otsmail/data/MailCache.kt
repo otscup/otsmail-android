@@ -137,6 +137,15 @@ object MailCache {
     }
 
     /**
+     * 详情页做了改变邮件归属的操作（恢复 / 取消垃圾 / 标记垃圾）：
+     * 该邮件会从当前 mailbox 消失并出现在别的 mailbox。把所有列表快照标成「该刷新」，
+     * 返回列表时按现行 TTL 规则重拉第一页，不会残留旧行。
+     */
+    fun expireLists() {
+        lists.values.forEach { it.updatedAt = 0L }
+    }
+
+    /**
      * 写一页缓存。
      * - 行主键是 (key, email_id)，同一封邮件在库里只会有一行，翻页位移不会叠出重复行。
      * - resetLater=true 用于「刷新首页」：同时清掉第 2..N 页旧缓存，分页从 1 重新开始。
@@ -291,6 +300,23 @@ object MailCache {
         }
     }
 
+    /** 清空垃圾箱后让整个列表快照失效：内存行、总数、分页与 SQLite 对应 key 全部丢掉。 */
+    suspend fun clearList(key: String) {
+        lists[key]?.let { snap ->
+            snap.items.clear()
+            snap.total = 0
+            snap.page = 0
+            snap.updatedAt = 0L
+            snap.scrollIndex = 0
+            snap.scrollOffset = 0
+        }
+        withContext(Dispatchers.IO) {
+            val w = db?.writableDatabase ?: return@withContext
+            w.delete("list_row", "key=?", arrayOf(key))
+            w.delete("list_meta", "key=?", arrayOf(key))
+        }
+    }
+
     private suspend fun patchRowsInDb(emailId: Long, transform: (MailItem) -> MailItem) {
         withContext(Dispatchers.IO) {
             val h = db ?: return@withContext
@@ -400,6 +426,8 @@ object MailCache {
         .put("unread", unread)
         .put("starred", starred)
         .put("category", category)
+        .put("recipient", JSONArray(recipient))
+        .put("cc", JSONArray(cc))
         .put("attList", JSONArray().also { arr -> attachments.forEach { arr.put(JSONObject().put("filename", it.filename).put("key", it.key)) } })
 
     private fun parseDetail(o: JSONObject): MailDetail = MailDetail(
@@ -418,6 +446,12 @@ object MailCache {
             }
         }.orEmpty(),
         category = o.optString("category"),
+        recipient = o.optJSONArray("recipient")?.let { a ->
+            (0 until a.length()).mapNotNull { a.optString(it).takeIf { s -> s.isNotBlank() } }
+        }.orEmpty(),
+        cc = o.optJSONArray("cc")?.let { a ->
+            (0 until a.length()).mapNotNull { a.optString(it).takeIf { s -> s.isNotBlank() } }
+        }.orEmpty(),
     )
 
     private class CacheDb(context: Context) : SQLiteOpenHelper(context, "otsmail_cache.db", null, 2) {

@@ -31,6 +31,7 @@ import com.otscup.otsmail.data.Api
 import com.otscup.otsmail.data.AuthState
 import com.otscup.otsmail.data.Demo
 import com.otscup.otsmail.data.MailCache
+import com.otscup.otsmail.data.MailDetail
 import com.otscup.otsmail.data.PushManager
 import com.otscup.otsmail.data.Session
 import com.otscup.otsmail.push.PushRouter
@@ -47,6 +48,10 @@ private sealed interface Route {
         val to: String,
         val subject: String,
         val quoted: String,
+        /** 回复全部带入的原 cc（新写/回复时为空） */
+        val cc: List<String> = emptyList(),
+        /** 写信页标题：空=写邮件/回复，replyAll=回复全部，forward=转发 */
+        val mode: String = "",
         /** 从草稿箱继续编辑时带上草稿 id；新写邮件为 null */
         val draftId: String? = null,
         /** 行内右滑回复：原文还没缓存时先开页，由 ComposeScreen 后台补引用 */
@@ -319,11 +324,20 @@ fun OtsApp() {
                     DetailScreen(
                         emailId = r.id,
                         onBack = { goBack() },
-                        onReply = { m ->
-                            // 详情页回复也走 buildQuoteHtml：原内容里的 <style>、charset 声明、
+                        onReply = { m, action ->
+                            // 三个入口共用 buildQuoteHtml：原内容里的 <style>、charset 声明、
                             // html/head/body 外壳和未转义的 name 都会污染引用，导致收发两端乱码。
                             val quoted = buildQuoteHtml(m.name.ifEmpty { m.from }, m.content)
-                            go(Route.Compose(m.from, if (m.subject.startsWith("Re:")) m.subject else "Re: ${m.subject}", quoted))
+                            when (action) {
+                                ReplyAction.REPLY ->
+                                    go(Route.Compose(m.from, reSubject(m.subject), quoted))
+                                ReplyAction.REPLY_ALL -> {
+                                    val (to, cc) = replyAllRecipients(m, session.email)
+                                    go(Route.Compose(to, reSubject(m.subject), quoted, cc = cc, mode = "replyAll"))
+                                }
+                                ReplyAction.FORWARD ->
+                                    go(Route.Compose("", fwdSubject(m.subject), quoted, mode = "forward"))
+                            }
                         },
                         onToast = toast,
                     )
@@ -335,6 +349,8 @@ fun OtsApp() {
                         to = r.to,
                         subject = r.subject,
                         quoted = r.quoted,
+                        cc = r.cc,
+                        mode = r.mode,
                         quoteEmailId = r.quoteEmailId,
                         draftId = r.draftId,
                         onOpenDrafts = {
@@ -385,4 +401,43 @@ fun OtsApp() {
             }
         }
     }
+}
+
+/** 回复主题前缀：已有 Re:（大小写不敏感）不再叠加。 */
+private fun reSubject(subject: String): String =
+    if (subject.trim().lowercase().startsWith("re:")) subject else "Re: $subject"
+
+/** 转发主题前缀：已有 Fwd:/Fw: 不再叠加。 */
+private fun fwdSubject(subject: String): String {
+    val s = subject.trim()
+    return if (s.lowercase().startsWith("fwd:") || s.lowercase().startsWith("fw:")) s else "Fwd: $s"
+}
+
+/**
+ * 回复全部的收件人：
+ * To = 原发件人 + 原 To（recipient），Cc = 原 cc；
+ * 地址大小写不敏感去重，并排除当前登录账户自己的地址（避免自己收到自己）。
+ */
+private fun replyAllRecipients(m: MailDetail, selfEmail: String): Pair<String, List<String>> {
+    val self = selfEmail.trim().lowercase()
+    val to = LinkedHashMap<String, String>()
+    val cc = LinkedHashMap<String, String>()
+    fun add(map: LinkedHashMap<String, String>, raw: String) {
+        val addr = raw.trim()
+        if (addr.isEmpty() || !addr.contains("@")) return
+        val key = addr.lowercase()
+        if (key == self) return
+        map.putIfAbsent(key, addr)
+    }
+    add(to, m.from)
+    m.recipient.forEach { add(to, it) }
+    m.cc.forEach { add(cc, it) }
+    // 已经进了 To 的地址不再重复出现在 Cc
+    cc.keys.removeAll(to.keys)
+    if (to.isEmpty()) {
+        // 原发件人就是自己（读的是自己发出的邮件）：退回原 cc，至少别把收件人留空
+        cc.forEach { (k, v) -> to[k] = v }
+        cc.clear()
+    }
+    return to.values.joinToString(", ") to cc.values.toList()
 }

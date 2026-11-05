@@ -40,6 +40,8 @@ internal enum class MailBatch(val label: String) {
     STAR("星标"),
     UNSTAR("取消星标"),
     DELETE("删除"),
+    /** 已删除列表专用：恢复到收件箱 */
+    RESTORE("恢复"),
 }
 
 internal object MailBatchOps {
@@ -72,6 +74,11 @@ internal object MailBatchOps {
 
                     MailBatch.DELETE -> {
                         Api.trash(listOf(id))
+                        MailCache.removeItem(id)
+                    }
+
+                    MailBatch.RESTORE -> {
+                        Api.restore(id)
                         MailCache.removeItem(id)
                     }
                 }
@@ -138,12 +145,14 @@ internal fun MailSelectionHeader(
     }
 }
 
-/** 多选底部动作条：已读/未读/星标/取消星标/移动/删除。 */
+/** 多选底部动作条：已读/未读/星标/取消星标/移动/删除；已删除列表额外给「恢复」。 */
 @Composable
 internal fun MailSelectionActions(
     busy: Boolean,
     onAction: (MailBatch) -> Unit,
     onMove: () -> Unit,
+    /** 当前在「已删除」列表：多选也要能恢复 */
+    showRestore: Boolean = false,
 ) {
     val c = OT.colors
     OTDivider(strong = true)
@@ -151,6 +160,9 @@ internal fun MailSelectionActions(
         Modifier.fillMaxWidth().background(c.bgBar).navigationBarsPadding().padding(vertical = 4.dp),
         horizontalArrangement = Arrangement.SpaceEvenly,
     ) {
+        if (showRestore) {
+            SelectionAction(Icons.Outlined.MarkEmailRead, "恢复", busy, tint = c.blue) { onAction(MailBatch.RESTORE) }
+        }
         SelectionAction(Icons.Outlined.MarkEmailRead, "已读", busy) { onAction(MailBatch.READ) }
         SelectionAction(Icons.Outlined.MarkEmailUnread, "未读", busy) { onAction(MailBatch.UNREAD) }
         SelectionAction(Icons.Outlined.Star, "星标", busy) { onAction(MailBatch.STAR) }

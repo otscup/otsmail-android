@@ -70,9 +70,12 @@ object Demo {
         val category: String = "primary",
         val mailbox: String = "receive",
         val attachments: List<Pair<String, String>> = emptyList(),
+        /** 原 To / Cc：演示「回复全部」时能带出地址 */
+        val recipient: List<String> = emptyList(),
+        val cc: List<String> = emptyList(),
     )
 
-    private val mails = listOf(
+    private val mails = mutableListOf(
         Mail(
             id = 9001, accountId = 1,
             from = "no-reply@northwind-id.example", name = "Northwind Identity",
@@ -251,6 +254,38 @@ object Demo {
             """.trimIndent(),
             minutesAgo = 1560, unread = false, starred = true,
         ),
+        Mail(
+            id = 9013, accountId = 1,
+            from = "billing@northwind-id.example", name = "Northwind Billing",
+            subject = "Invoice #4821 was declined",
+            preview = "Your card ending in 4421 was declined for invoice #4821.",
+            html = """
+                <p>Your card ending in <b>4421</b> was declined for invoice #4821 ($24.00).</p>
+                <p>Please update the payment method in your account settings to avoid service interruption.</p>
+            """.trimIndent(),
+            minutesAgo = 2100, unread = false, category = "updates", mailbox = "deleted",
+            recipient = listOf("demo.lin@example.com"),
+            cc = listOf("finance@example.org"),
+        ),
+        Mail(
+            id = 9014, accountId = 2,
+            from = "newsletter@example.com", name = "Weekly Digest",
+            subject = "5 things we learned this week",
+            preview = "A short list of links and notes from the team.",
+            html = """
+                <p>Five quick reads from the team this week:</p>
+                <p>1. Notes on caching<br>2. A better onboarding<br>3. Release notes<br>4. Reader mail<br>5. What's next</p>
+            """.trimIndent(),
+            minutesAgo = 2400, unread = true, mailbox = "deleted",
+        ),
+        Mail(
+            id = 9015, accountId = 1,
+            from = "winner@lucky-draw.example", name = "Lucky Draw",
+            subject = "You have won a $500 gift card",
+            preview = "Claim your prize within 24 hours.",
+            html = "<p>Congratulations! Click the link below to claim your $500 gift card.</p>",
+            minutesAgo = 2600, unread = true, category = "spam", mailbox = "spam",
+        ),
     )
 
     private val fmt = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")
@@ -273,6 +308,8 @@ object Demo {
         .put("accountId", m.accountId)
         .put("type", 0)
         .put("status", 0)
+        .put("recipient", JSONArray(m.recipient))
+        .put("cc", JSONArray(m.cc))
 
     private fun detailJson(id: Long): JSONObject {
         val m = mails.firstOrNull { it.id == id } ?: return JSONObject()
@@ -305,9 +342,10 @@ object Demo {
         val keyword = java.net.URLDecoder.decode(q["text"].orEmpty(), "UTF-8")
         var list = sorted().filter { allReceive || accountId == 0L || it.accountId == accountId }
         when (mailbox) {
-            "unread" -> list = list.filter { it.unread }
-            "starred" -> list = list.filter { it.starred }
-            "spam", "deleted", "sent", "draft" -> list = emptyList()
+            "unread" -> list = list.filter { it.mailbox == "receive" && it.unread }
+            "starred" -> list = list.filter { it.mailbox == "receive" && it.starred }
+            "sent", "draft" -> list = emptyList()
+            else -> if (mailbox.isNotEmpty()) list = list.filter { it.mailbox == mailbox }
         }
         if (category.isNotEmpty()) list = list.filter { it.category == category }
         if (keyword.isNotBlank()) {
@@ -342,7 +380,9 @@ object Demo {
             "inbox" to scope.count { it.mailbox == "receive" },
             "unread" to scope.count { it.unread },
             "starred" to scope.count { it.starred },
-            "spam" to 0, "deleted" to 0, "sent" to 0, "draft" to 0,
+            "spam" to scope.count { it.mailbox == "spam" },
+            "deleted" to scope.count { it.mailbox == "deleted" },
+            "sent" to 0, "draft" to 0,
         )
     }
 
@@ -356,7 +396,9 @@ object Demo {
     private fun categoryCounts(q: Map<String, String>): JSONObject {
         val allReceive = q["allReceive"] == "1"
         val accountId = q["accountId"]?.toLongOrNull() ?: 0L
-        val scope = mails.filter { allReceive || accountId == 0L || it.accountId == accountId }
+        val scope = mails.filter {
+            (allReceive || accountId == 0L || it.accountId == accountId) && it.mailbox == "receive"
+        }
         val out = JSONObject()
         listOf("primary", "social", "promotion", "updates", "ads", "spam").forEach {
             out.put(it, scope.count { m -> m.category == it })
@@ -406,11 +448,34 @@ object Demo {
                 .put("list", JSONArray().apply { sorted().filter { it.starred }.forEach { put(mailJson(it)) } })
                 .put("total", sorted().count { it.starred })
             "/email/detail" -> detailJson(q["emailId"]?.toLongOrNull() ?: 0L)
+            "/email/restore" -> {
+                val id = body?.optLong("emailId") ?: q["emailId"]?.toLongOrNull() ?: 0L
+                mails.replaceAll { if (it.id == id && it.mailbox == "deleted") it.copy(mailbox = "receive") else it }
+                JSONObject()
+            }
+            "/email/spamCancel" -> {
+                val id = body?.optLong("emailId") ?: q["emailId"]?.toLongOrNull() ?: 0L
+                // 垃圾箱列表按 category=spam 过滤，取消标记要同时把分类拨回普通
+                mails.replaceAll { if (it.id == id && it.mailbox == "spam") it.copy(mailbox = "receive", category = "primary") else it }
+                JSONObject()
+            }
+            "/email/clearDeleted" -> {
+                val n = mails.count { it.mailbox == "deleted" }
+                mails.removeAll { it.mailbox == "deleted" }
+                JSONObject().put("total", n)
+            }
             "/email/menu-counts" -> menuCounts(q)
             "/email/category-counts" -> categoryCounts(q)
             "/contact/list" -> contactsJson()
             "/my/2fa/status" -> JSONObject().put("enabled", false).put("required", false)
             "/setting/websiteConfig" -> JSONObject()
+                // 登录页的第三方入口按这些开关渲染；演示包给出 GitHub/Google，方便实拍与文档配图
+                .put("githubSwitch", true)
+                .put("githubClientId", "demo-github-client-id")
+                .put("githubCallbackUrl", "otosmail-demo://oauth/github")
+                .put("googleSwitch", true)
+                .put("googleClientId", "demo-google-client-id")
+                .put("googleCallbackUrl", "otosmail-demo://oauth/google")
                 .put("r2Domain", "")
                 .put("regKey", 0)
                 .put("siteName", "OTSMail Demo")
