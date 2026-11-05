@@ -11,7 +11,10 @@ import android.net.Uri
 import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
+import android.util.LruCache
 import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
+import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.compose.foundation.Image
@@ -99,7 +102,12 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.io.ByteArrayInputStream
+import java.io.ByteArrayOutputStream
 import java.io.File
+import java.io.InputStream
+import java.net.HttpURLConnection
+import java.net.URL
 
 /** 详情里「更多」弹出的分类（网页端 emailMoveCategory 的目标分类）。 */
 private val MOVE_TARGETS = listOf(
@@ -111,6 +119,132 @@ private val MOVE_TARGETS = listOf(
 
 /** 详情底栏的写信入口：回复 / 回复全部 / 转发（App 按它决定收件人、主题与正文）。 */
 enum class ReplyAction { REPLY, REPLY_ALL, FORWARD }
+
+/**
+ * 外链图片加载器：点「显示图片」后由 App 自己取图再交给 WebView。
+ * 解决三件事（都是真机上"图片加载不出来"的常见原因）：
+ * 1) https 正文里的 http 图片被混合内容策略拦掉；
+ * 2) 站点防盗链要求同源 Referer；
+ * 3) 部分站点拒绝带 "; wv" 的 WebView UA（换普通 Chrome UA 再试一次）。
+ * 隐私口径不变：默认仍然屏蔽，只有用户主动点「显示图片」才会走到这里。
+ */
+private object InlineImages {
+    private const val MAX_BYTES = 20 * 1024 * 1024
+    private const val BROWSER_UA =
+        "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 (KHTML, like Gecko) " +
+            "Chrome/130.0.0.0 Mobile Safari/537.36"
+
+    /** 透明 1px PNG：取图失败时先顶上，避免 WebView 画出破图图标。 */
+    val transparentPng: ByteArray = android.util.Base64.decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==",
+        android.util.Base64.DEFAULT,
+    )
+
+    private val cache = object : LruCache<String, Pair<String, ByteArray>>(8 * 1024 * 1024) {
+        override fun sizeOf(key: String, value: Pair<String, ByteArray>): Int = value.second.size
+    }
+
+    fun looksLikeImage(request: WebResourceRequest): Boolean {
+        if (request.isForMainFrame) return false
+        val url = request.url?.toString().orEmpty()
+        if (!url.startsWith("http", ignoreCase = true)) return false
+        val path = request.url?.path.orEmpty().lowercase()
+        // WebView 会额外请求站点 favicon（返回 text/html），它不是正文图片，不能计入失败
+        if (path.endsWith(".ico") || path.contains("favicon")) return false
+        // WebView 一般不会给子资源带 Accept，按扩展名兜底
+        if (request.requestHeaders?.get("Accept")?.contains("image/", ignoreCase = true) == true) return true
+        return path.endsWith(".png") || path.endsWith(".jpg") || path.endsWith(".jpeg") ||
+            path.endsWith(".gif") || path.endsWith(".webp") || path.endsWith(".bmp") ||
+            path.endsWith(".svg") || path.endsWith(".avif")
+    }
+
+    fun load(url: String, webViewUa: String): Pair<String, ByteArray>? {
+        cache.get(url)?.let { return it }
+        val referer = runCatching { URL(url).let { "${it.protocol}://${it.host}/" } }.getOrNull()
+        // 默认 UA 已带 "; wv"，wispbyte 这类站反而只放行它；明确拒 wv 的站靠第二档
+        val attempts = listOf(webViewUa to referer, BROWSER_UA to referer)
+        for ((ua, ref) in attempts) {
+            val fetched = tryFetch(url, ua, ref) ?: continue
+            cache.put(url, fetched)
+            return fetched
+        }
+        return null
+    }
+
+    private fun tryFetch(url: String, ua: String, referer: String?): Pair<String, ByteArray>? {
+        val conn = runCatching {
+            (URL(url).openConnection() as HttpURLConnection).apply {
+                connectTimeout = 5000
+                readTimeout = 6000
+                instanceFollowRedirects = true
+                setRequestProperty("User-Agent", ua)
+                setRequestProperty("Accept", "image/avif,image/webp,image/apng,image/*,*/*;q=0.8")
+                if (!referer.isNullOrBlank()) setRequestProperty("Referer", referer)
+            }
+        }.getOrNull() ?: return null
+        return try {
+            val code = conn.responseCode
+            if (code !in 200..299) return null
+            val type = conn.contentType.orEmpty()
+            if (!type.startsWith("image/", ignoreCase = true)) return null
+            val bytes = conn.inputStream.use { readLimited(it, MAX_BYTES) } ?: return null
+            type.substringBefore(';').ifBlank { "image/*" } to bytes
+        } catch (_: Throwable) {
+            null
+        } finally {
+            runCatching { conn.disconnect() }
+        }
+    }
+
+    private fun readLimited(stream: InputStream, max: Int): ByteArray? {
+        val out = ByteArrayOutputStream()
+        val buf = ByteArray(8192)
+        while (true) {
+            val n = stream.read(buf)
+            if (n < 0) break
+            out.write(buf, 0, n)
+            if (out.size() > max) return null
+        }
+        return out.toByteArray()
+    }
+}
+
+private val IMG_TAG = Regex("<img\\b[^>]*>", RegexOption.IGNORE_CASE)
+private val IMG_SRC = Regex("(?i)src\\s*=\\s*[\"']([^\"']+)[\"']")
+private val IMG_SRCSET = Regex("(?i)srcset\\s*=\\s*[\"']([^\"']+)[\"']")
+
+/** 把加载失败的 <img> 换成明确的占位卡片（带「在浏览器打开」），而不是静默空白。 */
+private fun replaceFailedImages(html: String, failed: Set<String>, baseUrl: String): String {
+    if (failed.isEmpty()) return html
+    return IMG_TAG.replace(html) { tag ->
+        val tagHtml = tag.value
+        val candidates = buildList {
+            IMG_SRC.find(tagHtml)?.groupValues?.getOrNull(1)?.let(::add)
+            IMG_SRCSET.find(tagHtml)?.groupValues?.getOrNull(1)?.let { set ->
+                set.split(',').forEach { part -> add(part.trim().substringBefore(' ')) }
+            }
+        }
+        val hit = candidates.firstNotNullOfOrNull { raw -> resolveImageUrl(baseUrl, raw)?.takeIf { it in failed } }
+        if (hit != null) imageFailurePlaceholder(hit) else tagHtml
+    }
+}
+
+private fun resolveImageUrl(baseUrl: String, raw: String): String? {
+    if (raw.isBlank() || raw.startsWith("cid:", ignoreCase = true) ||
+        raw.startsWith("data:", ignoreCase = true)
+    ) {
+        return null
+    }
+    return runCatching { URL(URL(baseUrl), raw.replace("&amp;", "&")).toString() }.getOrNull()
+}
+
+private fun imageFailurePlaceholder(url: String): String {
+    val href = url.replace("&", "&amp;").replace("\"", "&quot;").replace("<", "%3C").replace(">", "%3E")
+    return """<div style="margin:10px 0;padding:16px 12px;border:1px solid #D1D1D6;border-radius:10px;""" +
+        """background:#F2F2F7;text-align:center;color:#636366;font:14px/20px -apple-system,sans-serif">""" +
+        """图片加载失败<br><a href="$href" style="color:#007AFF;text-decoration:none;font-weight:600">在浏览器打开</a></div>"""
+}
+
 
 /**
  * 读信页：对标三星/Google 邮件——通栏无卡片、正文左右 16dp、HTML 图片不超出内容区。
@@ -172,6 +306,22 @@ fun DetailScreen(
     // 默认屏蔽外部图片：图片 URL 往往带追踪参数，直接加载会把 IP 和"已读时间"暴露给发件人。
     // 用户主动点「显示图片」才放行，且只影响当前这封。
     var showImages by remember(emailId) { mutableStateOf(false) }
+    // 点「显示图片」后仍然取不到的 URL：正文里换成占位卡片，顶部给一行可读状态
+    var failedImages by remember(emailId) { mutableStateOf<Set<String>>(emptySet()) }
+    // 后台取图线程只往这里塞，正文重组/重载统一在主线程做，避免边加载边循环重载
+    val failedImageSink = remember(emailId) { java.util.Collections.synchronizedSet(mutableSetOf<String>()) }
+    LaunchedEffect(showImages, emailId) {
+        if (!showImages) {
+            failedImages = emptySet()
+            failedImageSink.clear()
+            return@LaunchedEffect
+        }
+        while (true) {
+            delay(900)
+            val fresh = failedImageSink.toSet() - failedImages
+            if (fresh.isNotEmpty()) failedImages = failedImages + fresh
+        }
+    }
     var busy by remember { mutableStateOf(false) }
     var detailSheet by remember { mutableStateOf(false) }
     var translatedError by remember { mutableStateOf("") }
@@ -510,7 +660,14 @@ fun DetailScreen(
                 val baseHtml = remember(m.content, translated, showingOriginal) {
                     sanitizeEmailHtml(if (translated.isNotEmpty() && !showingOriginal) translated else m.content)
                 }
-                val bodyHtml = baseHtml
+                // 取不到的图片换成占位卡片；这一步只依赖失败集合，单独缓存
+                val bodyHtml = remember(baseHtml, failedImages) {
+                    replaceFailedImages(
+                        baseHtml,
+                        failedImages,
+                        Api.base.removeSuffix("/api") + "/",
+                    )
+                }
                 val extrasHeight = (if (translated.isNotEmpty()) 30.dp else 0.dp) +
                     (if (bodyHtml.isNotBlank()) 30.dp else 0.dp) +
                     (if (m.attachments.isNotEmpty()) (1.dp + 56.dp * m.attachments.size) else 0.dp) +
@@ -540,7 +697,7 @@ fun DetailScreen(
                 }
                 // 图片开关：默认屏蔽远程图片（防 IP/已读回执泄露），用户显式点开才加载。
                 // 正文里没有 <img> 就不显示这条——避免「外部图片已屏蔽」出现在纯文字邮件里。
-                if (bodyHtml.isNotBlank() && bodyHtml.contains("<img", ignoreCase = true)) {
+                if (baseHtml.isNotBlank() && (baseHtml.contains("<img", ignoreCase = true) || failedImages.isNotEmpty())) {
                     Row(
                         Modifier
                             .fillMaxWidth()
@@ -548,11 +705,28 @@ fun DetailScreen(
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         Text(
-                            if (showImages) "外部图片已显示" else "外部图片已屏蔽",
+                            if (failedImages.isNotEmpty()) "${failedImages.size} 张图片加载失败"
+                            else if (showImages) "外部图片已显示" else "外部图片已屏蔽",
                             style = t.caption1,
-                            color = c.label2,
+                            color = if (failedImages.isNotEmpty()) c.red else c.label2,
                         )
                         Spacer(Modifier.weight(1f))
+                        // 取不到的图（含正文外的 CSS 背景图）也给一个明确的去处，不留静默空白
+                        if (failedImages.isNotEmpty()) {
+                            Text(
+                                "在浏览器打开",
+                                style = t.caption1,
+                                color = c.blue,
+                                modifier = Modifier.tapArea {
+                                    runCatching {
+                                        context.startActivity(
+                                            Intent(Intent.ACTION_VIEW, Uri.parse(failedImages.first())),
+                                        )
+                                    }
+                                },
+                            )
+                            Spacer(Modifier.width(12.dp))
+                        }
                         Text(
                             if (showImages) "隐藏图片" else "显示图片",
                             style = t.caption1.copy(fontWeight = FontWeight.Medium),
@@ -611,11 +785,21 @@ fun DetailScreen(
                                     settings.javaScriptEnabled = false
                                     // 默认只放行内联 data: 图片；远程图片的 URL 会泄露 IP 与阅读时间
                                     settings.blockNetworkImage = !showImages
+                                    // 用户点开图片后允许 https 正文里的 http 图片（老邮件常见），
+                                    // 屏蔽态仍然 NEVER_ALLOW
+                                    settings.mixedContentMode = if (showImages) {
+                                        WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
+                                    } else {
+                                        WebSettings.MIXED_CONTENT_NEVER_ALLOW
+                                    }
                                     settings.useWideViewPort = false
                                     settings.loadWithOverviewMode = false
                                     settings.setSupportZoom(false)
                                     settings.builtInZoomControls = false
                                     settings.textZoom = 100
+                                    // shouldInterceptRequest 在后台线程跑，WebView 方法不能跨线程调用：
+                                    // 这里（主线程）先把 UA 读出来给图片取图器用
+                                    val webViewUa = settings.userAgentString.orEmpty()
                                     setBackgroundColor(android.graphics.Color.TRANSPARENT)
                                     webViewClient = object : WebViewClient() {
                                         // 任何跳转都不在应用内打开：http(s) 交给系统浏览器，
@@ -635,6 +819,42 @@ fun DetailScreen(
                                                 }
                                             }
                                             return true
+                                        }
+
+                                        /**
+                                         * 远程图片由 App 自己取（带 UA / 同源 Referer），绕开防盗链与 WebView UA 风控；
+                                         * 失败时回 1px 透明图并记入失败集合，900ms 后正文里的 <img> 换成可点的占位卡片。
+                                         */
+                                        override fun shouldInterceptRequest(
+                                            view: WebView?,
+                                            request: WebResourceRequest?,
+                                        ): WebResourceResponse? {
+                                            val req = request ?: return null
+                                            if (!showImages || !InlineImages.looksLikeImage(req)) return null
+                                            val url = req.url.toString()
+                                            val hit = InlineImages.load(url, webViewUa)
+                                            if (hit != null) {
+                                                return WebResourceResponse(
+                                                    hit.first,
+                                                    null,
+                                                    200,
+                                                    "OK",
+                                                    mapOf(
+                                                        "Cache-Control" to "max-age=3600",
+                                                        "Access-Control-Allow-Origin" to "*",
+                                                    ),
+                                                    ByteArrayInputStream(hit.second),
+                                                )
+                                            }
+                                            failedImageSink.add(url)
+                                            return WebResourceResponse(
+                                                "image/png",
+                                                null,
+                                                200,
+                                                "OK",
+                                                mapOf("Cache-Control" to "no-store"),
+                                                ByteArrayInputStream(InlineImages.transparentPng),
+                                            )
                                         }
                                         // 首帧内容已提交就能量正文，不必等 onPageFinished
                                         // （后者要等所有图片下载完，慢网下会白等 1 秒以上）
@@ -663,6 +883,11 @@ fun DetailScreen(
                                 // 覆盖而不是追加：译文态只渲染译文，原文态渲染原文；都已做过清洗
                                 val html = bodyHtml
                                 wv.settings.blockNetworkImage = !showImages
+                                wv.settings.mixedContentMode = if (showImages) {
+                                    WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
+                                } else {
+                                    WebSettings.MIXED_CONTENT_NEVER_ALLOW
+                                }
                                 val fg = hex(c.label)
                                 val sys = hex(c.label2)
                                 val link = hex(c.blue)
