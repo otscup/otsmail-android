@@ -47,14 +47,28 @@ object MailCache {
 
     const val LIST_TTL = 5 * 60 * 1000L
     const val DETAIL_TTL = 10 * 60 * 1000L
-    private const val RETENTION = 7 * 24 * 60 * 60 * 1000L
+
+    /*
+     * 长期保留（中间档）：
+     * - 用户打开过的正文留 90 天：这是"秒开 + 飞行模式可读"的主要来源；
+     * - 没打开过的正文（未来若做正文预取）只留 1 小时，只当热缓存；
+     * - 每个列表快照留最近 20 页 × 20 封 = 400 行（服务端 size 固定 20）；
+     * - 字节上限按 JSON 长度估算：列表 24MB、正文 32MB。超限先清没打开过的旧正文，再清旧索引页。
+     * 400 的理由：约 20 页 ≈ 正常用户半个月的收件量，再往上翻还能从服务端取；
+     * 24MB ≈ 400 行 × 约 60KB 的头部 JSON，留一倍余量给多账号多分类快照。
+     */
+    const val OPENED_KEEP = 90L * 24 * 60 * 60 * 1000
+    private const val UNOPENED_KEEP = 60L * 60 * 1000
+    const val RETAIN_ROWS_PER_LIST = 400
+    private const val LIST_BUDGET_BYTES = 24L * 1024 * 1024
+    private const val DETAIL_BUDGET_BYTES = 32L * 1024 * 1024
 
     private var db: CacheDb? = null
     private val lists = HashMap<String, ListSnapshot>()
     private val details = HashMap<Long, DetailEntry>()
     private val translations = HashMap<Long, String>()
 
-    private data class DetailEntry(val mail: MailDetail, val at: Long)
+    private data class DetailEntry(val mail: MailDetail, val at: Long, val opened: Boolean)
 
     fun init(context: Context) {
         if (db == null) db = CacheDb(context.applicationContext)
@@ -88,36 +102,55 @@ object MailCache {
 
     // ---------------- 详情 ----------------
 
-    /** 内存里的详情；第二个返回值表示是否还在 TTL 内。 */
+    /** 内存里的详情；第二个返回值表示是否还在 TTL 内（打开过的按长期保留口径）。 */
     fun detailMemory(emailId: Long): Pair<MailDetail, Boolean>? {
         val e = details[emailId] ?: return null
-        return e.mail to (System.currentTimeMillis() - e.at <= DETAIL_TTL)
+        val keep = if (e.opened) OPENED_KEEP else DETAIL_TTL
+        return e.mail to (System.currentTimeMillis() - e.at <= keep)
     }
 
     suspend fun detailDisk(emailId: Long): Pair<MailDetail, Boolean>? = withContext(Dispatchers.IO) {
         val h = db ?: return@withContext null
         h.readableDatabase.query(
-            "detail", arrayOf("json", "updated_at"), "email_id=?",
+            "detail", arrayOf("json", "updated_at", "opened"), "email_id=?",
             arrayOf(emailId.toString()), null, null, null,
         ).use { c ->
             if (!c.moveToFirst()) return@withContext null
             val at = c.getLong(1)
+            val opened = c.getInt(2) == 1
             val mail = runCatching { parseDetail(JSONObject(c.getString(0))) }.getOrNull()
                 ?: return@withContext null
-            mail to (System.currentTimeMillis() - at <= DETAIL_TTL)
+            // 打开过的正文长期不再回源（秒开/离线读）；没打开过的仍按 10 分钟 TTL 判断
+            mail to (System.currentTimeMillis() - at <= if (opened) OPENED_KEEP else DETAIL_TTL)
         }
     }
 
-    suspend fun saveDetail(mail: MailDetail) {
-        details[mail.emailId] = DetailEntry(mail, System.currentTimeMillis())
+    /**
+     * 存正文。opened=true 表示这封是用户真的点开过（长期保留），
+     * false 预留给以后做相邻邮件预取（只当短期热缓存）。
+     */
+    suspend fun saveDetail(mail: MailDetail, opened: Boolean = true) {
+        details[mail.emailId] = DetailEntry(mail, System.currentTimeMillis(), opened)
         withContext(Dispatchers.IO) {
             val h = db ?: return@withContext
-            val cv = ContentValues().apply {
-                put("email_id", mail.emailId)
-                put("json", mail.toJson().toString())
-                put("updated_at", System.currentTimeMillis())
+            val now = System.currentTimeMillis()
+            val json = mail.toJson().toString()
+            val w = h.writableDatabase
+            w.beginTransaction()
+            try {
+                val cv = ContentValues().apply {
+                    put("email_id", mail.emailId)
+                    put("json", json)
+                    put("updated_at", now)
+                    put("opened", if (opened) 1 else 0)
+                    put("bytes", json.length.toLong() * 2)
+                }
+                w.insertWithOnConflict("detail", null, cv, SQLiteDatabase.CONFLICT_REPLACE)
+                trimDetails(w, now)
+                w.setTransactionSuccessful()
+            } finally {
+                w.endTransaction()
             }
-            h.writableDatabase.insertWithOnConflict("detail", null, cv, SQLiteDatabase.CONFLICT_REPLACE)
         }
     }
 
@@ -182,6 +215,8 @@ object MailCache {
                     // 不会因为后一页也返回它而被改到后页（"保留首次出现、页码小者优先"）。
                     w.insertWithOnConflict("list_row", null, cv, SQLiteDatabase.CONFLICT_IGNORE)
                 }
+                // 清理放在写 meta 之前：trim 可能会把本 key 的页码收窄，meta 要写收窄后的值
+                trimLists(w, snap)
                 val meta = ContentValues().apply {
                     put("key", snap.key)
                     put("total", total)
@@ -191,8 +226,6 @@ object MailCache {
                     put("scroll_offset", snap.scrollOffset)
                 }
                 w.insertWithOnConflict("list_meta", null, meta, SQLiteDatabase.CONFLICT_REPLACE)
-                w.delete("list_row", "updated_at<?", arrayOf((now - RETENTION).toString()))
-                w.delete("detail", "updated_at<?", arrayOf((now - RETENTION).toString()))
                 w.setTransactionSuccessful()
             } finally {
                 w.endTransaction()
@@ -224,7 +257,12 @@ object MailCache {
             seen.values.toList()
         }
         if (items.isEmpty()) return@withContext null
-        Pages(items, meta[0] as Int, meta[1] as Int, meta[2] as Long, meta[3] as Int, meta[4] as Int)
+        // meta 里的 page 可能比实际保留的页更大（清理删过整页）：
+        // 以库里真实存在的最大页为准，否则重启后 loadMore 会从缺行的那页继续翻
+        val maxPage = h.readableDatabase.rawQuery(
+            "SELECT COALESCE(MAX(page),0) FROM list_row WHERE key=?", arrayOf(key),
+        ).use { c -> if (c.moveToFirst()) c.getInt(0) else 0 }
+        Pages(items, meta[0] as Int, minOf(meta[1] as Int, maxPage), meta[2] as Long, meta[3] as Int, meta[4] as Int)
     }
 
     suspend fun saveScroll(snap: ListSnapshot) {
@@ -252,7 +290,7 @@ object MailCache {
     }
 
     fun patchDetail(emailId: Long, transform: (MailDetail) -> MailDetail) {
-        details[emailId]?.let { details[emailId] = DetailEntry(transform(it.mail), it.at) }
+        details[emailId]?.let { details[emailId] = DetailEntry(transform(it.mail), it.at, it.opened) }
     }
 
     suspend fun markRead(emailId: Long) {
@@ -454,7 +492,79 @@ object MailCache {
         }.orEmpty(),
     )
 
-    private class CacheDb(context: Context) : SQLiteOpenHelper(context, "otsmail_cache.db", null, 2) {
+    private fun sumBytes(w: SQLiteDatabase, sql: String): Long =
+        w.rawQuery(sql, null).use { c -> if (c.moveToFirst()) c.getLong(0) else 0L }
+
+    /**
+     * 清理顺序（长期缓存的容量约束）：
+     * 1) 没打开过的旧正文（超过 1 小时）；
+     * 2) 打开过但超过 90 天的正文；
+     * 3) 仍超字节上限时，先删没打开过的旧正文，再删打开过里最旧的（每次 20 条，留安全上限防死循环）。
+     */
+    private fun trimDetails(w: SQLiteDatabase, now: Long) {
+        w.delete("detail", "opened=0 AND updated_at<?", arrayOf((now - UNOPENED_KEEP).toString()))
+        w.delete("detail", "updated_at<?", arrayOf((now - OPENED_KEEP).toString()))
+        var bytes = sumBytes(w, "SELECT COALESCE(SUM(bytes),0) FROM detail")
+        var guard = 0
+        while (bytes > DETAIL_BUDGET_BYTES && guard++ < 200) {
+            val cold = w.delete(
+                "detail",
+                "email_id IN (SELECT email_id FROM detail WHERE opened=0 ORDER BY updated_at ASC LIMIT 20)",
+                null,
+            )
+            val deleted = if (cold > 0) cold else w.delete(
+                "detail",
+                "email_id IN (SELECT email_id FROM detail ORDER BY updated_at ASC LIMIT 20)",
+                null,
+            )
+            if (deleted == 0) break
+            bytes = sumBytes(w, "SELECT COALESCE(SUM(bytes),0) FROM detail")
+        }
+    }
+
+    /**
+     * 列表清理：每个快照保留最近 [RETAIN_ROWS_PER_LIST] 行，按整页删除（只删页号最大的），
+     * 保证剩下的 page 从 1 连续，重启后翻页不会跳号缺行；缺的页用户滚到底时会从服务端补。
+     * 再按全库字节上限删「最久没刷新」的 key 的最后一页。
+     */
+    private fun trimLists(w: SQLiteDatabase, snap: ListSnapshot) {
+        val pages = ArrayList<Pair<Int, Int>>()
+        w.rawQuery(
+            "SELECT page, COUNT(*) FROM list_row WHERE key=? GROUP BY page ORDER BY page ASC",
+            arrayOf(snap.key),
+        ).use { c -> while (c.moveToNext()) pages.add(c.getInt(0) to c.getInt(1)) }
+        var rows = 0
+        var lastKept = 0
+        for ((p, n) in pages) {
+            if (rows + n > RETAIN_ROWS_PER_LIST) break
+            rows += n
+            lastKept = p
+        }
+        val maxPage = pages.lastOrNull()?.first ?: 0
+        if (lastKept in 1 until maxPage) {
+            w.delete("list_row", "key=? AND page>?", arrayOf(snap.key, lastKept.toString()))
+            snap.page = minOf(snap.page, lastKept)
+        }
+        var bytes = sumBytes(w, "SELECT COALESCE(SUM(length(json)+64),0) FROM list_row")
+        var guard = 0
+        while (bytes > LIST_BUDGET_BYTES && guard++ < 200) {
+            val victim = w.rawQuery(
+                "SELECT key, MAX(page) FROM list_row GROUP BY key ORDER BY MIN(updated_at) ASC LIMIT 1",
+                null,
+            ).use { c -> if (c.moveToFirst()) c.getString(0) to c.getInt(1) else null } ?: break
+            val (vk, vp) = victim
+            w.delete("list_row", "key=? AND page=?", arrayOf(vk, vp.toString()))
+            // 删的正好是那个 key 的最后一页：把 meta.page 收回来，下次从这页重新拉
+            val remain = w.rawQuery(
+                "SELECT COALESCE(MAX(page),0) FROM list_row WHERE key=?", arrayOf(vk),
+            ).use { c -> if (c.moveToFirst()) c.getInt(0) else 0 }
+            if (remain == 0) w.delete("list_meta", "key=?", arrayOf(vk))
+            else w.execSQL("UPDATE list_meta SET page=? WHERE key=?", arrayOf<Any>(remain, vk))
+            bytes = sumBytes(w, "SELECT COALESCE(SUM(length(json)+64),0) FROM list_row")
+        }
+    }
+
+    private class CacheDb(context: Context) : SQLiteOpenHelper(context, "otsmail_cache.db", null, 3) {
         override fun onCreate(db: SQLiteDatabase) {
             // 主键 (key, email_id)：同一封邮件在一个列表里只允许一行，翻页位移不会叠出重复
             db.execSQL("CREATE TABLE list_row (key TEXT NOT NULL, email_id INTEGER NOT NULL, page INTEGER NOT NULL, pos INTEGER NOT NULL, json TEXT NOT NULL, updated_at INTEGER NOT NULL, PRIMARY KEY(key, email_id))")
@@ -477,6 +587,13 @@ object MailCache {
                         "SELECT key, email_id, page, pos, json, updated_at FROM list_row_v1 ORDER BY page DESC, pos DESC"
                 )
                 db.execSQL("DROP TABLE list_row_v1")
+            }
+            if (oldVersion < 3) {
+                // 长期缓存：正文加「打开过」与估算字节。旧版本存下来的正文都是用户点开过才写的，
+                // 所以默认 opened=1，升级后仍能秒开、不会丢已读内容。
+                db.execSQL("ALTER TABLE detail ADD COLUMN opened INTEGER NOT NULL DEFAULT 1")
+                db.execSQL("ALTER TABLE detail ADD COLUMN bytes INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("UPDATE detail SET bytes = length(json) * 2")
             }
         }
     }

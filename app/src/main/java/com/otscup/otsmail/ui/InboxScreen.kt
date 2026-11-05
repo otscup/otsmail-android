@@ -641,13 +641,24 @@ fun InboxScreen(
         countsJob.join()
     }
 
-    // 下一页预取：首屏稳定 2.5s 后若还有下一页，先取回来放着；
-    // 用户滚到底时直接拼接，不用先看一帧转圈再等一次 RTT。搜索不预取（结果页可能很贵）。
-    LaunchedEffect(listKey, items.size, store.total) {
-        if (keyword.isNotBlank()) return@LaunchedEffect
-        if (items.size != 20 || store.page != 1 || store.total <= 20) return@LaunchedEffect
+    // 首屏预取：首帧出来后顺序取第 2、3 页，供滚到底时直接拼接。
+    // 一次只发一个请求、且首屏刷新/下拉刷新在跑时让路，避免把首屏的 RTT 挤慢；搜索不预取。
+    LaunchedEffect(listKey) {
+        if (keyword.isNotBlank() || store.total <= 20) return@LaunchedEffect
         delay(2500)
-        if (items.size == 20 && store.page == 1 && !store.loadingMore) loadMore()
+        var attempts = 0
+        while (store.page < 3 && items.size < store.total && attempts < 2) {
+            if (store.loading || store.loadingMore) {
+                delay(300)
+                continue
+            }
+            val before = store.page
+            loadMore()
+            attempts++
+            // 预取失败（离线/超时）就停手，不反复重试把网络打满
+            if (store.page == before) break
+            delay(600)
+        }
     }
     // 这里单独给一次强制重拉：首屏失败（弱网/超时）后列表会停在空态，重进入口要能恢复。
     // handledTick 记住本页已经处理过的信号，避免「进详情再返回」时又白刷一次。
