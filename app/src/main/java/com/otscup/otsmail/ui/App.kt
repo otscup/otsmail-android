@@ -56,6 +56,8 @@ private sealed interface Route {
         val draftId: String? = null,
         /** 行内右滑回复：原文还没缓存时先开页，由 ComposeScreen 后台补引用 */
         val quoteEmailId: Long? = null,
+        /** 智能回复点选后带进写信页的正文；其它入口为空 */
+        val body: String = "",
     ) : Route
     data object Settings : Route
     data object Contacts : Route
@@ -339,6 +341,11 @@ fun OtsApp() {
                                     go(Route.Compose("", fwdSubject(m.subject), quoted, mode = "forward"))
                             }
                         },
+                        // 智能回复：点选一条候选才进写信页，收件人/主题按回复规则，不会自动发送
+                        onAiReply = { m, text ->
+                            val quoted = buildQuoteHtml(m.name.ifEmpty { m.from }, m.content)
+                            go(Route.Compose(m.from, reSubject(m.subject), quoted, body = text))
+                        },
                         onToast = toast,
                     )
                 }
@@ -353,6 +360,7 @@ fun OtsApp() {
                         mode = r.mode,
                         quoteEmailId = r.quoteEmailId,
                         draftId = r.draftId,
+                        initialBody = r.body,
                         onOpenDrafts = {
                             // 去草稿箱前把当前草稿 id 补进路由：返回栈里存的就不再是空白写信页
                             val cur = route

@@ -40,6 +40,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.ChevronRight
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.Person
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -81,9 +82,11 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.otscup.otsmail.R
+import com.otscup.otsmail.data.AiConsent
 import com.otscup.otsmail.data.Api
 import com.otscup.otsmail.data.Draft
 import com.otscup.otsmail.data.Drafts
+import com.otscup.otsmail.data.aiErrorText
 import com.otscup.otsmail.data.MailCache
 import com.otscup.otsmail.data.MailItem
 import com.otscup.otsmail.data.Session
@@ -121,6 +124,8 @@ fun ComposeScreen(
     /** 右滑回复时列表只给了 emailId：原文没缓存时在这里后台补引用，不阻塞进写信页 */
     quoteEmailId: Long? = null,
     draftId: String? = null,
+    /** 智能回复点选后带进来的正文；普通新建/回复为空 */
+    initialBody: String = "",
     onOpenDrafts: () -> Unit = {},
     /** 自动保存产出的草稿 id 同步给调用方：401 时路由会被重建，靠它把写信页原样接回来 */
     onDraftId: (String) -> Unit = {},
@@ -154,14 +159,19 @@ fun ComposeScreen(
     var ccInput by remember { mutableStateOf("") }
     var bccInput by remember { mutableStateOf("") }
     var subjectText by remember { mutableStateOf(subject) }
-    var body by remember { mutableStateOf(TextFieldValue("")) }
+    var body by remember { mutableStateOf(TextFieldValue(initialBody)) }
     var quotedHtml by remember { mutableStateOf(quoted) }
     var busy by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf("") }
     var sendFailed by remember { mutableStateOf(false) }
     var draftSaved by remember { mutableStateOf(false) }
     var restoreNote by remember { mutableStateOf("") }
-    var touched by remember { mutableStateOf(false) }
+    var touched by remember { mutableStateOf(initialBody.isNotBlank()) }
+    // AI 润色：替换前留一份快照，支持一次「撤销替换」；无选区时润色全文
+    var polishBusy by remember { mutableStateOf(false) }
+    var polishNote by remember { mutableStateOf("") }
+    var polishUndo by remember { mutableStateOf<TextFieldValue?>(null) }
+    var polishConsent by remember { mutableStateOf(false) }
     // 发送成功后禁止再落盘：否则 onDispose 会把刚删掉的草稿又写回来
     var sentOk by remember { mutableStateOf(false) }
     // 发送后的可撤销窗口（8 秒）：倒计时结束才真正调 /email/send。
@@ -611,6 +621,56 @@ fun ComposeScreen(
         touched = true
     }
 
+    fun runPolish(start: Int, end: Int, source: String, whole: Boolean) {
+        polishBusy = true
+        polishNote = ""
+        scope.launch {
+            runCatching { Api.aiPolish(source) }
+                .onSuccess { out ->
+                    val before = body
+                    val newText = if (whole) out else before.text.substring(0, start) + out + before.text.substring(end)
+                    val caret = if (whole) newText.length else start + out.length
+                    body = TextFieldValue(newText, TextRange(caret))
+                    polishUndo = before
+                    polishNote = "已应用 AI 润色"
+                    touched = true
+                }
+                .onFailure {
+                    Toast.makeText(ctx, "润色失败：${aiErrorText(it)}", Toast.LENGTH_LONG).show()
+                }
+            polishBusy = false
+        }
+    }
+
+    /**
+     * AI 润色：有选区只润色选区，无选区润色全文；成功后替换对应文字并留一份撤销快照。
+     * 失败不改动原文，只提示错误。
+     */
+    fun startPolish() {
+        if (polishBusy) return
+        val sel = body.selection
+        val start = minOf(sel.start, sel.end).coerceIn(0, body.text.length)
+        val end = maxOf(sel.start, sel.end).coerceIn(0, body.text.length)
+        val source = if (start == end) body.text else body.text.substring(start, end)
+        if (source.isBlank()) {
+            Toast.makeText(ctx, "请先输入要润色的内容", Toast.LENGTH_SHORT).show()
+            return
+        }
+        if (AiConsent.needed(ctx)) {
+            polishConsent = true
+            return
+        }
+        runPolish(start, end, source, whole = start == end)
+    }
+
+    fun undoPolish() {
+        val before = polishUndo ?: return
+        body = before
+        polishUndo = null
+        polishNote = ""
+        touched = true
+    }
+
     /** 倒计时结束后的真实发送（带界面反馈）。 */
     suspend fun deliver(p: PendingEmail) {
         delivering = true
@@ -1057,7 +1117,15 @@ fun ComposeScreen(
                     if (body.text.isEmpty()) Text("正文", style = t.body, color = c.label3)
                     BasicTextField(
                         value = body,
-                        onValueChange = { body = it; touched = true },
+                        onValueChange = {
+                            body = it
+                            touched = true
+                            // 用户一旦继续编辑，之前那次润色的撤销快照就失效，避免撤销覆盖新输入
+                            if (polishUndo != null) {
+                                polishUndo = null
+                                polishNote = ""
+                            }
+                        },
                         textStyle = t.body.copy(color = c.label, lineHeight = 22.sp),
                         cursorBrush = SolidColor(c.blue),
                         modifier = Modifier.fillMaxWidth().heightIn(min = 260.dp),
@@ -1164,6 +1232,43 @@ fun ComposeScreen(
             }
         }
 
+        // 润色状态条：正在思考 / 已应用（可撤销替换）
+        if (polishBusy || polishNote.isNotEmpty()) {
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 8.dp)
+                    .height(48.dp)
+                    .clip(RoundedCornerShape(OT.dimens.rMd.dp))
+                    .background(c.toastBg)
+                    .padding(start = 16.dp, end = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    if (polishBusy) "正在思考…" else polishNote,
+                    style = t.footnote,
+                    color = c.onAccent,
+                    modifier = Modifier.weight(1f),
+                )
+                if (!polishBusy && polishUndo != null) {
+                    Box(
+                        Modifier
+                            .height(48.dp)
+                            .clip(RoundedCornerShape(OT.dimens.rMd.dp))
+                            .tapArea { undoPolish() }
+                            .padding(horizontal = 12.dp),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Text(
+                            "撤销替换",
+                            style = t.subhead.copy(fontWeight = FontWeight.SemiBold),
+                            color = c.onAccent,
+                        )
+                    }
+                }
+            }
+        }
+
         // 格式工具条：56dp 高、每项 48dp 点击区、24dp 图标；项多时横向滑动，不换行
         OTDivider(strong = true)
         val toolsScroll = rememberScrollState()
@@ -1201,6 +1306,15 @@ fun ComposeScreen(
                     }
                 }
                 ToolbarIcon(R.drawable.ot_clear, "清除格式") { clearFormat() }
+                // AI 润色：优先作用于选区；没有选区时润色全文
+                ToolbarButton(text = "AI", weight = FontWeight.SemiBold) { startPolish() }
+                if (polishBusy) {
+                    CircularProgressIndicator(
+                        Modifier.size(14.dp),
+                        strokeWidth = 2.dp,
+                        color = c.blue,
+                    )
+                }
             }
             // 右侧渐隐：还有未露出的工具时提示可横向滑动
             if (toolsScroll.value < toolsScroll.maxValue) {
@@ -1213,6 +1327,18 @@ fun ComposeScreen(
                 )
             }
         }
+    }
+
+    // 首次使用 AI 润色前的隐私说明（确认后本机不再提示）
+    if (polishConsent) {
+        AiConsentSheet(
+            onAllow = {
+                AiConsent.accept(ctx)
+                polishConsent = false
+                startPolish()
+            },
+            onCancel = { polishConsent = false },
+        )
     }
 }
 

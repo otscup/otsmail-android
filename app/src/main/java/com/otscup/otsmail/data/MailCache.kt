@@ -428,7 +428,7 @@ object MailCache {
         .put("category", category)
         .put("recipient", JSONArray(recipient))
         .put("cc", JSONArray(cc))
-        .put("attList", JSONArray().also { arr -> attachments.forEach { arr.put(JSONObject().put("filename", it.filename).put("key", it.key)) } })
+        .put("attList", JSONArray().also { arr -> attachments.forEach { arr.put(JSONObject().put("filename", it.filename).put("url", it.url)) } })
 
     private fun parseDetail(o: JSONObject): MailDetail = MailDetail(
         emailId = o.optLong("emailId"),
@@ -442,7 +442,7 @@ object MailCache {
         attachments = o.optJSONArray("attList")?.let { a ->
             (0 until a.length()).mapNotNull { i ->
                 val x = a.optJSONObject(i) ?: return@mapNotNull null
-                MailAtt(x.optString("filename"), x.optString("key"))
+                MailAtt(x.optString("filename"), x.optString("url"))
             }
         }.orEmpty(),
         category = o.optString("category"),

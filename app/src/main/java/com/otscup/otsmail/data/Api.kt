@@ -32,6 +32,19 @@ fun friendlyError(e: Throwable): String {
     }
 }
 
+/**
+ * AI 接口的失败文案：服务端没配 aiApiKey 时 Worker 回 503「AI 服务未配置，请联系管理员」，
+ * 这里统一成产品要求的「AI 服务未配置，请联系服务器管理员」，不把别的错误伪装成这句话。
+ */
+fun aiErrorText(e: Throwable): String {
+    val m = e.message.orEmpty()
+    return when {
+        e is ApiException && (e.httpCode == 503 || m.contains("AI 服务未配置") || m.contains("not configured", true)) ->
+            "AI 服务未配置，请联系服务器管理员"
+        else -> friendlyError(e).ifEmpty { "AI 请求失败，请稍后重试" }
+    }
+}
+
 data class MailItem(
     val emailId: Long,
     val from: String,
@@ -55,7 +68,11 @@ data class MailItem(
     val userEmail: String = "",
 )
 
-data class MailAtt(val filename: String, val key: String)
+/**
+ * 附件：只用服务端 attList 里的签名 url（带 uid/exp/sig），不再拿 key 拼存储地址。
+ * url 可能是相对路径（/attachments/...），展示前用 [Api.attachmentUrl] 补全站点的 origin。
+ */
+data class MailAtt(val filename: String, val url: String = "")
 
 data class MailDetail(
     val emailId: Long,
@@ -108,9 +125,6 @@ object Api {
     @Volatile var base: String = ""
 
     @Volatile var token: String = ""
-
-    /** 站点存储域名（websiteConfig 的 r2Domain），附件下载拼 URL 用。 */
-    @Volatile var r2Domain: String = ""
 
     private suspend fun raw(
         method: String,
@@ -180,9 +194,7 @@ object Api {
     }
 
     /** GET /setting/websiteConfig：登录前可读的站点配置（注册开关/域名/第三方登录等）。 */
-    suspend fun websiteConfig(): JSONObject = obj("GET", "/setting/websiteConfig").also {
-        r2Domain = it.optString("r2Domain")
-    }
+    suspend fun websiteConfig(): JSONObject = obj("GET", "/setting/websiteConfig")
 
     /** GET /oauth/oidc/config：企业 SSO 授权端点与公开 clientId。 */
     suspend fun oidcConfig(providerId: String): JSONObject {
@@ -213,15 +225,25 @@ object Api {
         return data.optString("token")
     }
 
-    /** 附件下载地址：服务端只存 key，和网页端 cvtR2Url 同一套规则拼 URL。 */
-    fun fileUrl(key: String): String {
-        val k = key.trim()
-        if (k.isEmpty()) return ""
-        if (k.startsWith("http://") || k.startsWith("https://")) return k
-        val domain = r2Domain.trim()
-        if (domain.isEmpty()) return base.removeSuffix("/api") + "/" + k
-        val d = if (domain.startsWith("http")) domain else "https://$domain"
-        return d.trimEnd('/') + "/" + k
+    /**
+     * 附件地址：一律用服务端 attList 里的签名 url。
+     * 服务端返回的是相对路径（/attachments/xxx?uid=&exp=&sig=），这里补站点 origin；
+     * url 缺失时返回空串，调用方必须提示「附件地址不可用」，不能拿 key 再拼旧路径。
+     */
+    fun attachmentUrl(raw: String): String {
+        val u = raw.trim()
+        if (u.isEmpty()) return ""
+        if (u.startsWith("http://", true) || u.startsWith("https://", true) || u.startsWith("data:", true)) return u
+        val origin = runCatching {
+            val uri = java.net.URI(base.trimEnd('/'))
+            "${uri.scheme}://${uri.authority}"
+        }.getOrNull().orEmpty()
+        if (origin.isEmpty()) return ""
+        return when {
+            u.startsWith("//") -> "https:$u"
+            u.startsWith("/") -> origin + u
+            else -> "$origin/$u"
+        }
     }
 
     // ---- 推送设备登记（服务端接口尚未实现，失败由 PushManager 静默处理）----
@@ -424,6 +446,41 @@ object Api {
         return d.optString("reply") to acts
     }
 
+    /**
+     * POST /ai/summary {emailId, lang} → {text}。
+     * 服务端要先取正文再等模型，读超时统一放宽到 60 秒。
+     */
+    suspend fun aiSummary(emailId: Long, lang: String = "zh"): String {
+        val d = obj(
+            "POST", "/ai/summary",
+            JSONObject().put("emailId", emailId).put("lang", lang),
+            readTimeoutMs = 60_000,
+        )
+        val text = d.optString("text").trim()
+        if (text.isEmpty()) throw ApiException(502, "AI 未返回摘要")
+        return text
+    }
+
+    /** POST /ai/polish {text} → {text}；只传待润色文字，不传整封邮件。 */
+    suspend fun aiPolish(text: String, lang: String = ""): String {
+        val body = JSONObject().put("text", text)
+        if (lang.isNotEmpty()) body.put("lang", lang)
+        val d = obj("POST", "/ai/polish", body, readTimeoutMs = 60_000)
+        val out = d.optString("text").trim()
+        if (out.isEmpty()) throw ApiException(502, "AI 未返回润色结果")
+        return out
+    }
+
+    /** POST /ai/reply {emailId, tone} → {subject, text}；tone 用来生成不同语气的候选。 */
+    suspend fun aiReply(emailId: Long, tone: String = ""): Pair<String, String> {
+        val body = JSONObject().put("emailId", emailId)
+        if (tone.isNotEmpty()) body.put("tone", tone)
+        val d = obj("POST", "/ai/reply", body, readTimeoutMs = 60_000)
+        val text = d.optString("text").trim()
+        if (text.isEmpty()) throw ApiException(502, "AI 未返回回复内容")
+        return d.optString("subject") to text
+    }
+
     // ---- 系统设置（需要 setting:set 权限，默认管理员）----
 
     /** GET /setting/query：AI 的 Key 会以 sk-xxxx****** 打码返回。 */
@@ -611,7 +668,7 @@ object Api {
             attachments = d.optJSONArray("attList")?.let { a ->
                 (0 until a.length()).mapNotNull { i ->
                     val o = a.optJSONObject(i) ?: return@mapNotNull null
-                    MailAtt(o.optString("filename"), o.optString("key"))
+                    MailAtt(o.optString("filename"), o.optString("url"))
                 }
             }.orEmpty(),
             category = d.optString("category"),

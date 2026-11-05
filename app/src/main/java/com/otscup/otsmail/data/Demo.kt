@@ -1,7 +1,15 @@
 package com.otscup.otsmail.data
 
 import android.content.Context
+import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.LinearGradient
+import android.graphics.Paint
+import android.graphics.Shader
+import android.graphics.Typeface
+import android.graphics.pdf.PdfDocument
 import android.util.Base64
 import com.otscup.otsmail.BuildConfig
 import org.json.JSONArray
@@ -103,7 +111,11 @@ object Demo {
                 <p>— Lumen Cloud Billing</p>
             """.trimIndent(),
             minutesAgo = 96, unread = true, category = "updates",
-            attachments = listOf("invoice-2026-1187.pdf" to "demo/invoice-2026-1187.pdf"),
+            // 演示附件：url 字段由下面生成 data URL，离线也能真实预览图片与 PDF
+            attachments = listOf(
+                "invoice-2026-1187.pdf" to "pdf",
+                "receipt-photo.jpg" to "image",
+            ),
         ),
         Mail(
             id = 9003, accountId = 2,
@@ -319,10 +331,110 @@ object Demo {
                 "attList",
                 JSONArray().apply {
                     m.attachments.forEach {
-                        put(JSONObject().put("filename", it.first).put("key", it.second))
+                        val url = when (it.second) {
+                            "pdf" -> demoPdfDataUrl()
+                            "image" -> demoImageDataUrl()
+                            else -> it.second
+                        }
+                        put(JSONObject().put("filename", it.first).put("url", url))
                     }
                 },
             )
+    }
+
+    // ---- 演示附件：本地生成的 data URL，离线也能验证缩略图/全屏预览/PDF 首页渲染 ----
+
+    @Volatile private var demoImage: String? = null
+    @Volatile private var demoPdf: String? = null
+
+    private fun demoImageDataUrl(): String {
+        demoImage?.let { return it }
+        val w = 720
+        val h = 480
+        val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(bmp)
+        val p = Paint(Paint.ANTI_ALIAS_FLAG)
+        p.shader = LinearGradient(
+            0f, 0f, w.toFloat(), h.toFloat(),
+            Color.parseColor("#E8F0FE"), Color.parseColor("#FCE8E6"),
+            Shader.TileMode.CLAMP,
+        )
+        canvas.drawRect(0f, 0f, w.toFloat(), h.toFloat(), p)
+        p.shader = null
+        p.color = Color.parseColor("#1A73E8")
+        canvas.drawCircle(596f, 108f, 64f, p)
+        p.color = Color.parseColor("#202124")
+        p.typeface = Typeface.DEFAULT_BOLD
+        p.textSize = 34f
+        canvas.drawText("Lumen Cloud", 52f, 96f, p)
+        p.typeface = Typeface.DEFAULT
+        p.textSize = 22f
+        canvas.drawText("Payment receipt · invoice 2026-1187", 52f, 142f, p)
+        p.color = Color.WHITE
+        canvas.drawRoundRect(52f, 196f, 668f, 428f, 18f, 18f, p)
+        p.color = Color.parseColor("#5F6368")
+        p.textSize = 18f
+        canvas.drawText("Amount paid", 84f, 248f, p)
+        p.color = Color.parseColor("#202124")
+        p.textSize = 40f
+        canvas.drawText("\$24.00", 84f, 300f, p)
+        p.textSize = 18f
+        p.color = Color.parseColor("#5F6368")
+        canvas.drawText("November 2026 · Visa ending 4242", 84f, 344f, p)
+        canvas.drawText("Demo image generated locally for preview.", 84f, 392f, p)
+        val out = ByteArrayOutputStream()
+        bmp.compress(Bitmap.CompressFormat.JPEG, 82, out)
+        bmp.recycle()
+        val url = "data:image/jpeg;base64," + Base64.encodeToString(out.toByteArray(), Base64.NO_WRAP)
+        demoImage = url
+        return url
+    }
+
+    private fun demoPdfDataUrl(): String {
+        demoPdf?.let { return it }
+        val doc = PdfDocument()
+        val page = doc.startPage(PdfDocument.PageInfo.Builder(595, 842, 1).create())
+        val canvas = page.canvas
+        val p = Paint(Paint.ANTI_ALIAS_FLAG)
+        p.color = Color.parseColor("#202124")
+        p.typeface = Typeface.DEFAULT_BOLD
+        p.textSize = 26f
+        canvas.drawText("Lumen Cloud", 56f, 96f, p)
+        p.textSize = 38f
+        canvas.drawText("Invoice #2026-1187", 56f, 158f, p)
+        p.typeface = Typeface.DEFAULT
+        p.textSize = 18f
+        p.color = Color.parseColor("#5F6368")
+        canvas.drawText("Billed to Demo Lin · November 2026", 56f, 196f, p)
+        p.color = Color.parseColor("#DADCE0")
+        canvas.drawRect(56f, 236f, 539f, 238f, p)
+        p.color = Color.parseColor("#202124")
+        p.textSize = 20f
+        canvas.drawText("Workspace", 56f, 286f, p)
+        canvas.drawText("Billing period", 56f, 326f, p)
+        canvas.drawText("Payment method", 56f, 366f, p)
+        canvas.drawText("Status", 56f, 406f, p)
+        p.color = Color.parseColor("#5F6368")
+        canvas.drawText("demo-team", 260f, 286f, p)
+        canvas.drawText("November 2026", 260f, 326f, p)
+        canvas.drawText("Visa ending 4242", 260f, 366f, p)
+        p.color = Color.parseColor("#1A73E8")
+        canvas.drawText("Paid", 260f, 406f, p)
+        p.color = Color.parseColor("#DADCE0")
+        canvas.drawRect(56f, 436f, 539f, 438f, p)
+        p.color = Color.parseColor("#202124")
+        p.textSize = 26f
+        canvas.drawText("Total  \$24.00", 56f, 500f, p)
+        p.color = Color.parseColor("#9AA0A6")
+        p.textSize = 16f
+        canvas.drawText("Demo PDF generated locally for attachment preview.", 56f, 790f, p)
+        doc.finishPage(page)
+        val out = ByteArrayOutputStream()
+        doc.writeTo(out)
+        doc.close()
+        val url = "data:application/pdf;base64," + Base64.encodeToString(out.toByteArray(), Base64.NO_WRAP)
+        demoPdf = url
+        return url
     }
 
     private fun queryOf(path: String): Map<String, String> =
@@ -498,6 +610,9 @@ object Demo {
             }
             "/email/menu-counts" -> menuCounts(q)
             "/email/category-counts" -> categoryCounts(q)
+            // 演示包没有真实 AI：按服务端「未配置」的 503 回应，方便验证提示文案，绝不编造摘要
+            "/ai/summary", "/ai/polish", "/ai/reply" ->
+                throw ApiException(503, "AI 服务未配置，请联系管理员")
             "/contact/list" -> contactsJson()
             "/my/2fa/status" -> JSONObject().put("enabled", false).put("required", false)
             "/setting/websiteConfig" -> JSONObject()

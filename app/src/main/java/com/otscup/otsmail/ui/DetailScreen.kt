@@ -1,13 +1,20 @@
 package com.otscup.otsmail.ui
 
 import android.app.DownloadManager
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
+import android.graphics.Bitmap
 import android.net.Uri
+import android.os.Build
 import android.os.Environment
+import android.provider.MediaStore
 import android.webkit.WebResourceRequest
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -24,7 +31,10 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.outlined.AttachFile
@@ -34,12 +44,15 @@ import androidx.compose.material.icons.outlined.FilterList
 import androidx.compose.material.icons.outlined.KeyboardArrowDown
 import androidx.compose.material.icons.outlined.KeyboardArrowUp
 import androidx.compose.material.icons.outlined.StarBorder
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -49,24 +62,44 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupProperties
 import com.otscup.otsmail.R
+import com.otscup.otsmail.data.AiConsent
 import com.otscup.otsmail.data.Api
+import com.otscup.otsmail.data.AttachmentTooLarge
+import com.otscup.otsmail.data.AttachmentUnavailable
+import com.otscup.otsmail.data.Attachments
+import com.otscup.otsmail.data.MailAtt
 import com.otscup.otsmail.data.MailCache
 import com.otscup.otsmail.data.MailDetail
+import com.otscup.otsmail.data.aiErrorText
 import com.otscup.otsmail.data.friendlyError
 import com.otscup.otsmail.ui.theme.OT
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.io.File
 
 /** 详情里「更多」弹出的分类（网页端 emailMoveCategory 的目标分类）。 */
 private val MOVE_TARGETS = listOf(
@@ -89,6 +122,8 @@ fun DetailScreen(
     emailId: Long,
     onBack: () -> Unit,
     onReply: (MailDetail, ReplyAction) -> Unit,
+    /** 智能回复点选后带进写信页；点选前绝不自动发出 */
+    onAiReply: (MailDetail, String) -> Unit = { _, _ -> },
     onToast: (String) -> Unit = {},
 ) {
     val t = OT.type
@@ -146,6 +181,25 @@ fun DetailScreen(
     /** 无缓存 + 拉正文失败（服务端 501 / 超时）：给「重试」，别把失败伪装成「没有正文」 */
     var loadFailed by remember { mutableStateOf(false) }
     var reloadTick by remember { mutableStateOf(0) }
+    // AI 摘要 / 智能回复 sheet：""=关闭，summary/reply=对应能力
+    var aiSheet by remember { mutableStateOf("") }
+    var aiBusy by remember { mutableStateOf(false) }
+    var aiSummary by remember { mutableStateOf("") }
+    var aiReplies by remember { mutableStateOf(listOf<Pair<String, String>>()) }
+    var aiError by remember { mutableStateOf("") }
+    /** 隐私提示只在第一次弹；弹完后接着执行对应动作 */
+    var aiConsentFor by remember { mutableStateOf("") }
+    // 附件缩略图要等正文画完再取，避免和开信抢解码/下载
+    var thumbReady by remember(currentId) { mutableStateOf(false) }
+    // 全屏预览：图片按下标在 imageAtts 里切换；PDF 单页预览
+    var imageView by remember { mutableStateOf(-1) }
+    var pdfView by remember { mutableStateOf<MailAtt?>(null) }
+    LaunchedEffect(bodyReady, loadingBody, currentId) {
+        if (!loadingBody || bodyReady) {
+            delay(300)
+            thumbReady = true
+        }
+    }
 
     LaunchedEffect(currentId, reloadTick) {
         error = ""
@@ -202,6 +256,59 @@ fun DetailScreen(
     }
 
     val m = mail
+    /** 同一封邮件里的图片附件：全屏预览可左右切换 */
+    val imageAtts = m?.attachments?.filter {
+        Attachments.kindOf(it.filename) == Attachments.Kind.IMAGE && it.url.isNotBlank()
+    } ?: emptyList()
+
+    /** 智能回复候选：不同语气各请求一次；点选前不发送。 */
+    fun runAi(kind: String, d: MailDetail) {
+        when (kind) {
+            "summary" -> {
+                aiSheet = "summary"
+                aiBusy = true
+                aiSummary = ""
+                aiError = ""
+                scope.launch {
+                    runCatching { Api.aiSummary(d.emailId) }
+                        .onSuccess { aiSummary = it }
+                        .onFailure { aiError = aiErrorText(it) }
+                    aiBusy = false
+                }
+            }
+            "reply" -> {
+                aiSheet = "reply"
+                aiBusy = true
+                aiReplies = emptyList()
+                aiError = ""
+                scope.launch {
+                    val tones = listOf("简洁" to "concise", "友好" to "friendly", "正式" to "formal")
+                    // 三个语气并发请求；单个失败不影响其它候选，全部失败才显示错误
+                    val results = coroutineScope {
+                        tones.map { (label, tone) ->
+                            async { label to runCatching { Api.aiReply(d.emailId, tone) } }
+                        }.awaitAll()
+                    }
+                    aiReplies = results.mapNotNull { (label, r) -> r.getOrNull()?.let { label to it.second } }
+                    if (aiReplies.isEmpty()) {
+                        aiError = aiErrorText(results.mapNotNull { it.second.exceptionOrNull() }.firstOrNull()
+                            ?: RuntimeException("AI 未返回候选回复"))
+                    }
+                    aiBusy = false
+                }
+            }
+        }
+    }
+
+    /** 首次使用 AI 前先给隐私说明；确认后不再弹。 */
+    fun requestAi(kind: String) {
+        val d = mail ?: return
+        if (AiConsent.needed(context)) {
+            aiConsentFor = kind
+        } else {
+            runAi(kind, d)
+        }
+    }
 
     if (detailSheet && m != null) {
         OTSheet(onDismiss = { detailSheet = false }) {
@@ -260,6 +367,78 @@ fun DetailScreen(
             }
             Spacer(Modifier.height(12.dp))
         }
+    }
+
+    // AI 摘要 / 智能回复：结果单独用 sheet 展示，绝不替换正文
+    if (aiSheet.isNotEmpty()) {
+        OTSheet(onDismiss = { if (!aiBusy) aiSheet = "" }) {
+            Column(Modifier.fillMaxWidth().padding(horizontal = 20.dp).padding(bottom = 24.dp)) {
+                if (aiSheet == "summary") {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("AI 摘要", style = t.title3, color = c.label, modifier = Modifier.weight(1f))
+                        Text("由 AI 生成", style = t.caption1, color = c.label2)
+                    }
+                    Spacer(Modifier.height(12.dp))
+                    when {
+                        aiBusy -> Row(verticalAlignment = Alignment.CenterVertically) {
+                            CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp, color = c.blue)
+                            Spacer(Modifier.width(10.dp))
+                            Text("正在思考…", style = t.body, color = c.label2)
+                        }
+                        aiError.isNotEmpty() -> Text(aiError, style = t.footnote, color = c.red)
+                        else -> SelectionContainer { Text(aiSummary, style = t.body, color = c.label) }
+                    }
+                    if (!aiBusy && aiError.isEmpty() && aiSummary.isNotBlank()) {
+                        Spacer(Modifier.height(16.dp))
+                        OTPrimaryButton("复制摘要") {
+                            copyToClipboard(context, "AI 摘要", aiSummary)
+                            onToast("已复制摘要")
+                        }
+                    }
+                } else {
+                    Text("智能回复", style = t.title3, color = c.label)
+                    Spacer(Modifier.height(4.dp))
+                    Text("选择一条带入写信页，不会自动发送", style = t.footnote, color = c.label2)
+                    Spacer(Modifier.height(12.dp))
+                    when {
+                        aiBusy -> Row(verticalAlignment = Alignment.CenterVertically) {
+                            CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp, color = c.blue)
+                            Spacer(Modifier.width(10.dp))
+                            Text("正在思考…（生成 3 条候选）", style = t.body, color = c.label2)
+                        }
+                        aiError.isNotEmpty() -> Text(aiError, style = t.footnote, color = c.red)
+                        else -> aiReplies.forEachIndexed { i, (label, text) ->
+                            if (i > 0) OTDivider(inset = 0)
+                            Column(
+                                Modifier
+                                    .fillMaxWidth()
+                                    .tapArea {
+                                        aiSheet = ""
+                                        m?.let { onAiReply(it, text) }
+                                    }
+                                    .padding(vertical = 10.dp),
+                            ) {
+                                Text(label, style = t.caption1.copy(fontWeight = FontWeight.SemiBold), color = c.blue)
+                                Spacer(Modifier.height(2.dp))
+                                Text(text, style = t.body, color = c.label, maxLines = 4)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if (aiConsentFor.isNotEmpty()) {
+        AiConsentSheet(
+            onAllow = {
+                AiConsent.accept(context)
+                val kind = aiConsentFor
+                aiConsentFor = ""
+                mail?.let { runAi(kind, it) }
+            },
+            onCancel = { aiConsentFor = "" },
+        )
     }
 
     Box(
@@ -332,7 +511,7 @@ fun DetailScreen(
                 )
                 val extrasHeight = (if (translated.isNotEmpty()) 30.dp else 0.dp) +
                     (if (bodyHtml.isNotBlank()) 30.dp else 0.dp) +
-                    (if (m.attachments.isNotEmpty()) (1.dp + 44.dp * m.attachments.size) else 0.dp) +
+                    (if (m.attachments.isNotEmpty()) (1.dp + 56.dp * m.attachments.size) else 0.dp) +
                     (if (translatedError.isNotEmpty()) 26.dp else 0.dp)
                 // 正文槽位 = 剩余高度 - 12dp 上边距 - 译文提示/附件/错误占位
                 val bodySlot = (maxHeight - 12.dp - extrasHeight).coerceAtLeast(64.dp)
@@ -562,23 +741,35 @@ blockquote{margin:8px 0;padding-left:10px;border-left:3px solid $quote;color:$sy
                     }
                 }
 
-                // 附件：平铺列表，不再套卡片；点按走系统下载（服务端只给 key，地址在本端拼）
+                // 附件：图片/PDF 行内缩略图（正文画完后再懒加载），点开预览；其它类型仍走下载。
+                // 地址只用 attList 的签名 url，url 缺失时明确提示，不再拿 key 拼旧路径。
                 if (m.attachments.isNotEmpty()) {
                     Column(Modifier.fillMaxWidth().padding(top = 8.dp)) {
                         OTDivider(inset = 16, strong = true)
                         m.attachments.forEach { att ->
-                            Row(
-                                Modifier
-                                    .fillMaxWidth()
-                                    .heightIn(min = 44.dp)
-                                    .tapArea { downloadAttachment(context, att.key, att.filename, onToast) }
-                                    .padding(horizontal = 20.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                            ) {
-                                Icon(painterResource(R.drawable.ot_link), contentDescription = null, tint = c.label2, modifier = Modifier.size(18.dp))
-                                Spacer(Modifier.width(8.dp))
-                                Text(att.filename.ifEmpty { "附件" }, style = t.subhead, color = c.label, maxLines = 1, modifier = Modifier.weight(1f))
-                            }
+                            val kind = Attachments.kindOf(att.filename)
+                            val url = Api.attachmentUrl(att.url)
+                            AttachmentRow(
+                                filename = att.filename,
+                                kind = kind,
+                                url = url,
+                                ready = thumbReady,
+                                onPreview = {
+                                    when {
+                                        url.isEmpty() -> onToast("附件地址不可用")
+                                        kind == Attachments.Kind.IMAGE -> {
+                                            val i = imageAtts.indexOfFirst { it.url == att.url && it.filename == att.filename }
+                                            if (i >= 0) imageView = i else onToast("附件地址不可用")
+                                        }
+                                        kind == Attachments.Kind.PDF -> pdfView = att
+                                        else -> downloadAttachment(context, url, att.filename, onToast, scope)
+                                    }
+                                },
+                                onDownload = {
+                                    if (url.isEmpty()) onToast("附件地址不可用")
+                                    else downloadAttachment(context, url, att.filename, onToast, scope)
+                                },
+                            )
                         }
                     }
                 }
@@ -608,6 +799,25 @@ blockquote{margin:8px 0;padding-left:10px;border-left:3px solid $quote;color:$sy
                     }),
                     Triple("⋯", "更多", { moreOpen = true }),
                 ),
+            )
+        }
+
+        if (imageView >= 0 && imageAtts.isNotEmpty()) {
+            ImagePreviewDialog(
+                attachments = imageAtts,
+                startIndex = imageView.coerceIn(0, imageAtts.size - 1),
+                onDismiss = { imageView = -1 },
+                onSave = { att, bmp -> scope.launch { saveImageToGallery(context, att.filename, bmp, onToast) } },
+                onDownload = { att -> downloadAttachment(context, Api.attachmentUrl(att.url), att.filename, onToast, scope) },
+            )
+        }
+        pdfView?.let { att ->
+            val url = Api.attachmentUrl(att.url)
+            PdfPreviewDialog(
+                filename = att.filename,
+                url = url,
+                onDismiss = { pdfView = null },
+                onDownload = { downloadAttachment(context, url, att.filename, onToast, scope) },
             )
         }
 
@@ -731,6 +941,14 @@ blockquote{margin:8px 0;padding-left:10px;border-left:3px solid $quote;color:$sy
                                 }
                             }
                         }
+                        MoreItem("AI 摘要") {
+                            moreOpen = false
+                            requestAi("summary")
+                        }
+                        MoreItem("智能回复") {
+                            moreOpen = false
+                            requestAi("reply")
+                        }
                         MoreItem("移动") {
                             moreOpen = false
                             moveSheet = true
@@ -748,6 +966,370 @@ blockquote{margin:8px 0;padding-left:10px;border-left:3px solid $quote;color:$sy
             }
         }
     }
+}
+
+/** 附件行：图片/PDF 有 40dp 缩略图，其它类型保持纸夹图标；右侧固定「下载」。 */
+@Composable
+private fun AttachmentRow(
+    filename: String,
+    kind: Attachments.Kind,
+    url: String,
+    ready: Boolean,
+    onPreview: () -> Unit,
+    onDownload: () -> Unit,
+) {
+    val t = OT.type
+    val c = OT.colors
+    val context = LocalContext.current
+    val density = LocalDensity.current
+    val thumbPx = with(density) { 80.dp.roundToPx() }
+    var thumb by remember(url) { mutableStateOf<Bitmap?>(null) }
+    var thumbError by remember(url) { mutableStateOf("") }
+    // 只在正文画完（ready）后取一次缩略图；不打开详情就预取全部附件
+    LaunchedEffect(url, ready, kind) {
+        if (!ready || kind == Attachments.Kind.OTHER) return@LaunchedEffect
+        if (url.isEmpty()) {
+            thumbError = "附件地址不可用"
+            return@LaunchedEffect
+        }
+        runCatching { Attachments.thumbnail(context, url, kind, thumbPx) }
+            .onSuccess { if (it == null) thumbError = "无法预览，可下载查看" else thumb = it }
+            .onFailure { e ->
+                thumbError = when (e) {
+                    is AttachmentTooLarge -> "附件超过 10MB，请下载查看"
+                    is AttachmentUnavailable -> "附件地址不可用"
+                    else -> "预览失败，可下载查看"
+                }
+            }
+    }
+
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .heightIn(min = 56.dp)
+            // 缩略图超过 10MB 或解码失败时，点按回落到下载，而不是继续进预览
+            .tapArea { if (thumbError.isNotEmpty()) onDownload() else onPreview() }
+            .padding(horizontal = 20.dp, vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(
+            Modifier.size(40.dp).clip(RoundedCornerShape(6.dp)).background(c.separatorSoft),
+            contentAlignment = Alignment.Center,
+        ) {
+            val bmp = thumb
+            when {
+                bmp != null -> Image(
+                    bitmap = bmp.asImageBitmap(),
+                    contentDescription = filename,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize(),
+                )
+                thumbError.isEmpty() && kind != Attachments.Kind.OTHER && ready ->
+                    CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp, color = c.blue)
+                else -> Icon(
+                    painterResource(R.drawable.ot_link),
+                    contentDescription = null,
+                    tint = c.label2,
+                    modifier = Modifier.size(18.dp),
+                )
+            }
+        }
+        Spacer(Modifier.width(10.dp))
+        Column(Modifier.weight(1f)) {
+            Text(
+                filename.ifEmpty { "附件" },
+                style = t.subhead,
+                color = c.label,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            if (thumbError.isNotEmpty()) {
+                Text(thumbError, style = t.caption1, color = c.red, maxLines = 1)
+            } else if (kind == Attachments.Kind.IMAGE || kind == Attachments.Kind.PDF) {
+                Text(
+                    if (kind == Attachments.Kind.PDF) "PDF · 点按预览首页" else "图片 · 点按预览",
+                    style = t.caption1,
+                    color = c.label2,
+                    maxLines = 1,
+                )
+            }
+        }
+        Text(
+            "下载",
+            style = t.footnote.copy(fontWeight = FontWeight.SemiBold),
+            color = c.blue,
+            modifier = Modifier
+                .clip(RoundedCornerShape(8.dp))
+                .tapArea(onDownload)
+                .padding(horizontal = 8.dp, vertical = 6.dp),
+        )
+    }
+}
+
+/** 图片全屏预览：左右滑动切换同封内的图片，可保存到相册；失败给明确失败态。 */
+@Composable
+private fun ImagePreviewDialog(
+    attachments: List<MailAtt>,
+    startIndex: Int,
+    onDismiss: () -> Unit,
+    onSave: (MailAtt, Bitmap) -> Unit,
+    onDownload: (MailAtt) -> Unit,
+) {
+    val t = OT.type
+    val c = OT.colors
+    val context = LocalContext.current
+    val config = LocalConfiguration.current
+    val density = LocalDensity.current
+    val screenPx = with(density) { maxOf(config.screenWidthDp, config.screenHeightDp).dp.roundToPx() }
+    val pager = rememberPagerState(initialPage = startIndex) { attachments.size }
+    var error by remember { mutableStateOf("") }
+    var loaded by remember(pager.currentPage) { mutableStateOf<Bitmap?>(null) }
+    val current = attachments.getOrNull(pager.currentPage)
+
+    LaunchedEffect(pager.currentPage, current?.url) {
+        loaded = null
+        error = ""
+        val att = current ?: return@LaunchedEffect
+        val url = Api.attachmentUrl(att.url)
+        if (url.isEmpty()) {
+            error = "附件地址不可用"
+            return@LaunchedEffect
+        }
+        runCatching { Attachments.image(context, url, screenPx) }
+            .onSuccess { if (it == null) error = "图片解码失败，请下载查看" else loaded = it }
+            .onFailure { e ->
+                error = when (e) {
+                    is AttachmentTooLarge -> "图片超过 10MB，请下载查看"
+                    is AttachmentUnavailable -> "附件地址不可用"
+                    else -> "预览失败，请下载查看"
+                }
+            }
+    }
+
+    Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+        Box(Modifier.fillMaxSize().background(Color.Black)) {
+            val bmp = loaded
+            if (bmp != null) {
+                HorizontalPager(state = pager, modifier = Modifier.fillMaxSize()) { page ->
+                    val pageBmp = if (page == pager.currentPage) bmp else null
+                    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                        if (pageBmp != null) {
+                            Image(
+                                bitmap = pageBmp.asImageBitmap(),
+                                contentDescription = attachments.getOrNull(page)?.filename,
+                                contentScale = ContentScale.Fit,
+                                modifier = Modifier.fillMaxSize(),
+                            )
+                        }
+                    }
+                }
+            } else {
+                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    if (error.isNotEmpty()) {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Text(error, style = t.body, color = Color.White, textAlign = TextAlign.Center)
+                            Spacer(Modifier.height(12.dp))
+                            Text(
+                                "下载查看",
+                                style = t.subhead.copy(fontWeight = FontWeight.SemiBold),
+                                color = Color.White,
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(Color(0x33FFFFFF))
+                                    .tapArea { current?.let(onDownload) }
+                                    .padding(horizontal = 16.dp, vertical = 10.dp),
+                            )
+                        }
+                    } else {
+                        CircularProgressIndicator(color = Color.White)
+                    }
+                }
+            }
+            // 顶部：关闭 + 文件名 + 保存
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .align(Alignment.TopCenter)
+                    .background(Color(0x66000000))
+                    .padding(horizontal = 16.dp, vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    "关闭",
+                    style = t.body.copy(fontWeight = FontWeight.Medium),
+                    color = Color.White,
+                    modifier = Modifier.clip(RoundedCornerShape(8.dp)).tapArea(onDismiss).padding(6.dp),
+                )
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    "${pager.currentPage + 1}/${attachments.size}",
+                    style = t.footnote,
+                    color = Color(0xB3FFFFFF),
+                    modifier = Modifier.weight(1f),
+                )
+                val cur = current
+                val b = loaded
+                if (cur != null) {
+                    Text(
+                        "下载",
+                        style = t.footnote,
+                        color = Color.White,
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(8.dp))
+                            .tapArea { onDownload(cur) }
+                            .padding(6.dp),
+                    )
+                    Spacer(Modifier.width(6.dp))
+                }
+                if (cur != null && b != null) {
+                    Text(
+                        "保存",
+                        style = t.body.copy(fontWeight = FontWeight.SemiBold),
+                        color = Color.White,
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(8.dp))
+                            .tapArea { onSave(cur, b) }
+                            .padding(6.dp),
+                    )
+                }
+            }
+        }
+    }
+}
+
+/** PDF 预览：内置单页（第 0 页）渲染，成本比「跳系统查看器」低（不依赖外部 App、不用先落盘）。 */
+@Composable
+private fun PdfPreviewDialog(
+    filename: String,
+    url: String,
+    onDismiss: () -> Unit,
+    onDownload: () -> Unit,
+) {
+    val t = OT.type
+    val c = OT.colors
+    val context = LocalContext.current
+    val config = LocalConfiguration.current
+    val density = LocalDensity.current
+    val maxPx = with(density) { maxOf(config.screenWidthDp, config.screenHeightDp).dp.roundToPx() }
+    var bmp by remember(url) { mutableStateOf<Bitmap?>(null) }
+    var error by remember(url) { mutableStateOf("") }
+
+    LaunchedEffect(url) {
+        if (url.isEmpty()) {
+            error = "附件地址不可用"
+            return@LaunchedEffect
+        }
+        runCatching { Attachments.pdfPage(context, url, maxPx) }
+            .onSuccess { if (it == null) error = "PDF 解析失败，请下载查看" else bmp = it }
+            .onFailure { e ->
+                error = when (e) {
+                    is AttachmentTooLarge -> "附件超过 10MB，请下载查看"
+                    is AttachmentUnavailable -> "附件地址不可用"
+                    else -> "预览失败，请下载查看"
+                }
+            }
+    }
+
+    Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+        Box(Modifier.fillMaxSize().background(Color(0xF2000000))) {
+            Column(
+                Modifier.fillMaxSize().padding(16.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        "关闭",
+                        style = t.body.copy(fontWeight = FontWeight.Medium),
+                        color = Color.White,
+                        modifier = Modifier.clip(RoundedCornerShape(8.dp)).tapArea(onDismiss).padding(6.dp),
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        filename.ifEmpty { "PDF" },
+                        style = t.footnote,
+                        color = Color.White,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f),
+                    )
+                    Text(
+                        "下载",
+                        style = t.body.copy(fontWeight = FontWeight.SemiBold),
+                        color = Color.White,
+                        modifier = Modifier.clip(RoundedCornerShape(8.dp)).tapArea(onDownload).padding(6.dp),
+                    )
+                }
+                Spacer(Modifier.height(12.dp))
+                Box(Modifier.fillMaxWidth().weight(1f), contentAlignment = Alignment.Center) {
+                    val b = bmp
+                    when {
+                        b != null -> Image(
+                            bitmap = b.asImageBitmap(),
+                            contentDescription = filename,
+                            contentScale = ContentScale.Fit,
+                            modifier = Modifier.fillMaxSize(),
+                        )
+                        error.isNotEmpty() -> Text(error, style = t.body, color = Color.White, textAlign = TextAlign.Center)
+                        else -> CircularProgressIndicator(color = Color.White)
+                    }
+                }
+                Spacer(Modifier.height(8.dp))
+                Text("仅预览首页，完整内容请下载查看", style = t.caption1, color = Color(0xB3FFFFFF))
+            }
+        }
+    }
+}
+
+/** 保存图片到系统相册（MediaStore，Android 10+ 走 RELATIVE_PATH，无需存储权限）。 */
+private suspend fun saveImageToGallery(
+    context: Context,
+    filename: String,
+    bmp: Bitmap,
+    onToast: (String) -> Unit,
+) {
+    val msg = withContext(Dispatchers.IO) {
+        val name = safeName(filename).substringBeforeLast('.', "image") + "-${System.currentTimeMillis()}.jpg"
+        val values = ContentValues().apply {
+            put(MediaStore.Images.Media.DISPLAY_NAME, name)
+            put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                put(MediaStore.Images.Media.RELATIVE_PATH, Environment.DIRECTORY_PICTURES + "/OTSMail")
+            }
+        }
+        runCatching {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                val uri = context.contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
+                    ?: error("无法写入相册")
+                context.contentResolver.openOutputStream(uri)?.use { out ->
+                    bmp.compress(Bitmap.CompressFormat.JPEG, 92, out)
+                } ?: error("无法写入相册")
+                "已保存到相册"
+            } else {
+                // Android 9 及以下没有分区存储，MediaStore 写入需要存储权限，改为应用专属相片目录
+                val dir = context.getExternalFilesDir(Environment.DIRECTORY_PICTURES) ?: context.filesDir
+                dir.mkdirs()
+                val f = File(dir, name)
+                f.outputStream().use { bmp.compress(Bitmap.CompressFormat.JPEG, 92, it) }
+                "已保存到 ${f.absolutePath}"
+            }
+        }.getOrElse { "保存失败：${it.message ?: "未知错误"}" }
+    }
+    withContext(Dispatchers.Main) { onToast(msg) }
+}
+
+/** 文件名只保留安全的基本名（邮件里的名字可能带路径或控制字符）。 */
+private fun safeName(filename: String): String = filename
+    .replace('\\', '/')
+    .substringAfterLast('/')
+    .replace(Regex("[\\u0000-\\u001f\\u007f]"), "")
+    .trim()
+    .trimStart('.')
+    .take(120)
+    .ifEmpty { "attachment" }
+
+private fun copyToClipboard(context: Context, label: String, text: String) {
+    val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+    cm.setPrimaryClip(ClipData.newPlainText(label, text))
 }
 
 /** 「更多」菜单里的一行（44 高，15pt；暂不支持的两项用 label3）。 */
@@ -799,26 +1381,26 @@ internal fun sanitizeEmailHtml(raw: String): String {
 /** 附件下载：key 拼成真实地址后交给系统 DownloadManager，失败给中文提示。 */
 private fun downloadAttachment(
     context: Context,
-    key: String,
+    url: String,
     filename: String,
     onToast: (String) -> Unit,
+    scope: kotlinx.coroutines.CoroutineScope,
 ) {
-    val url = Api.fileUrl(key)
     if (url.isEmpty()) {
-        onToast("附件地址缺失，无法下载")
+        onToast("附件地址不可用")
+        return
+    }
+    // 演示包附件是 data URL，DownloadManager 只认 http(s)，改走缓存文件复制
+    if (url.startsWith("data:", true)) {
+        scope.launch(Dispatchers.IO) {
+            val msg = runCatching { Attachments.save(context, url, filename) }
+                .fold({ "已保存到 ${it.absolutePath}" }, { "下载失败：${it.message ?: "未知错误"}" })
+            withContext(Dispatchers.Main) { onToast(msg) }
+        }
         return
     }
     runCatching {
-        // 文件名来自邮件，可能是 "../../evil" 或带控制字符；只取 basename，交给 DownloadManager 的
-        // 只能是安全的基本名，避免路径穿越/覆盖到别的目录。
-        val name = filename
-            .replace('\\', '/')
-            .substringAfterLast('/')
-            .replace(Regex("[\\u0000-\\u001f\\u007f]"), "")
-            .trim()
-            .trimStart('.')
-            .take(120)
-            .ifEmpty { "attachment" }
+        val name = safeName(filename)
         val req = DownloadManager.Request(Uri.parse(url))
             .setTitle(name)
             .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
