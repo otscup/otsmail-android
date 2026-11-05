@@ -19,24 +19,15 @@ OTS Mail 的 Android 客户端。Kotlin + Jetpack Compose，Material 3，单 Act
 
 以下截图来自 `-Pdemo=true` 的演示构建（包名带 `.demo` 后缀），**邮件、账户、头像全部是本地虚构数据**，与任何真实邮箱无关；邮件头像为产品本身的「取色圆底 + 首字母」样式，账户头像是一张 AI 合成的虚拟人像（非真实人物、仅演示构建打包）。截图在真机（Samsung Galaxy S10e，1080×2280）以系统字体 100% 拍摄，裁去系统状态栏与手势导航条后为 1080×2136，四角圆角透明。
 
-| 收件箱 | 侧边栏 |
-|---|---|
-| ![收件箱](docs/screenshots/01-inbox.png) | ![侧边栏](docs/screenshots/02-drawer.png) |
-| 收件箱列表：未读点、星标、发件人首字母头像与账户后缀 | 抽屉：当前账户人像、多账户切换、未读/星标/垃圾箱计数、分类入口 |
+下面两张是 2×2 拼图（tile 宽 540px，间距 28px，白底），八张单图仍保留在 `docs/screenshots/` 目录：
 
-| 详情页 | 写信页 |
-|---|---|
-| ![详情页](docs/screenshots/03-detail.png) | ![写信页](docs/screenshots/04-compose.png) |
-| 读信页：左列固定宽度标签、右列值，HTML 正文默认屏蔽外部图片 | 写信页：多收件人 chip、抄送/密送、签名与格式工具条 |
+![登录（含 GitHub/Google 登录入口）、收件箱、侧边栏、详情页](docs/screenshots/preview-a.png)
 
-| 个人设置 | 系统设置 |
-|---|---|
-| ![个人设置](docs/screenshots/05-profile.png) | ![系统设置](docs/screenshots/06-system.png) |
-| 个人设置：头像（可点「更换头像」上传）、用户名、邮箱、两步验证、签名 | 系统设置：头像显示、回车发送、推送状态与后台数据入口 |
+登录（含 GitHub / Google 登录入口）、收件箱、侧边栏、详情页。
 
-深色模式下的收件箱：
+![写信页、个人设置、系统设置、深色模式收件箱](docs/screenshots/preview-b.png)
 
-![深色模式收件箱](docs/screenshots/07-inbox-dark.png)
+写信页、个人设置、系统设置、深色模式收件箱。
 
 演示数据由 [`app/src/main/java/com/otscup/otsmail/data/Demo.kt`](app/src/main/java/com/otscup/otsmail/data/Demo.kt) 提供，只在演示构建里生效；正式包 `BuildConfig.DEMO=false`，不会进入这段代码。账户人像（`app/src/demo/res/drawable-nodpi/demo_portrait.jpg`，AI 合成、无真实人物）只在该构建的 `src/demo/res` 里参与打包，正式包不包含该资源。要重新拍摄：
 
