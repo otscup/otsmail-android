@@ -177,6 +177,9 @@ fun LoginScreen(session: Session, onLoggedIn: () -> Unit) {
             session.email = me.email.ifEmpty { fallbackEmail }
             session.signature = me.signature
             session.sendOnEnter = me.sendOnEnter
+            // 头像 URL 也要在登录时就落盘：之前只有设置页拉 /my/loginUserInfo 才写，
+            // 重新登录后收件箱头像一直是首字占位，进一次设置页才「自动」出现。
+            session.avatar = me.avatar
         } catch (e: Throwable) {
             Api.token = session.token
             throw e
