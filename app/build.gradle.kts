@@ -137,4 +137,6 @@ dependencies {
     implementation(platform("com.google.firebase:firebase-bom:33.7.0"))
     implementation("com.google.firebase:firebase-messaging")
     debugImplementation("androidx.compose.ui:ui-tooling")
+    // 只跑不依赖 Android 运行时的纯函数（服务器地址解析、HTML 清洗）
+    testImplementation("junit:junit:4.13.2")
 }

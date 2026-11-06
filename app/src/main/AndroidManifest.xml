@@ -68,12 +68,13 @@
             android:name=".push.NotificationActionReceiver"
             android:exported="false" />
 
-        <!-- 服务端走 data 消息时才用得上这两个兜底（通知栏小图标/渠道） -->
+        <!-- 服务端走 data 消息时才用得上这两个兜底（通知栏小图标/渠道）。
+             渠道 id 必须指向 ensureChannel 里真正会创建、且不会被删除的那条，否则 FCM 找不到默认渠道 -->
         <meta-data
             android:name="com.google.firebase.messaging.default_notification_icon"
             android:resource="@drawable/ic_notif_at" />
         <meta-data
             android:name="com.google.firebase.messaging.default_notification_channel_id"
-            android:value="ot_mail_push" />
+            android:value="ot_mail_push_sv" />
     </application>
 </manifest>

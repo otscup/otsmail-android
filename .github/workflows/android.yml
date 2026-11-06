@@ -35,6 +35,10 @@ jobs:
           chmod +x ./gradlew
           ./gradlew assembleDebug -x lintVitalRelease --console=plain
 
+      - name: Unit tests
+        # 只跑 JVM 纯函数测试（地址解析、HTML 清洗），不需要设备；覆盖改这些地方时最容易踩的回归
+        run: ./gradlew testDebugUnitTest --console=plain
+
       - name: Upload debug APK
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:

@@ -28,8 +28,12 @@ object PushNotifications {
     const val CHANNEL_VIBRATE = "ot_mail_push_v"
     const val CHANNEL_SILENT = "ot_mail_push_silent"
 
-    /** 0.2.4 及以前的静音渠道，以及中途出现过的 v2，启动时一并删除，避免设置页堆一堆。 */
-    private val LEGACY_CHANNELS = listOf("ot_mail_push", "ot_mail_push_v2")
+    /**
+     * 旧渠道，启动时删除，避免设置页堆一堆。
+     * 注意不能再把 "ot_mail_push" 放进来：它是 manifest 里 FCM 的默认渠道 id，
+     * 删掉后服务端一旦改发带 notification 块的消息，通知会落到系统兜底渠道。
+     */
+    private val LEGACY_CHANNELS = listOf("ot_mail_push_v2")
 
     private const val TAG = "OtsFcm"
     const val EXTRA_EMAIL_ID = "emailId"

@@ -80,12 +80,18 @@ class NotificationActionReceiver : BroadcastReceiver() {
             toast(context, "回复内容不能为空")
             return
         }
-        val to = intent.getStringExtra(PushNotifications.EXTRA_SENDER).orEmpty().trim()
+        var to = intent.getStringExtra(PushNotifications.EXTRA_SENDER).orEmpty().trim()
+        var subject = intent.getStringExtra(PushNotifications.EXTRA_SUBJECT).orEmpty().trim()
+        if (to.isEmpty() || subject.isEmpty()) {
+            // data 消息偶尔只带数字 from（旧服务端或纯数字发件人）：回拉一次详情补发件人/主题
+            val d = runCatching { Api.detail(emailId) }.getOrNull()
+            if (to.isEmpty()) to = d?.from.orEmpty().trim()
+            if (subject.isEmpty()) subject = d?.subject.orEmpty().trim()
+        }
         if (to.isEmpty()) {
             toast(context, "缺少原发件人地址")
             return
         }
-        val subject = intent.getStringExtra(PushNotifications.EXTRA_SUBJECT).orEmpty()
         Api.send(
             accountId = Session(context).accountId,
             to = listOf(to),

@@ -103,6 +103,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
@@ -453,15 +454,17 @@ fun InboxScreen(
         }
     }
 
-    // 滚动位置实时写回快照；返回时用这份值初始化 LazyListState，能精确到同一行
+    // 滚动位置写回快照；返回时用这份值初始化 LazyListState，能精确到同一行。
+    // 防抖 500ms：fling 期间每帧只更新内存，停下来才写库，避免一秒几十次 SQLite 事务。
     LaunchedEffect(listState, store) {
         snapshotFlow { listState.firstVisibleItemIndex to listState.firstVisibleItemScrollOffset }
             .distinctUntilChanged()
-            .collect { (i, o) ->
+            .collectLatest { (i, o) ->
                 // 列表还没内容时不要把 0 写回去，否则会覆盖掉磁盘里存的位置
                 if (items.isNotEmpty()) {
                     store.scrollIndex = i
                     store.scrollOffset = o
+                    delay(500)
                     MailCache.saveScroll(store)
                 }
             }
@@ -608,7 +611,11 @@ fun InboxScreen(
         }
     }
 
-    LaunchedEffect(listKey) {
+    // MailSync.rev 进 key：推送 / 详情里的写操作到达时重新拉列表。
+    // 推送连发时靠 effect 重启合并：等 300ms 期间再来一条会取消这一轮，只保留最后一轮；
+    // 首次进入（syncRev < 0）不等待，避免冷启动凭空多 300ms。
+    LaunchedEffect(listKey, MailSync.rev) {
+        if (store.syncRev >= 0 && MailSync.rev != store.syncRev) delay(300)
         // 冷启动：内存没有 → 先读 SQLite 渲染，再后台刷新（不显示骨架屏/loading）
         if (items.isEmpty()) {
             val disk = MailCache.readPages(listKey)
