@@ -33,4 +33,30 @@ class EmailHtmlSanitizerTest {
     fun `空正文原样返回`() {
         assertTrue(sanitizeEmailHtml("  ") == "  ")
     }
+
+    @Test
+    fun `相对图片与链接按服务端 origin 补全`() {
+        val out = sanitizeEmailHtml(
+            "<img src=\"/api/mail/img?id=1\"><a href=\"/setting\">x</a><img srcset=\"/a.png 1x, /b.png 2x\">",
+            "https://mail.example.com/",
+        )
+        assertTrue(out.contains("src=\"https://mail.example.com/api/mail/img?id=1\""))
+        assertTrue(out.contains("href=\"https://mail.example.com/setting\""))
+        assertTrue(out.contains("https://mail.example.com/a.png 1x"))
+        assertTrue(out.contains("https://mail.example.com/b.png 2x"))
+    }
+
+    @Test
+    fun `绝对地址与锚点不被改写`() {
+        val out = sanitizeEmailHtml(
+            "<img src=\"https://e.x/a.png\"><a href=\"#top\">x</a><a href=\"mailto:a@b.c\">m</a>" +
+                "<img src=\"//cdn.x/b.png\">",
+            "https://mail.example.com/",
+        )
+        assertTrue(out.contains("https://e.x/a.png"))
+        assertTrue(out.contains("href=\"#top\""))
+        assertTrue(out.contains("mailto:a@b.c"))
+        // 协议相对地址按 https 补全，不能留给中性 origin 解析成 otsmail.invalid
+        assertTrue(out.contains("https://cdn.x/b.png"))
+    }
 }

@@ -108,6 +108,9 @@ import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.InputStream
 import java.net.HttpURLConnection
+import java.net.Inet4Address
+import java.net.Inet6Address
+import java.net.InetAddress
 import java.net.URL
 
 /** 详情里「更多」弹出的分类（网页端 emailMoveCategory 的目标分类）。 */
@@ -122,6 +125,16 @@ private val MOVE_TARGETS = listOf(
 enum class ReplyAction { REPLY, REPLY_ALL, FORWARD }
 
 /**
+ * 正文 WebView 的中性 origin：`.invalid` 是 RFC 6761 保留域名，DNS 永不解析。
+ * 正文不继承服务端 origin，避免发件人内容里的相对 URL 被当成服务端同源请求；
+ * 相对图片/链接在清洗阶段已按 [serverOrigin] 补成绝对地址，功能不受影响。
+ */
+private const val BODY_BASE_URL = "https://otsmail.invalid/"
+
+/** 服务端 origin（Api.base 去掉 /api）：相对地址补全与图片失败卡片都用它。 */
+private fun serverOrigin(): String = Api.base.removeSuffix("/api") + "/"
+
+/**
  * 外链图片加载器：点「显示图片」后由 App 自己取图再交给 WebView。
  * 解决三件事（都是真机上"图片加载不出来"的常见原因）：
  * 1) https 正文里的 http 图片被混合内容策略拦掉；
@@ -131,6 +144,10 @@ enum class ReplyAction { REPLY, REPLY_ALL, FORWARD }
  */
 private object InlineImages {
     private const val MAX_BYTES = 20 * 1024 * 1024
+
+    /** 重定向上限：短链/CDN 一般 1~2 跳，4 跳足够；每跳都重新校验 scheme 与目标地址。 */
+    private const val MAX_REDIRECTS = 4
+
     private const val BROWSER_UA =
         "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 (KHTML, like Gecko) " +
             "Chrome/130.0.0.0 Mobile Safari/537.36"
@@ -172,29 +189,83 @@ private object InlineImages {
         return null
     }
 
-    private fun tryFetch(url: String, ua: String, referer: String?): Pair<String, ByteArray>? {
-        val conn = runCatching {
-            (URL(url).openConnection() as HttpURLConnection).apply {
-                connectTimeout = 5000
-                readTimeout = 6000
-                instanceFollowRedirects = true
-                setRequestProperty("User-Agent", ua)
-                setRequestProperty("Accept", "image/avif,image/webp,image/apng,image/*,*/*;q=0.8")
-                if (!referer.isNullOrBlank()) setRequestProperty("Referer", referer)
-            }
-        }.getOrNull() ?: return null
-        return try {
-            val code = conn.responseCode
-            if (code !in 200..299) return null
-            val type = conn.contentType.orEmpty()
-            if (!type.startsWith("image/", ignoreCase = true)) return null
-            val bytes = conn.inputStream.use { readLimited(it, MAX_BYTES) } ?: return null
-            type.substringBefore(';').ifBlank { "image/*" } to bytes
-        } catch (_: Throwable) {
-            null
-        } finally {
-            runCatching { conn.disconnect() }
+    /** 只允许 http/https；file、content、intent 等一律不代取。 */
+    private fun allowed(url: URL): Boolean {
+        val scheme = url.protocol.lowercase()
+        return scheme == "http" || scheme == "https"
+    }
+
+    /**
+     * 内网/本机目标一律拒绝：先做 DNS 解析（域名与 IP 字面量走同一条路径），
+     * 再看每个解析结果是否落在回环、私网、链路本地、组播或 IPv6 ULA 段。
+     * 图片 URL 完全由发件人控制，不拦就能借这台设备扫用户家里的路由器/内网服务。
+     */
+    private fun isInternalTarget(host: String): Boolean {
+        // URL.getHost() 对 IPv6 字面量会带方括号，去掉后再交给 InetAddress 解析
+        val h = host.trim().removePrefix("[").removeSuffix("]")
+        if (h.isBlank()) return true
+        val addrs = runCatching { InetAddress.getAllByName(h) }.getOrNull() ?: return true
+        if (addrs.isEmpty()) return true
+        return addrs.any { isInternalAddress(it) }
+    }
+
+    private fun isInternalAddress(a: InetAddress): Boolean {
+        if (a.isAnyLocalAddress || a.isLoopbackAddress || a.isLinkLocalAddress ||
+            a.isSiteLocalAddress || a.isMulticastAddress
+        ) {
+            return true
         }
+        val b = a.address
+        if (a is Inet4Address) {
+            val first = b[0].toInt() and 0xff
+            val second = b[1].toInt() and 0xff
+            // 0.0.0.0/8 与 100.64.0.0/10（运营商级 NAT）不在 isSiteLocalAddress 里
+            if (first == 0) return true
+            if (first == 100 && second in 64..127) return true
+        } else if (a is Inet6Address) {
+            // fc00::/7 唯一本地地址；fe80::/10 已由 isLinkLocalAddress 覆盖
+            if ((b[0].toInt() and 0xfe) == 0xfc) return true
+        }
+        return false
+    }
+
+    private fun tryFetch(url: String, ua: String, referer: String?): Pair<String, ByteArray>? {
+        var current = url
+        var hops = 0
+        while (hops <= MAX_REDIRECTS) {
+            val parsed = runCatching { URL(current) }.getOrNull() ?: return null
+            if (!allowed(parsed) || isInternalTarget(parsed.host.orEmpty())) return null
+            val conn = runCatching {
+                (parsed.openConnection() as HttpURLConnection).apply {
+                    connectTimeout = 5000
+                    readTimeout = 6000
+                    // 自己跟跳转：每一跳都要先过 scheme / 内网校验，不能让底层连接器替我们跳
+                    instanceFollowRedirects = false
+                    setRequestProperty("User-Agent", ua)
+                    setRequestProperty("Accept", "image/avif,image/webp,image/apng,image/*,*/*;q=0.8")
+                    if (!referer.isNullOrBlank()) setRequestProperty("Referer", referer)
+                }
+            }.getOrNull() ?: return null
+            try {
+                val code = conn.responseCode
+                if (code in 300..399) {
+                    val location = conn.getHeaderField("Location")?.takeIf { it.isNotBlank() } ?: return null
+                    current = runCatching { URL(parsed, location).toString() }.getOrNull() ?: return null
+                    hops++
+                    continue
+                }
+                if (code !in 200..299) return null
+                val type = conn.contentType.orEmpty()
+                if (!type.startsWith("image/", ignoreCase = true)) return null
+                val bytes = conn.inputStream.use { readLimited(it, MAX_BYTES) } ?: return null
+                return type.substringBefore(';').ifBlank { "image/*" } to bytes
+            } catch (_: Throwable) {
+                return null
+            } finally {
+                runCatching { conn.disconnect() }
+            }
+        }
+        return null
     }
 
     private fun readLimited(stream: InputStream, max: Int): ByteArray? {
@@ -659,14 +730,18 @@ fun DetailScreen(
                 // 正文：译文命中时看译文，否则看原文；两者都空才显示「没有正文」占位，避免白屏。
                 // sanitize 对长 HTML 是纯 CPU 工作：按内容 remember，避免每次重组（滚动/展开）重跑一遍。
                 val baseHtml = remember(m.content, translated, showingOriginal) {
-                    sanitizeEmailHtml(if (translated.isNotEmpty() && !showingOriginal) translated else m.content)
+                    // 相对地址按服务端 origin 补全：WebView 不再继承服务端 origin（见 BODY_BASE_URL）
+                    sanitizeEmailHtml(
+                        if (translated.isNotEmpty() && !showingOriginal) translated else m.content,
+                        serverOrigin(),
+                    )
                 }
                 // 取不到的图片换成占位卡片；这一步只依赖失败集合，单独缓存
                 val bodyHtml = remember(baseHtml, failedImages) {
                     replaceFailedImages(
                         baseHtml,
                         failedImages,
-                        Api.base.removeSuffix("/api") + "/",
+                        serverOrigin(),
                     )
                 }
                 val extrasHeight = (if (translated.isNotEmpty()) 30.dp else 0.dp) +
@@ -909,7 +984,9 @@ blockquote{margin:8px 0;padding-left:10px;border-left:3px solid $quote;color:$sy
                                 // 内容没变就不重载，避免测量→重组→重载的循环
                                 if (wv.tag != shell) {
                                     wv.tag = shell
-                                    wv.loadDataWithBaseURL(Api.base.removeSuffix("/api") + "/", shell, "text/html", "utf-8", null)
+                                    // 中性 origin：正文完全不继承服务端 origin，避免正文里的相对 URL
+                                    // 把请求/同源假设带到服务端；相对图片与相对链接已在清洗阶段补成绝对地址。
+                                    wv.loadDataWithBaseURL(BODY_BASE_URL, shell, "text/html", "utf-8", null)
                                     // 真正"正文画出来"的时间点用系统回调拿，别拿 JS 量高度当基准
                                     wv.postVisualStateCallback(
                                         0L,
@@ -1608,16 +1685,55 @@ private fun hex(color: Color): String = String.format("#%06X", 0xFFFFFF and colo
  * - 整段删掉 script / iframe / object / embed / form / base / link / meta（link、meta 会引远程 CSS 或跳转）
  * - 删掉所有 on* 事件属性（onerror、onclick、onmouseover…）
  * - 把 javascript: / vbscript: 链接改成 #
+ * - [baseUrl] 非空时，把所有相对 src/href/srcset 补成绝对地址：
+ *   正文用中性 origin 渲染，不补的话相对图片与相对链接都会指向一个不存在的主机
  * 说明：用正则做白名单式清洗，对"邮件正文"这种非对抗性场景足够；不追求完整的 HTML 解析。
  */
-internal fun sanitizeEmailHtml(raw: String): String {
+internal fun sanitizeEmailHtml(raw: String, baseUrl: String = ""): String {
     if (raw.isBlank()) return raw
-    return raw
+    val cleaned = raw
         .replace(Regex("(?is)<(script|iframe|object|embed|form|base|link|meta)\\b[^>]*>.*?</\\1\\s*>"), "")
         .replace(Regex("(?is)<(script|iframe|object|embed|form|base|link|meta)\\b[^>]*/?>"), "")
         .replace(Regex("(?i)\\son[a-z]+\\s*=\\s*(\"[^\"]*\"|'[^']*'|[^\\s>]+)"), "")
         .replace(Regex("(?i)javascript:"), "#")
         .replace(Regex("(?i)vbscript:"), "#")
+    return if (baseUrl.isBlank()) cleaned else absolutizeHtmlUrls(cleaned, baseUrl)
+}
+
+private val URL_ATTR = Regex("(?i)(?<![-\\w])(src|href)\\s*=\\s*([\"'])(.*?)\\2")
+private val SRCSET_ATTR = Regex("(?i)(?<![-\\w])srcset\\s*=\\s*([\"'])(.*?)\\1")
+
+/** 已带协议、纯锚点都不需要补全；`//host` 协议相对地址另行补成 https。 */
+private val ABSOLUTE_URL = Regex("(?i)^(?:[a-z][a-z0-9+.\\-]*:|#)")
+
+/**
+ * 相对地址补全。邮件正文里的内联图片通常是服务端返回的 /api/... 相对路径，
+ * 相对链接也以服务端为基准；补成绝对地址后，中性 origin 下图片代取与点击跳转都还能正常工作。
+ */
+private fun absolutizeHtmlUrls(html: String, baseUrl: String): String {
+    val base = runCatching { URL(baseUrl) }.getOrNull() ?: return html
+    fun resolve(raw: String): String {
+        val v = raw.trim()
+        if (v.isEmpty() || ABSOLUTE_URL.containsMatchIn(v)) return raw
+        // 协议相对地址：现在按正文文档的 https 协议补全，不能留给中性 origin 去解析
+        if (v.startsWith("//")) return "https:$v"
+        return runCatching { URL(base, v.replace("&amp;", "&")).toString() }.getOrNull() ?: raw
+    }
+    return html
+        .replace(URL_ATTR) { m ->
+            val quote = m.groupValues[2]
+            "${m.groupValues[1]}=$quote${resolve(m.groupValues[3])}$quote"
+        }
+        .replace(SRCSET_ATTR) { m ->
+            val quote = m.groupValues[1]
+            val parts = m.groupValues[2].split(',').joinToString(", ") { part ->
+                val trimmed = part.trim()
+                val url = trimmed.substringBefore(' ')
+                val descriptor = trimmed.removePrefix(url).trim()
+                if (descriptor.isEmpty()) resolve(url) else resolve(url) + " " + descriptor
+            }
+            "srcset=$quote$parts$quote"
+        }
 }
 
 /** 附件下载：key 拼成真实地址后交给系统 DownloadManager，失败给中文提示。 */
