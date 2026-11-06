@@ -85,6 +85,34 @@ object MailCache {
 
     private data class DetailEntry(val mail: MailDetail, val at: Long, val opened: Boolean)
 
+    /*
+     * 字节占用增量维护：懒初始化时做一次全表求和，之后每次插入/删除只按受影响行的
+     * 差值更新，避免每次写一页/存一封正文都全表 SUM(length(json))。
+     * 写入事务与计数更新都在同一个锁里，防止两路并发写把总数算坏。
+     */
+    private val bytesLock = Any()
+    private var listBytes = -1L
+    private var detailBytes = -1L
+
+    private fun ensureListBytes(w: SQLiteDatabase) {
+        if (listBytes < 0) listBytes = sumBytes(w, "SELECT COALESCE(SUM(bytes),0) FROM list_row")
+    }
+
+    private fun ensureDetailBytes(w: SQLiteDatabase) {
+        if (detailBytes < 0) detailBytes = sumBytes(w, "SELECT COALESCE(SUM(bytes),0) FROM detail")
+    }
+
+    /** 列表行估算字节：JSON 长度 + 固定列开销，与旧版 SUM(length(json)+64) 的口径一致。 */
+    private fun listRowBytes(json: String): Long = json.length.toLong() + 64
+
+    private fun listRowsBytes(w: SQLiteDatabase, where: String, args: Array<String>): Long =
+        w.rawQuery("SELECT COALESCE(SUM(bytes),0) FROM list_row WHERE $where", args)
+            .use { c -> if (c.moveToFirst()) c.getLong(0) else 0L }
+
+    private fun detailRowsBytes(w: SQLiteDatabase, where: String): Long =
+        w.rawQuery("SELECT COALESCE(SUM(bytes),0) FROM detail WHERE $where", null)
+            .use { c -> if (c.moveToFirst()) c.getLong(0) else 0L }
+
     /** 正文内存上限：超了就从最久没写入的开始丢，磁盘副本还在。 */
     private fun evictDetailsIfNeeded() {
         if (details.size <= MAX_DETAIL_ENTRIES) return
@@ -180,23 +208,30 @@ object MailCache {
         evictDetailsIfNeeded()
         withContext(Dispatchers.IO) {
             val h = db ?: return@withContext
-            val now = System.currentTimeMillis()
-            val json = mail.toJson().toString()
-            val w = h.writableDatabase
-            w.beginTransaction()
-            try {
-                val cv = ContentValues().apply {
-                    put("email_id", mail.emailId)
-                    put("json", json)
-                    put("updated_at", now)
-                    put("opened", if (opened) 1 else 0)
-                    put("bytes", json.length.toLong() * 2)
+            synchronized(bytesLock) {
+                val now = System.currentTimeMillis()
+                val json = mail.toJson().toString()
+                val newBytes = json.length.toLong() * 2
+                val w = h.writableDatabase
+                w.beginTransaction()
+                try {
+                    ensureDetailBytes(w)
+                    // REPLACE 会覆盖同一封的旧正文：先取旧行占用，差量更新总量
+                    val oldBytes = detailRowsBytes(w, "email_id=${mail.emailId}")
+                    val cv = ContentValues().apply {
+                        put("email_id", mail.emailId)
+                        put("json", json)
+                        put("updated_at", now)
+                        put("opened", if (opened) 1 else 0)
+                        put("bytes", newBytes)
+                    }
+                    w.insertWithOnConflict("detail", null, cv, SQLiteDatabase.CONFLICT_REPLACE)
+                    detailBytes += newBytes - oldBytes
+                    trimDetails(w, now)
+                    w.setTransactionSuccessful()
+                } finally {
+                    w.endTransaction()
                 }
-                w.insertWithOnConflict("detail", null, cv, SQLiteDatabase.CONFLICT_REPLACE)
-                trimDetails(w, now)
-                w.setTransactionSuccessful()
-            } finally {
-                w.endTransaction()
             }
         }
     }
@@ -243,39 +278,56 @@ object MailCache {
         snap.updatedAt = System.currentTimeMillis()
         withContext(Dispatchers.IO) {
             val h = db ?: return@withContext
-            val now = System.currentTimeMillis()
-            val w = h.writableDatabase
-            w.beginTransaction()
-            try {
-                w.delete("list_row", "key=? AND page=?", arrayOf(snap.key, page.toString()))
-                if (resetLater) w.delete("list_row", "key=? AND page>?", arrayOf(snap.key, page.toString()))
-                rows.forEachIndexed { i, m ->
-                    val cv = ContentValues().apply {
-                        put("key", snap.key)
-                        put("page", page)
-                        put("pos", i)
-                        put("email_id", m.emailId)
-                        put("json", m.toJson().toString())
-                        put("updated_at", now)
+            synchronized(bytesLock) {
+                val now = System.currentTimeMillis()
+                val w = h.writableDatabase
+                w.beginTransaction()
+                try {
+                    ensureListBytes(w)
+                    // 被替换/清掉的旧行先按实际占用扣减（只扫这一页，不全表求和）
+                    var removed = listRowsBytes(w, "key=? AND page=?", arrayOf(snap.key, page.toString()))
+                    w.delete("list_row", "key=? AND page=?", arrayOf(snap.key, page.toString()))
+                    if (resetLater) {
+                        val later = arrayOf(snap.key, page.toString())
+                        removed += listRowsBytes(w, "key=? AND page>?", later)
+                        w.delete("list_row", "key=? AND page>?", later)
                     }
-                    // CONFLICT_IGNORE：同一封邮件已经在页码更小的页里存在时保留旧行，
-                    // 不会因为后一页也返回它而被改到后页（"保留首次出现、页码小者优先"）。
-                    w.insertWithOnConflict("list_row", null, cv, SQLiteDatabase.CONFLICT_IGNORE)
+                    var added = 0L
+                    rows.forEachIndexed { i, m ->
+                        val json = m.toJson().toString()
+                        val bytes = listRowBytes(json)
+                        val cv = ContentValues().apply {
+                            put("key", snap.key)
+                            put("page", page)
+                            put("pos", i)
+                            put("email_id", m.emailId)
+                            put("json", json)
+                            put("bytes", bytes)
+                            put("updated_at", now)
+                        }
+                        // CONFLICT_IGNORE：同一封邮件已经在页码更小的页里存在时保留旧行，
+                        // 不会因为后一页也返回它而被改到后页（"保留首次出现、页码小者优先"）。
+                        // 返回 -1 表示被忽略，这一行的字节不能计入总量。
+                        if (w.insertWithOnConflict("list_row", null, cv, SQLiteDatabase.CONFLICT_IGNORE) != -1L) {
+                            added += bytes
+                        }
+                    }
+                    listBytes += added - removed
+                    // 清理放在写 meta 之前：trim 可能会把本 key 的页码收窄，meta 要写收窄后的值
+                    trimLists(w, snap)
+                    val meta = ContentValues().apply {
+                        put("key", snap.key)
+                        put("total", total)
+                        put("page", snap.page)
+                        put("updated_at", now)
+                        put("scroll_index", snap.scrollIndex)
+                        put("scroll_offset", snap.scrollOffset)
+                    }
+                    w.insertWithOnConflict("list_meta", null, meta, SQLiteDatabase.CONFLICT_REPLACE)
+                    w.setTransactionSuccessful()
+                } finally {
+                    w.endTransaction()
                 }
-                // 清理放在写 meta 之前：trim 可能会把本 key 的页码收窄，meta 要写收窄后的值
-                trimLists(w, snap)
-                val meta = ContentValues().apply {
-                    put("key", snap.key)
-                    put("total", total)
-                    put("page", snap.page)
-                    put("updated_at", now)
-                    put("scroll_index", snap.scrollIndex)
-                    put("scroll_offset", snap.scrollOffset)
-                }
-                w.insertWithOnConflict("list_meta", null, meta, SQLiteDatabase.CONFLICT_REPLACE)
-                w.setTransactionSuccessful()
-            } finally {
-                w.endTransaction()
             }
         }
     }
@@ -371,7 +423,13 @@ object MailCache {
             if (snap.items.removeAll { it.emailId == emailId } && snap.total > 0) snap.total -= 1
         }
         withContext(Dispatchers.IO) {
-            db?.writableDatabase?.delete("list_row", "email_id=?", arrayOf(emailId.toString()))
+            synchronized(bytesLock) {
+                val w = db?.writableDatabase ?: return@withContext
+                ensureListBytes(w)
+                val removed = listRowsBytes(w, "email_id=?", arrayOf(emailId.toString()))
+                w.delete("list_row", "email_id=?", arrayOf(emailId.toString()))
+                listBytes -= removed
+            }
         }
     }
 
@@ -381,7 +439,14 @@ object MailCache {
             if (snap.items.removeAll { it.emailId == emailId } && snap.total > 0) snap.total -= 1
         }
         withContext(Dispatchers.IO) {
-            db?.writableDatabase?.delete("list_row", "key=? AND email_id=?", arrayOf(key, emailId.toString()))
+            synchronized(bytesLock) {
+                val w = db?.writableDatabase ?: return@withContext
+                ensureListBytes(w)
+                val args = arrayOf(key, emailId.toString())
+                val removed = listRowsBytes(w, "key=? AND email_id=?", args)
+                w.delete("list_row", "key=? AND email_id=?", args)
+                listBytes -= removed
+            }
         }
     }
 
@@ -396,29 +461,47 @@ object MailCache {
             snap.scrollOffset = 0
         }
         withContext(Dispatchers.IO) {
-            val w = db?.writableDatabase ?: return@withContext
-            w.delete("list_row", "key=?", arrayOf(key))
-            w.delete("list_meta", "key=?", arrayOf(key))
+            synchronized(bytesLock) {
+                val w = db?.writableDatabase ?: return@withContext
+                ensureListBytes(w)
+                val removed = listRowsBytes(w, "key=?", arrayOf(key))
+                w.delete("list_row", "key=?", arrayOf(key))
+                w.delete("list_meta", "key=?", arrayOf(key))
+                listBytes -= removed
+            }
         }
     }
 
     private suspend fun patchRowsInDb(emailId: Long, transform: (MailItem) -> MailItem) {
         withContext(Dispatchers.IO) {
             val h = db ?: return@withContext
-            h.writableDatabase.query(
-                "list_row", arrayOf("rowid", "json"), "email_id=?",
-                arrayOf(emailId.toString()), null, null, null,
-            ).use { c ->
-                val updates = ArrayList<Pair<Long, String>>(c.count)
-                while (c.moveToNext()) {
-                    val rowid = c.getLong(0)
-                    val item = runCatching { parseItem(JSONObject(c.getString(1))) }.getOrNull() ?: continue
-                    updates.add(rowid to transform(item).toJson().toString())
+            val w = h.writableDatabase
+            synchronized(bytesLock) {
+                ensureListBytes(w)
+                val updates = ArrayList<Triple<Long, String, Long>>()
+                var delta = 0L
+                w.query(
+                    "list_row", arrayOf("rowid", "json", "bytes"), "email_id=?",
+                    arrayOf(emailId.toString()), null, null, null,
+                ).use { c ->
+                    while (c.moveToNext()) {
+                        val rowid = c.getLong(0)
+                        val oldBytes = c.getLong(2)
+                        val item = runCatching { parseItem(JSONObject(c.getString(1))) }.getOrNull() ?: continue
+                        val json = transform(item).toJson().toString()
+                        val newBytes = listRowBytes(json)
+                        delta += newBytes - oldBytes
+                        updates.add(Triple(rowid, json, newBytes))
+                    }
                 }
-                updates.forEach { (rowid, json) ->
-                    val cv = ContentValues().apply { put("json", json) }
-                    h.writableDatabase.update("list_row", cv, "rowid=?", arrayOf(rowid.toString()))
+                updates.forEach { (rowid, json, bytes) ->
+                    val cv = ContentValues().apply {
+                        put("json", json)
+                        put("bytes", bytes)
+                    }
+                    w.update("list_row", cv, "rowid=?", arrayOf(rowid.toString()))
                 }
+                listBytes += delta
             }
         }
     }
@@ -429,10 +512,14 @@ object MailCache {
         details.clear()
         translations.clear()
         withContext(Dispatchers.IO) {
-            val w = db?.writableDatabase ?: return@withContext
-            w.delete("list_row", null, null)
-            w.delete("list_meta", null, null)
-            w.delete("detail", null, null)
+            synchronized(bytesLock) {
+                val w = db?.writableDatabase ?: return@withContext
+                w.delete("list_row", null, null)
+                w.delete("list_meta", null, null)
+                w.delete("detail", null, null)
+                listBytes = 0L
+                detailBytes = 0L
+            }
         }
     }
 
@@ -444,10 +531,14 @@ object MailCache {
         val handle = db
         ioScope.launch {
             runCatching {
-                val w = handle?.writableDatabase ?: return@runCatching
-                w.delete("list_row", null, null)
-                w.delete("list_meta", null, null)
-                w.delete("detail", null, null)
+                synchronized(bytesLock) {
+                    val w = handle?.writableDatabase ?: return@runCatching
+                    w.delete("list_row", null, null)
+                    w.delete("list_meta", null, null)
+                    w.delete("detail", null, null)
+                    listBytes = 0L
+                    detailBytes = 0L
+                }
             }
         }
     }
@@ -545,27 +636,30 @@ object MailCache {
     /**
      * 清理顺序（长期缓存的容量约束）：
      * 1) 没打开过的旧正文（超过 1 小时）；
-     * 2) 打开过但超过 90 天的正文；
+     * 2) 打开过但超过 14 天（[OPENED_KEEP]）的正文；
      * 3) 仍超字节上限时，先删没打开过的旧正文，再删打开过里最旧的（每次 20 条，留安全上限防死循环）。
      */
     private fun trimDetails(w: SQLiteDatabase, now: Long) {
-        w.delete("detail", "opened=0 AND updated_at<?", arrayOf((now - UNOPENED_KEEP).toString()))
-        w.delete("detail", "updated_at<?", arrayOf((now - OPENED_KEEP).toString()))
-        var bytes = sumBytes(w, "SELECT COALESCE(SUM(bytes),0) FROM detail")
+        val unopenedWhere = "opened=0 AND updated_at<?"
+        val unopenedBytes = detailRowsBytes(w, "opened=0 AND updated_at<${now - UNOPENED_KEEP}")
+        w.delete("detail", unopenedWhere, arrayOf((now - UNOPENED_KEEP).toString()))
+        val expiredWhere = "updated_at<?"
+        val expiredBytes = detailRowsBytes(w, "updated_at<${now - OPENED_KEEP}")
+        w.delete("detail", expiredWhere, arrayOf((now - OPENED_KEEP).toString()))
+        detailBytes -= unopenedBytes + expiredBytes
         var guard = 0
-        while (bytes > DETAIL_BUDGET_BYTES && guard++ < 200) {
-            val cold = w.delete(
-                "detail",
-                "email_id IN (SELECT email_id FROM detail WHERE opened=0 ORDER BY updated_at ASC LIMIT 20)",
-                null,
-            )
-            val deleted = if (cold > 0) cold else w.delete(
-                "detail",
-                "email_id IN (SELECT email_id FROM detail ORDER BY updated_at ASC LIMIT 20)",
-                null,
-            )
-            if (deleted == 0) break
-            bytes = sumBytes(w, "SELECT COALESCE(SUM(bytes),0) FROM detail")
+        while (detailBytes > DETAIL_BUDGET_BYTES && guard++ < 200) {
+            // 先清没打开过的旧正文；每轮只算这 20 条的实际占用，不再全表求和
+            val coldWhere = "email_id IN (SELECT email_id FROM detail WHERE opened=0 ORDER BY updated_at ASC LIMIT 20)"
+            val coldBytes = detailRowsBytes(w, coldWhere)
+            if (w.delete("detail", coldWhere, null) > 0) {
+                detailBytes -= coldBytes
+                continue
+            }
+            val oldestWhere = "email_id IN (SELECT email_id FROM detail ORDER BY updated_at ASC LIMIT 20)"
+            val oldestBytes = detailRowsBytes(w, oldestWhere)
+            if (w.delete("detail", oldestWhere, null) == 0) break
+            detailBytes -= oldestBytes
         }
     }
 
@@ -589,35 +683,41 @@ object MailCache {
         }
         val maxPage = pages.lastOrNull()?.first ?: 0
         if (lastKept in 1 until maxPage) {
-            w.delete("list_row", "key=? AND page>?", arrayOf(snap.key, lastKept.toString()))
+            val later = arrayOf(snap.key, lastKept.toString())
+            val dropped = listRowsBytes(w, "key=? AND page>?", later)
+            w.delete("list_row", "key=? AND page>?", later)
+            listBytes -= dropped
             snap.page = minOf(snap.page, lastKept)
         }
-        var bytes = sumBytes(w, "SELECT COALESCE(SUM(length(json)+64),0) FROM list_row")
         var guard = 0
-        while (bytes > LIST_BUDGET_BYTES && guard++ < 200) {
+        while (listBytes > LIST_BUDGET_BYTES && guard++ < 200) {
             val victim = w.rawQuery(
                 "SELECT key, MAX(page) FROM list_row GROUP BY key ORDER BY MIN(updated_at) ASC LIMIT 1",
                 null,
             ).use { c -> if (c.moveToFirst()) c.getString(0) to c.getInt(1) else null } ?: break
             val (vk, vp) = victim
-            w.delete("list_row", "key=? AND page=?", arrayOf(vk, vp.toString()))
+            val victimArgs = arrayOf(vk, vp.toString())
+            val dropped = listRowsBytes(w, "key=? AND page=?", victimArgs)
+            w.delete("list_row", "key=? AND page=?", victimArgs)
+            listBytes -= dropped
             // 删的正好是那个 key 的最后一页：把 meta.page 收回来，下次从这页重新拉
             val remain = w.rawQuery(
                 "SELECT COALESCE(MAX(page),0) FROM list_row WHERE key=?", arrayOf(vk),
             ).use { c -> if (c.moveToFirst()) c.getInt(0) else 0 }
             if (remain == 0) w.delete("list_meta", "key=?", arrayOf(vk))
             else w.execSQL("UPDATE list_meta SET page=? WHERE key=?", arrayOf<Any>(remain, vk))
-            bytes = sumBytes(w, "SELECT COALESCE(SUM(length(json)+64),0) FROM list_row")
         }
     }
 
-    private class CacheDb(context: Context) : SQLiteOpenHelper(context, "otsmail_cache.db", null, 3) {
+    private class CacheDb(context: Context) : SQLiteOpenHelper(context, "otsmail_cache.db", null, 4) {
         override fun onCreate(db: SQLiteDatabase) {
-            // 主键 (key, email_id)：同一封邮件在一个列表里只允许一行，翻页位移不会叠出重复
-            db.execSQL("CREATE TABLE list_row (key TEXT NOT NULL, email_id INTEGER NOT NULL, page INTEGER NOT NULL, pos INTEGER NOT NULL, json TEXT NOT NULL, updated_at INTEGER NOT NULL, PRIMARY KEY(key, email_id))")
+            // 主键 (key, email_id)：同一封邮件在一个列表里只允许一行，翻页位移不会叠出重复行
+            db.execSQL("CREATE TABLE list_row (key TEXT NOT NULL, email_id INTEGER NOT NULL, page INTEGER NOT NULL, pos INTEGER NOT NULL, json TEXT NOT NULL, updated_at INTEGER NOT NULL, bytes INTEGER NOT NULL, PRIMARY KEY(key, email_id))")
             db.execSQL("CREATE INDEX idx_list_row_email ON list_row(email_id)")
             db.execSQL("CREATE TABLE list_meta (key TEXT PRIMARY KEY, total INTEGER NOT NULL, page INTEGER NOT NULL, updated_at INTEGER NOT NULL, scroll_index INTEGER NOT NULL, scroll_offset INTEGER NOT NULL)")
-            db.execSQL("CREATE TABLE detail (email_id INTEGER PRIMARY KEY, json TEXT NOT NULL, updated_at INTEGER NOT NULL)")
+            // 新建库也要建全当前字段（opened/bytes 是 v3 引入的）：旧版 onCreate 少了这两列，
+            // 全新安装第一次读磁盘正文就会报 no such column
+            db.execSQL("CREATE TABLE detail (email_id INTEGER PRIMARY KEY, json TEXT NOT NULL, updated_at INTEGER NOT NULL, opened INTEGER NOT NULL DEFAULT 1, bytes INTEGER NOT NULL DEFAULT 0)")
         }
 
         override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
@@ -642,6 +742,30 @@ object MailCache {
                 db.execSQL("ALTER TABLE detail ADD COLUMN bytes INTEGER NOT NULL DEFAULT 0")
                 db.execSQL("UPDATE detail SET bytes = length(json) * 2")
             }
+            if (oldVersion < 4) {
+                // 列表行也存估算字节：清理时只按受影响的页求和，不再每次全表 SUM(length(json))。
+                // 用 PRAGMA 检查而不是直接 ADD：v3 时期的 onCreate 漏建了 opened/bytes，
+                // 那批全新安装的库升级上来时 detail 也缺列，这里一并补齐。
+                if (!hasColumn(db, "detail", "opened")) {
+                    db.execSQL("ALTER TABLE detail ADD COLUMN opened INTEGER NOT NULL DEFAULT 1")
+                }
+                if (!hasColumn(db, "detail", "bytes")) {
+                    db.execSQL("ALTER TABLE detail ADD COLUMN bytes INTEGER NOT NULL DEFAULT 0")
+                    db.execSQL("UPDATE detail SET bytes = length(json) * 2")
+                }
+                if (!hasColumn(db, "list_row", "bytes")) {
+                    db.execSQL("ALTER TABLE list_row ADD COLUMN bytes INTEGER NOT NULL DEFAULT 0")
+                    db.execSQL("UPDATE list_row SET bytes = length(json) + 64")
+                }
+            }
         }
+
+        private fun hasColumn(db: SQLiteDatabase, table: String, column: String): Boolean =
+            db.rawQuery("PRAGMA table_info($table)", null).use { c ->
+                while (c.moveToNext()) {
+                    if (c.getString(1) == column) return true
+                }
+                false
+            }
     }
 }
