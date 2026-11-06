@@ -90,15 +90,18 @@ import com.otscup.otsmail.data.Api
 import com.otscup.otsmail.data.AttachmentTooLarge
 import com.otscup.otsmail.data.AttachmentUnavailable
 import com.otscup.otsmail.data.Attachments
-import com.otscup.otsmail.data.ImagePrefs
+import com.otscup.otsmail.data.ExtLocalMail
+import com.otscup.otsmail.data.ExtMailStore
 import com.otscup.otsmail.data.MailAtt
 import com.otscup.otsmail.data.MailCache
 import com.otscup.otsmail.data.MailDetail
+import com.otscup.otsmail.data.SiteMail
 import com.otscup.otsmail.data.aiErrorText
 import com.otscup.otsmail.data.friendlyError
 import com.otscup.otsmail.push.PushSettings
 import com.otscup.otsmail.ui.theme.OT
 import kotlinx.coroutines.Dispatchers
+import org.json.JSONArray
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
@@ -137,13 +140,33 @@ private const val BODY_BASE_URL = "https://otsmail.invalid/"
 private fun serverOrigin(): String = Api.base.removeSuffix("/api") + "/"
 
 /**
- * 外链图片加载器：点「显示图片」后由 App 自己取图再交给 WebView。
+ * 正文外壳：doctype + 视口 + 主题色。详情页与「全站只读」页共用，避免两份 CSS 漂移。
+ * 必须有 doctype：没有 doctype 时 WebView 进入怪异模式，原信里的 body{height:100%}
+ * 会把 shell 的 body 压成 0px，正文被整体裁掉；height:auto!important 再兜一层。
+ */
+internal fun bodyShell(
+    html: String,
+    fg: String,
+    link: String,
+    quote: String,
+    sys: String,
+    marker: String,
+    imgFlag: String,
+) = """<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<style>*{max-width:100%!important;box-sizing:border-box}html,body{width:100%;overflow-x:hidden;-webkit-text-size-adjust:100%;height:auto!important;min-height:0!important}
+body{margin:0;padding:0;background:transparent;color:$fg;
+font:15px/20px -apple-system,"Noto Sans SC",sans-serif;letter-spacing:-0.24px;word-break:break-word}
+p{margin:0 0 12px}img,video{max-width:100%;height:auto}a{color:$link}
+blockquote{margin:8px 0;padding-left:10px;border-left:3px solid $quote;color:$sys}
+</style></head><body data-ots=$marker data-img=$imgFlag>$html</body></html>"""
+
+/**
+ * 外链图片加载器：远程图片默认由 App 自己取图再交给 WebView。
  * 解决三件事（都是真机上"图片加载不出来"的常见原因）：
  * 1) https 正文里的 http 图片被混合内容策略拦掉；
  * 2) 站点防盗链要求同源 Referer；
  * 3) 部分站点拒绝带 "; wv" 的 WebView UA（换普通 Chrome UA 再试一次）。
- * 隐私口径：远程图片默认自动加载，追踪像素（1×1/极小/无有效宽高）另行拦掉；
- * 用户对某一封点「这封不显示图片」后，这封的所有图片都不再取。
+ * 隐私口径：远程图片默认自动加载，追踪像素（1×1/极小/无有效宽高）另行拦掉。
  */
 private object InlineImages {
     private const val MAX_BYTES = 20 * 1024 * 1024
@@ -189,6 +212,18 @@ private object InlineImages {
         return path.endsWith(".png") || path.endsWith(".jpg") || path.endsWith(".jpeg") ||
             path.endsWith(".gif") || path.endsWith(".webp") || path.endsWith(".bmp") ||
             path.endsWith(".svg") || path.endsWith(".avif")
+    }
+
+    /**
+     * 「这是一个图片资源」的判定，用于 HTTP 失败计数。
+     * 比 [looksLikeImage] 多认一种：服务端签名代理的 /api/proxy/image?url=... 没有扩展名，
+     * WebView 也可能不带 Accept 头，靠扩展名会全部漏掉，SVG/egress 被拒就只剩破图图标。
+     * 只影响失败统计，不改变是否由 App 代取。
+     */
+    fun isImageRequest(request: WebResourceRequest): Boolean {
+        if (looksLikeImage(request)) return true
+        if (request.isForMainFrame) return false
+        return request.url?.path.orEmpty().lowercase().endsWith("/api/proxy/image")
     }
 
     fun load(url: String, webViewUa: String): Pair<String, ByteArray>? {
@@ -394,25 +429,12 @@ fun DetailScreen(
     var translated by remember { mutableStateOf("") }
     // 译文默认覆盖原文；false = 显示译文，true = 显示原文。切换只换渲染，不重新请求接口。
     var showingOriginal by remember { mutableStateOf(false) }
-    // 远程图片默认自动加载（与 Gmail 一致）；用户点「这封不显示图片」后按 emailId 持久化，
-    // 只影响这一封：同一发件人的其它邮件仍然自动加载。追踪像素另有独立拦截（见 sanitize）。
-    var showImages by remember(emailId) {
-        mutableStateOf(!ImagePrefs.isBlocked(context, emailId))
-    }
-    fun setShowImages(on: Boolean) {
-        showImages = on
-        ImagePrefs.setBlocked(context, emailId, !on)
-    }
+    // 远程图片默认自动加载（与 Gmail 一致）；追踪像素另有独立拦截（见 sanitize）。
     // 自动加载后仍然取不到的 URL：正文里换成占位卡片，顶部给一行可读状态
     var failedImages by remember(emailId) { mutableStateOf<Set<String>>(emptySet()) }
     // 后台取图线程只往这里塞，正文重组/重载统一在主线程做，避免边加载边循环重载
     val failedImageSink = remember(emailId) { java.util.Collections.synchronizedSet(mutableSetOf<String>()) }
-    LaunchedEffect(showImages, emailId) {
-        if (!showImages) {
-            failedImages = emptySet()
-            failedImageSink.clear()
-            return@LaunchedEffect
-        }
+    LaunchedEffect(emailId) {
         while (true) {
             delay(900)
             val fresh = failedImageSink.toSet() - failedImages
@@ -769,11 +791,6 @@ fun DetailScreen(
                         serverOrigin(),
                     )
                 }
-                // 关闭这封的图片时不能只靠 blockNetworkImage：WebView 的内存/磁盘缓存仍可能把
-                // 已下载过的图直接画出来（切换后图还在）。在 HTML 层把远程 src 换成透明占位才即时生效。
-                val shownHtml = remember(bodyHtml, showImages) {
-                    if (showImages) bodyHtml else stripRemoteImages(bodyHtml)
-                }
                 val extrasHeight = (if (translated.isNotEmpty()) 30.dp else 0.dp) +
                     (if (bodyHtml.isNotBlank()) 30.dp else 0.dp) +
                     (if (m.attachments.isNotEmpty()) (1.dp + 56.dp * m.attachments.size) else 0.dp) +
@@ -801,9 +818,8 @@ fun DetailScreen(
                         )
                     }
                 }
-                // 图片状态：默认自动加载；这里给「这一封」的撤回入口（按 emailId 记住）。
-                // 正文里没有 <img> 就不显示这条，避免出现在纯文字邮件里。
-                if (baseHtml.isNotBlank() && (baseHtml.contains("<img", ignoreCase = true) || failedImages.isNotEmpty())) {
+                // 图片状态：远程图片默认自动加载；只把「取不到」的图报出来，给一个明确的去处。
+                if (baseHtml.isNotBlank() && failedImages.isNotEmpty()) {
                     Row(
                         Modifier
                             .fillMaxWidth()
@@ -811,33 +827,23 @@ fun DetailScreen(
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         Text(
-                            if (failedImages.isNotEmpty()) "${failedImages.size} 张图片加载失败"
-                            else if (showImages) "外部图片已自动加载" else "这封邮件的图片已隐藏",
+                            "${failedImages.size} 张图片加载失败",
                             style = t.caption1,
-                            color = if (failedImages.isNotEmpty()) c.red else c.label2,
+                            color = c.red,
                         )
                         Spacer(Modifier.weight(1f))
                         // 取不到的图（含正文外的 CSS 背景图）也给一个明确的去处，不留静默空白
-                        if (failedImages.isNotEmpty()) {
-                            Text(
-                                "在浏览器打开",
-                                style = t.caption1,
-                                color = c.blue,
-                                modifier = Modifier.tapArea {
-                                    runCatching {
-                                        context.startActivity(
-                                            Intent(Intent.ACTION_VIEW, Uri.parse(failedImages.first())),
-                                        )
-                                    }
-                                },
-                            )
-                            Spacer(Modifier.width(12.dp))
-                        }
                         Text(
-                            if (showImages) "这封不显示图片" else "这封显示图片",
-                            style = t.caption1.copy(fontWeight = FontWeight.Medium),
+                            "在浏览器打开",
+                            style = t.caption1,
                             color = c.blue,
-                            modifier = Modifier.tapArea { setShowImages(!showImages) },
+                            modifier = Modifier.tapArea {
+                                runCatching {
+                                    context.startActivity(
+                                        Intent(Intent.ACTION_VIEW, Uri.parse(failedImages.first())),
+                                    )
+                                }
+                            },
                         )
                     }
                 }
@@ -889,15 +895,10 @@ fun DetailScreen(
                                 (WebViewPrewarm.take() ?: WebView(ctx)).apply {
                                     // 正文来自外部邮件，不跑 JS
                                     settings.javaScriptEnabled = false
-                                    // 默认只放行内联 data: 图片；远程图片的 URL 会泄露 IP 与阅读时间
-                                    settings.blockNetworkImage = !showImages
-                                    // 用户点开图片后允许 https 正文里的 http 图片（老邮件常见），
-                                    // 屏蔽态仍然 NEVER_ALLOW
-                                    settings.mixedContentMode = if (showImages) {
-                                        WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
-                                    } else {
-                                        WebSettings.MIXED_CONTENT_NEVER_ALLOW
-                                    }
+                                    // 远程图片默认加载；追踪像素已在清洗阶段换成透明图，不会上报
+                                    settings.blockNetworkImage = false
+                                    // https 正文里的 http 图片（老邮件常见）也放行，交给取图器统一处理
+                                    settings.mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
                                     settings.useWideViewPort = false
                                     settings.loadWithOverviewMode = false
                                     settings.setSupportZoom(false)
@@ -936,7 +937,7 @@ fun DetailScreen(
                                             request: WebResourceRequest?,
                                         ): WebResourceResponse? {
                                             val req = request ?: return null
-                                            if (!showImages || !InlineImages.looksLikeImage(req)) return null
+                                            if (!InlineImages.looksLikeImage(req)) return null
                                             val url = req.url.toString()
                                             val hit = InlineImages.load(url, webViewUa)
                                             if (hit != null) {
@@ -962,6 +963,21 @@ fun DetailScreen(
                                                 ByteArrayInputStream(InlineImages.transparentPng),
                                             )
                                         }
+
+                                        /**
+                                         * 签名代理对 SVG / 目标站拒绝 Cloudflare egress 回 400/415/502，
+                                         * 这类图走不到上面的代取失败分支（WebView 直接请求），
+                                         * 只能在这里收：记进失败集合，900ms 后换成可点的占位卡片，不会重试。
+                                         */
+                                        override fun onReceivedHttpError(
+                                            view: WebView?,
+                                            request: WebResourceRequest?,
+                                            errorResponse: WebResourceResponse?,
+                                        ) {
+                                            if (request == null || errorResponse == null) return
+                                            if (!InlineImages.isImageRequest(request)) return
+                                            failedImageSink.add(request.url.toString())
+                                        }
                                         // 首帧内容已提交就能量正文，不必等 onPageFinished
                                         // （后者要等所有图片下载完，慢网下会白等 1 秒以上）
                                         override fun onPageCommitVisible(view: WebView?, url: String?) {
@@ -986,19 +1002,13 @@ fun DetailScreen(
                             },
                             update = { wv ->
                                 // 覆盖而不是追加：译文态只渲染译文，原文态渲染原文；都已做过清洗
-                                val html = shownHtml
-                                wv.settings.blockNetworkImage = !showImages
-                                wv.settings.mixedContentMode = if (showImages) {
-                                    WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
-                                } else {
-                                    WebSettings.MIXED_CONTENT_NEVER_ALLOW
-                                }
+                                val html = bodyHtml
                                 val fg = hex(c.label)
                                 val sys = hex(c.label2)
                                 val link = hex(c.blue)
                                 val quote = hex(c.separator)
                                 val marker = if (html.isNotBlank()) "1" else "0"
-                                val imgFlag = if (showImages) "1" else "0"
+                                val imgFlag = "1"
                                 // 左右留白交给 Compose 的 16dp，HTML 自己不再加 padding，图片才能贴满内容区
                                 // 显式声明 UTF-8 必须排在 viewport 之前、也是整篇第一个 meta：
                                 // 原信正文自带 <meta charset="gb2312"> 时，浏览器会按那个声明解我们写进去的
@@ -1006,13 +1016,7 @@ fun DetailScreen(
                                 // 必须有 doctype：没有 doctype 时 WebView 进入怪异模式，原信里的
                                 // body{height:100%} 会把 shell 的 body 压成 0px，正文被整体裁掉（Kimi 那封）。
                                 // height:auto!important 再兜一层：原信 CSS 里的 body 高度声明一律不生效。
-                                val shell = """<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<style>*{max-width:100%!important;box-sizing:border-box}html,body{width:100%;overflow-x:hidden;-webkit-text-size-adjust:100%;height:auto!important;min-height:0!important}
-body{margin:0;padding:0;background:transparent;color:$fg;
-font:15px/20px -apple-system,"Noto Sans SC",sans-serif;letter-spacing:-0.24px;word-break:break-word}
-p{margin:0 0 12px}img,video{max-width:100%;height:auto}a{color:$link}
-blockquote{margin:8px 0;padding-left:10px;border-left:3px solid $quote;color:$sys}
-</style></head><body data-ots=$marker data-img=$imgFlag>$html</body></html>"""
+                                val shell = bodyShell(html, fg, link, quote, sys, marker, imgFlag)
                                 // 内容没变就不重载，避免测量→重组→重载的循环
                                 if (wv.tag != shell) {
                                     wv.tag = shell
@@ -1735,21 +1739,6 @@ internal fun sanitizeEmailHtml(raw: String, baseUrl: String = ""): String {
 
 private val IMG_SRCSET = Regex("(?i)srcset\\s*=\\s*[\"']([^\"']+)[\"']")
 
-/**
- * 关闭某一封的图片：直接把远程 <img> 的 src/srcset 换成透明占位。
- * 不能只靠 blockNetworkImage——已经进过 WebView 缓存的图在切换后仍会被直接画出来。
- */
-private fun stripRemoteImages(html: String): String = IMG_TAG.replace(html) { m ->
-    val tag = m.value
-    val src = IMG_SRC_QUOTED.find(tag)?.groupValues?.getOrNull(2).orEmpty()
-    if (src.isBlank() || src.startsWith("data:", ignoreCase = true)) {
-        tag
-    } else {
-        tag
-            .replace(IMG_SRC_QUOTED) { s -> "src=${s.groupValues[1]}$TRANSPARENT_GIF${s.groupValues[1]}" }
-            .replace(IMG_SRCSET, "")
-    }
-}
 private val SIZE_ATTR = Regex("(?i)\\b(width|height)\\s*=\\s*[\"']?\\s*(\\d+)")
 private val SIZE_STYLE = Regex("(?i)(?:^|[;\"'\\s])(width|height)\\s*:\\s*(\\d+)(?:px|%)")
 private const val TRANSPARENT_GIF =
@@ -1757,7 +1746,7 @@ private const val TRANSPARENT_GIF =
 
 /**
  * 追踪像素默认不加载：1×1 / 极小尺寸 / 完全没有有效宽高的 <img> 直接把 src 换成 1px 透明图，
- * WebView 就不会替发件人上报「已读」。这类图不随「这封显示图片」恢复，用户要的是看图不是被统计。
+ * WebView 就不会替发件人上报「已读」。用户要的是看图，不是被统计。
  * 判定只看尺寸声明：任一维 ≤3 视为追踪；两维都没有任何声明视为无有效宽高。
  */
 private fun neutralizeTrackingPixels(html: String): String = html.replace(IMG_TAG) { m ->
@@ -1779,8 +1768,10 @@ private fun isTrackingPixel(tag: String): Boolean {
     return sizes.isEmpty()
 }
 
-private val URL_ATTR = Regex("(?i)(?<![-\\w])(src|href)\\s*=\\s*([\"'])(.*?)\\2")
+private val URL_ATTR = Regex("(?i)(?<![-\\w])(src|href|poster)\\s*=\\s*([\"'])(.*?)\\2")
 private val SRCSET_ATTR = Regex("(?i)(?<![-\\w])srcset\\s*=\\s*([\"'])(.*?)\\1")
+/** 内联 style 与 <style> 里的 url(...)：服务端签名代理返回的是 /api/... 相对地址，也要补全 */
+private val CSS_URL = Regex("(?i)url\\(\\s*([\"']?)(.*?)\\1\\s*\\)")
 
 /** 已带协议、纯锚点都不需要补全；`//host` 协议相对地址另行补成 https。 */
 private val ABSOLUTE_URL = Regex("(?i)^(?:[a-z][a-z0-9+.\\-]*:|#)")
@@ -1812,6 +1803,11 @@ private fun absolutizeHtmlUrls(html: String, baseUrl: String): String {
                 if (descriptor.isEmpty()) resolve(url) else resolve(url) + " " + descriptor
             }
             "srcset=$quote$parts$quote"
+        }
+        // CSS 背景图 / list-style-image：url("/api/proxy/image?...") 也要按服务端 origin 补全
+        .replace(CSS_URL) { m ->
+            val quote = m.groupValues[1]
+            "url($quote${resolve(m.groupValues[2])}$quote)"
         }
 }
 
@@ -1848,4 +1844,686 @@ private fun downloadAttachment(
     }.onFailure {
         onToast("下载失败：${it.message ?: "未知错误"}")
     }
+}
+
+/**
+ * 「全部邮件」里非本人邮件的详情（含 userId=0 的「无人收件」）。
+ *
+ * 服务端 /email/detail 按 userId 过滤，这类邮件必然 404，所以正文走 /allEmail/list 的整行返回
+ * （与网页端 /all-email 用列表正文渲染是同一份数据）。
+ * 交互按正常邮件处理：回复/回复全部/转发走当前账号的发送接口；删除走 /allEmail/delete；
+ * 已读、星标、翻译按服务端实际能力执行，服务端拒绝时如实提示，不伪造成功。
+ * HTML 仍过 sanitizeEmailHtml，图片沿用自动加载 + 追踪像素拦截。
+ */
+@Composable
+internal fun SiteMailDetailScreen(
+    emailId: Long,
+    onBack: () -> Unit,
+    onReply: (MailDetail, ReplyAction) -> Unit,
+    onToast: (String) -> Unit,
+) {
+    val c = OT.colors
+    val t = OT.type
+    var mail by remember(emailId) { mutableStateOf<SiteMail?>(null) }
+    var error by remember(emailId) { mutableStateOf("") }
+    LaunchedEffect(emailId) {
+        error = ""
+        runCatching { Api.siteMail(emailId) }
+            .onSuccess { mail = it }
+            .onFailure { error = friendlyError(it) }
+    }
+    Column(Modifier.fillMaxSize().background(c.bgGrouped).statusBarsPadding().navigationBarsPadding()) {
+        OTNavBar(title = "全部邮件", onLeading = onBack)
+        val m = mail
+        when {
+            m == null && error.isNotEmpty() -> Box(Modifier.fillMaxSize(), Alignment.Center) {
+                Text(error, style = t.body, color = c.label2, modifier = Modifier.padding(24.dp))
+            }
+
+            m == null -> Box(Modifier.fillMaxSize(), Alignment.Center) { CircularProgressIndicator() }
+            else -> SiteMailBody(m, onBack = onBack, onReply = onReply, onToast = onToast)
+        }
+    }
+}
+
+@Composable
+private fun SiteMailBody(
+    initial: SiteMail,
+    onBack: () -> Unit,
+    onReply: (MailDetail, ReplyAction) -> Unit,
+    onToast: (String) -> Unit,
+) {
+    val c = OT.colors
+    val t = OT.type
+    val ctx = LocalContext.current
+    val density = LocalDensity.current
+    val scope = rememberCoroutineScope()
+    var m by remember(initial) { mutableStateOf(initial) }
+    val d = m.detail
+    var moreOpen by remember { mutableStateOf(false) }
+    var confirmDelete by remember { mutableStateOf(false) }
+    var busy by remember { mutableStateOf(false) }
+    var translated by remember(m.detail.emailId) { mutableStateOf("") }
+    var showingOriginal by remember { mutableStateOf(false) }
+    // 正文来自全站列表，同样是外部发件人控制的 HTML：与普通详情走同一套清洗
+    val html = remember(m, translated, showingOriginal) {
+        val body = if (translated.isNotEmpty() && !showingOriginal) translated else d.content
+        sanitizeEmailHtml(body, serverOrigin())
+    }
+    val copyText = m.plain.ifBlank {
+        d.content.replace(Regex("(?is)<[^>]+>"), " ").replace(Regex("\\s+"), " ").trim()
+    }
+    // 代理/防盗链/目标站拒绝 Cloudflare egress/SVG 都会让某张图取不到：
+    // 取不到就换占位卡片，不做无限重试，也不当成致命错误。
+    var failedImages by remember(d.emailId) { mutableStateOf<Set<String>>(emptySet()) }
+    val failedSink = remember(d.emailId) { java.util.Collections.synchronizedSet(mutableSetOf<String>()) }
+    LaunchedEffect(d.emailId) {
+        while (true) {
+            delay(900)
+            val fresh = failedSink.toSet() - failedImages
+            if (fresh.isNotEmpty()) failedImages = failedImages + fresh
+        }
+    }
+    val bodyHtml = remember(html, failedImages) { replaceFailedImages(html, failedImages, serverOrigin()) }
+    Column(Modifier.fillMaxSize()) {
+        Column(Modifier.fillMaxWidth().padding(start = 20.dp, end = 20.dp, top = 8.dp)) {
+            Text(
+                d.subject.ifBlank { "（无主题）" },
+                style = t.title3,
+                color = c.label,
+                maxLines = 3,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Spacer(Modifier.height(6.dp))
+            Text(
+                "${d.name}  ${TimeFmt.detailTime(d.time)}",
+                style = t.footnote,
+                color = c.label2,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            // 收件人优先显示姓名（服务端 toName）；没有姓名才退回地址
+            val toLabel = m.toName.ifBlank { m.toEmail }
+            if (toLabel.isNotBlank()) {
+                Text(
+                    "收件：$toLabel",
+                    style = t.caption2,
+                    color = c.label2,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+            Spacer(Modifier.height(10.dp))
+        }
+        if (html.isBlank()) {
+            Box(Modifier.weight(1f).fillMaxWidth().padding(20.dp), Alignment.TopStart) {
+                Text("该邮件没有正文（服务端只存了纯文本或内容为空）", style = t.body, color = c.label2)
+            }
+        } else {
+            AndroidView(
+                modifier = Modifier.weight(1f).fillMaxWidth().padding(horizontal = 20.dp),
+                factory = { viewCtx ->
+                    WebView(viewCtx).apply {
+                        settings.javaScriptEnabled = false
+                        settings.allowFileAccess = false
+                        settings.allowContentAccess = false
+                        settings.domStorageEnabled = false
+                        settings.blockNetworkImage = false
+                        // 正文基址是 https 中性 origin，http 图片由 App 代取后回填，这里放开混合内容
+                        settings.mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
+                        settings.useWideViewPort = false
+                        settings.loadWithOverviewMode = false
+                        settings.setSupportZoom(false)
+                        settings.builtInZoomControls = false
+                        settings.textZoom = 100
+                        val webViewUa = settings.userAgentString.orEmpty()
+                        setBackgroundColor(android.graphics.Color.TRANSPARENT)
+                        webViewClient = object : WebViewClient() {
+                            override fun shouldOverrideUrlLoading(
+                                view: WebView?,
+                                request: WebResourceRequest?,
+                            ): Boolean {
+                                val uri = request?.url ?: return true
+                                val scheme = uri.scheme?.lowercase()
+                                if (scheme == "http" || scheme == "https") {
+                                    runCatching {
+                                        view?.context?.startActivity(
+                                            Intent(Intent.ACTION_VIEW, uri)
+                                                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                                        )
+                                    }
+                                }
+                                return true
+                            }
+
+                            // 远程图片与普通详情同一套代取：带 UA/Referer、拦内网、失败回透明图
+                            override fun shouldInterceptRequest(
+                                view: WebView?,
+                                request: WebResourceRequest?,
+                            ): WebResourceResponse? {
+                                val req = request ?: return null
+                                if (!InlineImages.looksLikeImage(req)) return null
+                                val url = req.url.toString()
+                                val hit = InlineImages.load(url, webViewUa)
+                                if (hit != null) {
+                                    return WebResourceResponse(
+                                        hit.first,
+                                        null,
+                                        200,
+                                        "OK",
+                                        mapOf(
+                                            "Cache-Control" to "max-age=3600",
+                                            "Access-Control-Allow-Origin" to "*",
+                                        ),
+                                        ByteArrayInputStream(hit.second),
+                                    )
+                                }
+                                return WebResourceResponse(
+                                    "image/png",
+                                    null,
+                                    200,
+                                    "OK",
+                                    mapOf("Cache-Control" to "no-store"),
+                                    ByteArrayInputStream(InlineImages.transparentPng),
+                                ).also { failedSink.add(url) }
+                            }
+
+                            // 直接由 WebView 请求的代理图（SVG / egress 被拒）回 4xx/5xx：
+                            // 记进失败集合换成占位卡片，避免只留一个破图图标
+                            override fun onReceivedHttpError(
+                                view: WebView?,
+                                request: WebResourceRequest?,
+                                errorResponse: WebResourceResponse?,
+                            ) {
+                                if (request == null || errorResponse == null) return
+                                if (!InlineImages.isImageRequest(request)) return
+                                failedSink.add(request.url.toString())
+                            }
+                        }
+                    }
+                },
+                update = { wv ->
+                    val shell = bodyShell(
+                        bodyHtml,
+                        hex(c.label),
+                        hex(c.blue),
+                        hex(c.separator),
+                        hex(c.label2),
+                        "1",
+                        "1",
+                    )
+                    if (wv.tag != shell) {
+                        wv.tag = shell
+                        wv.loadDataWithBaseURL(BODY_BASE_URL, shell, "text/html", "UTF-8", null)
+                    }
+                },
+            )
+        }
+        // 有图取不到时给一行可读状态（代理对 SVG/拒绝 egress 的站点会失败，属预期）
+        if (failedImages.isNotEmpty()) {
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    "${failedImages.size} 张图片加载失败",
+                    style = t.caption2,
+                    color = c.label2,
+                    modifier = Modifier.weight(1f),
+                )
+                Text(
+                    "在浏览器打开",
+                    style = t.caption2,
+                    color = c.blue,
+                    modifier = Modifier.tapArea {
+                        runCatching {
+                            ctx.startActivity(
+                                Intent(Intent.ACTION_VIEW, Uri.parse(failedImages.first()))
+                                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                            )
+                        }.onFailure { onToast("没有可用的浏览器") }
+                    },
+                )
+            }
+        }
+        // 底栏与普通详情一致：回复/回复全部/转发/删除/更多
+        OTActionBar(
+            items = listOf(
+                Triple("↩", "回复", { onReply(d, ReplyAction.REPLY) }),
+                Triple("⇉", "回复全部", { onReply(d, ReplyAction.REPLY_ALL) }),
+                Triple("↪", "转发", { onReply(d, ReplyAction.FORWARD) }),
+                Triple("🗑", "删除", { confirmDelete = true }),
+                Triple("⋯", "更多", { moreOpen = true }),
+            ),
+        )
+
+        // 「更多」浮层：锚在底栏右上方，与普通详情同一位置
+        if (moreOpen) {
+            Popup(
+                alignment = Alignment.BottomEnd,
+                offset = IntOffset(
+                    with(density) { (-12).dp.roundToPx() },
+                    with(density) { (-74).dp.roundToPx() },
+                ),
+                onDismissRequest = { moreOpen = false },
+                properties = PopupProperties(focusable = true),
+            ) {
+                Surface(
+                    shape = RoundedCornerShape(14.dp),
+                    color = c.bgElevated,
+                    shadowElevation = 10.dp,
+                ) {
+                    Column(Modifier.width(228.dp).padding(vertical = 6.dp)) {
+                        MoreItem(if (d.unread) "标记为已读" else "标记为未读") {
+                            moreOpen = false
+                            scope.launch {
+                                val wantUnread = !d.unread
+                                runCatching {
+                                    if (wantUnread) Api.markUnread(d.emailId) else Api.markRead(d.emailId)
+                                }.onSuccess {
+                                    // 服务端按 userId 过滤：操作 userId=0 的邮件会静默不生效。
+                                    // 重新拉这一行对齐真实状态，变化了才提示成功，避免假成功。
+                                    val fresh = runCatching { Api.siteMail(d.emailId) }.getOrNull()
+                                    if (fresh != null && fresh.detail.unread == wantUnread) {
+                                        m = fresh
+                                        MailSync.changed()
+                                        onToast(if (wantUnread) "已标记为未读" else "已标记为已读")
+                                    } else {
+                                        onToast("服务端未更新：该邮件不属于任何账号，已读状态按 userId 过滤，需要服务端支持")
+                                    }
+                                }.onFailure { onToast(friendlyError(it)) }
+                            }
+                        }
+                        MoreItem(if (d.starred) "取消星标" else "添加星标") {
+                            moreOpen = false
+                            val next = !d.starred
+                            scope.launch {
+                                runCatching {
+                                    if (next) Api.starAdd(d.emailId) else Api.starCancel(d.emailId)
+                                }.onSuccess {
+                                    m = m.copy(detail = d.copy(starred = next))
+                                    MailSync.changed()
+                                    onToast(if (next) "已加星标" else "已取消星标")
+                                }.onFailure {
+                                    // 服务端 star-service 会校验 email.userId，非本人邮件直接拒绝
+                                    onToast(friendlyError(it))
+                                }
+                            }
+                        }
+                        MoreItem(
+                            when {
+                                busy -> "翻译中…"
+                                translated.isEmpty() -> "将邮件翻译为中文"
+                                showingOriginal -> "显示译文"
+                                else -> "显示原文"
+                            },
+                        ) {
+                            moreOpen = false
+                            if (busy) return@MoreItem
+                            if (translated.isNotEmpty()) {
+                                showingOriginal = !showingOriginal
+                            } else {
+                                busy = true
+                                scope.launch {
+                                    runCatching { Api.translate(d.emailId, "zh") }
+                                        .onSuccess { r ->
+                                            when {
+                                                r.content.isNotEmpty() -> {
+                                                    translated = r.content
+                                                    showingOriginal = false
+                                                }
+                                                r.alreadyInTargetLang -> onToast("正文已经是中文，无需翻译")
+                                                else -> onToast("翻译失败：服务端未返回译文")
+                                            }
+                                        }
+                                        .onFailure {
+                                            // 翻译服务对非本人邮件返回 emailNotExist
+                                            onToast(friendlyError(it))
+                                        }
+                                    busy = false
+                                }
+                            }
+                        }
+                        MoreItem("复制正文") {
+                            moreOpen = false
+                            if (copyText.isBlank()) {
+                                onToast("没有可复制的正文")
+                            } else {
+                                val cm = ctx.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                                cm.setPrimaryClip(ClipData.newPlainText("邮件正文", copyText))
+                                onToast("已复制正文")
+                            }
+                        }
+                        MoreItem("在浏览器打开") {
+                            moreOpen = false
+                            runCatching {
+                                ctx.startActivity(
+                                    Intent(Intent.ACTION_VIEW, Uri.parse(serverOrigin() + "all-email"))
+                                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                                )
+                            }.onFailure { onToast("没有可用的浏览器") }
+                        }
+                    }
+                }
+            }
+        }
+
+        // 全站物理删除：/allEmail/delete 不进回收站，删前必须说明
+        if (confirmDelete) {
+            Dialog(
+                onDismissRequest = { confirmDelete = false },
+                properties = DialogProperties(),
+            ) {
+                Surface(shape = RoundedCornerShape(14.dp), color = c.bgElevated) {
+                    Column(Modifier.padding(20.dp)) {
+                        Text("永久删除这封邮件？", style = t.title3, color = c.label)
+                        Spacer(Modifier.height(8.dp))
+                        Text(
+                            "「全部邮件」没有回收站，删除会从服务端直接移除这封邮件，不可恢复。",
+                            style = t.footnote,
+                            color = c.label2,
+                        )
+                        Spacer(Modifier.height(16.dp))
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Spacer(Modifier.weight(1f))
+                            Text(
+                                "取消",
+                                style = t.subhead,
+                                color = c.blue,
+                                modifier = Modifier.tapArea { confirmDelete = false },
+                            )
+                            Spacer(Modifier.width(24.dp))
+                            Text(
+                                "删除",
+                                style = t.subhead,
+                                color = c.red,
+                                modifier = Modifier.tapArea {
+                                    confirmDelete = false
+                                    scope.launch {
+                                        runCatching { Api.siteDelete(d.emailId) }
+                                            .onSuccess {
+                                                MailCache.removeItem(d.emailId)
+                                                MailCache.expireLists()
+                                                MailSync.changed()
+                                                onToast("已删除")
+                                                onBack()
+                                            }
+                                            // 权限不足（非管理员且没有 all-email:delete）时原样提示
+                                            .onFailure { onToast(friendlyError(it)) }
+                                    }
+                                },
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * 第三方邮件详情（**只读**）。
+ *
+ * 数据来自本地 `otsmail_ext.db`（与服务端归档同源），不请求任何 IMAP 写接口；
+ * 正文清洗与图片代取沿用普通详情的 [sanitizeEmailHtml] + [InlineImages]，不另开渲染路径。
+ */
+@Composable
+internal fun ExtMailDetailScreen(localId: Long, onBack: () -> Unit) {
+    val c = OT.colors
+    val t = OT.type
+    var mail by remember(localId) { mutableStateOf<ExtLocalMail?>(null) }
+    LaunchedEffect(localId) {
+        mail = withContext(Dispatchers.IO) { runCatching { ExtMailStore.byLocalId(localId) }.getOrNull() }
+    }
+    Column(Modifier.fillMaxSize().background(c.bgGrouped).statusBarsPadding().navigationBarsPadding()) {
+        OTNavBar(title = "第三方邮件", onLeading = onBack)
+        val m = mail
+        if (m == null) {
+            Box(Modifier.fillMaxSize(), Alignment.Center) {
+                Text(
+                    "这封邮件已不在本地，回到列表同步后再打开",
+                    style = t.body,
+                    color = c.label2,
+                    modifier = Modifier.padding(24.dp),
+                )
+            }
+        } else {
+            ExtMailBody(m)
+        }
+    }
+}
+
+@Composable
+private fun ExtMailBody(m: ExtLocalMail) {
+    val c = OT.colors
+    val t = OT.type
+
+    val atts = remember(m.attachmentsJson) {
+        runCatching {
+            val arr = JSONArray(m.attachmentsJson)
+            buildList {
+                for (i in 0 until arr.length()) {
+                    val o = arr.optJSONObject(i) ?: continue
+                    add(
+                        Triple(
+                            o.optString("filename").ifBlank { "附件" },
+                            o.optString("mime"),
+                            o.optLong("size", 0L),
+                        ),
+                    )
+                }
+            }
+        }.getOrDefault(emptyList())
+    }
+
+    val rawHtml = remember(m.bodyHtml, m.bodyText) {
+        val text = m.bodyText
+        when {
+            m.bodyHtml.isNotBlank() -> m.bodyHtml
+            text.isBlank() -> ""
+            // 只有纯文本时包一层 pre，保留换行与缩进
+            else -> "<pre style=\"white-space:pre-wrap;word-break:break-word;font:inherit\">" +
+                text.escapeHtmlForBody() + "</pre>"
+        }
+    }
+    val html = remember(rawHtml) { sanitizeEmailHtml(rawHtml, serverOrigin()) }
+
+    var failedImages by remember(m.localId) { mutableStateOf(false) }
+    val failedSink = remember(m.localId) { java.util.concurrent.atomic.AtomicBoolean(false) }
+    LaunchedEffect(m.localId) {
+        while (true) {
+            delay(900)
+            if (failedSink.get()) failedImages = true
+        }
+    }
+
+    Column(Modifier.fillMaxSize()) {
+        Column(Modifier.fillMaxWidth().padding(start = 20.dp, end = 20.dp, top = 8.dp)) {
+            Text(
+                m.subject.ifBlank { "（无主题）" },
+                style = t.title3,
+                color = c.label,
+                maxLines = 3,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Spacer(Modifier.height(6.dp))
+            Text(
+                "${m.fromName.ifBlank { m.fromAddr }}  ${TimeFmt.detailTime(m.dateMs.toString())}",
+                style = t.footnote,
+                color = c.label2,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            val toLabel = m.toName.ifBlank { m.toAddr }
+            if (toLabel.isNotBlank()) {
+                Text(
+                    "收件：$toLabel",
+                    style = t.caption2,
+                    color = c.label2,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+            Spacer(Modifier.height(10.dp))
+            // 只读提示：用第三方邮箱专属文案，不沿用「全站只读」那套
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(OT.dimens.rMd.dp))
+                    .background(c.bgInput)
+                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Icon(
+                    painterResource(R.drawable.ot_info),
+                    contentDescription = null,
+                    tint = c.label2,
+                    modifier = Modifier.size(14.dp),
+                )
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    "第三方邮箱，本轮暂不支持写操作",
+                    style = t.caption1,
+                    color = c.label2,
+                    modifier = Modifier.weight(1f),
+                )
+            }
+            if (atts.isNotEmpty()) {
+                Spacer(Modifier.height(8.dp))
+                atts.forEach { (name, _, size) ->
+                    Row(
+                        Modifier.fillMaxWidth().padding(vertical = 2.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Icon(Icons.Outlined.AttachFile, null, tint = c.label2, modifier = Modifier.size(14.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text(
+                            name,
+                            style = t.caption1,
+                            color = c.label,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f),
+                        )
+                        Text(bytesLabel(size), style = t.caption2, color = c.label2)
+                    }
+                }
+                Text("附件暂不支持下载（已保存在服务端归档）", style = t.caption2, color = c.label2)
+            }
+            Spacer(Modifier.height(10.dp))
+        }
+        if (html.isBlank()) {
+            Box(Modifier.weight(1f).fillMaxWidth().padding(20.dp), Alignment.TopStart) {
+                Text("这封邮件没有可显示的正文", style = t.body, color = c.label2)
+            }
+        } else {
+            AndroidView(
+                modifier = Modifier.weight(1f).fillMaxWidth().padding(horizontal = 20.dp),
+                factory = { viewCtx ->
+                    WebView(viewCtx).apply {
+                        settings.javaScriptEnabled = false
+                        settings.allowFileAccess = false
+                        settings.allowContentAccess = false
+                        settings.domStorageEnabled = false
+                        settings.blockNetworkImage = false
+                        settings.mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
+                        settings.useWideViewPort = false
+                        settings.loadWithOverviewMode = false
+                        settings.setSupportZoom(false)
+                        settings.builtInZoomControls = false
+                        settings.textZoom = 100
+                        val webViewUa = settings.userAgentString.orEmpty()
+                        setBackgroundColor(android.graphics.Color.TRANSPARENT)
+                        webViewClient = object : WebViewClient() {
+                            override fun shouldOverrideUrlLoading(
+                                view: WebView?,
+                                request: WebResourceRequest?,
+                            ): Boolean {
+                                val uri = request?.url ?: return true
+                                val scheme = uri.scheme?.lowercase()
+                                if (scheme == "http" || scheme == "https") {
+                                    runCatching {
+                                        view?.context?.startActivity(
+                                            Intent(Intent.ACTION_VIEW, uri)
+                                                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                                        )
+                                    }
+                                }
+                                return true
+                            }
+
+                            // 与普通详情共用一套图片代取：带 UA/Referer、拦内网、失败回透明图
+                            override fun shouldInterceptRequest(
+                                view: WebView?,
+                                request: WebResourceRequest?,
+                            ): WebResourceResponse? {
+                                val req = request ?: return null
+                                if (!InlineImages.looksLikeImage(req)) return null
+                                val url = req.url.toString()
+                                val hit = InlineImages.load(url, webViewUa)
+                                if (hit != null) {
+                                    return WebResourceResponse(
+                                        hit.first,
+                                        null,
+                                        200,
+                                        "OK",
+                                        mapOf(
+                                            "Cache-Control" to "max-age=3600",
+                                            "Access-Control-Allow-Origin" to "*",
+                                        ),
+                                        ByteArrayInputStream(hit.second),
+                                    )
+                                }
+                                failedSink.set(true)
+                                return WebResourceResponse(
+                                    "image/png",
+                                    null,
+                                    200,
+                                    "OK",
+                                    mapOf("Cache-Control" to "no-store"),
+                                    ByteArrayInputStream(InlineImages.transparentPng),
+                                )
+                            }
+                        }
+                    }
+                },
+                update = { wv ->
+                    val shell = bodyShell(
+                        html,
+                        hex(c.label),
+                        hex(c.blue),
+                        hex(c.separator),
+                        hex(c.label2),
+                        "1",
+                        "1",
+                    )
+                    if (wv.tag != shell) {
+                        wv.tag = shell
+                        wv.loadDataWithBaseURL(BODY_BASE_URL, shell, "text/html", "UTF-8", null)
+                    }
+                },
+            )
+        }
+        if (failedImages) {
+            Text(
+                "部分图片加载失败",
+                style = t.caption2,
+                color = c.label2,
+                modifier = Modifier.padding(horizontal = 20.dp, vertical = 4.dp),
+            )
+        }
+    }
+}
+
+private fun String.escapeHtmlForBody(): String = this
+    .replace("&", "&amp;")
+    .replace("<", "&lt;")
+    .replace(">", "&gt;")
+    .replace("\n", "<br>")
+
+private fun bytesLabel(n: Long): String = when {
+    n <= 0 -> ""
+    n < 1024 -> "$n B"
+    n < 1024 * 1024 -> "${n / 1024} KB"
+    else -> String.format("%.1f MB", n / 1024.0 / 1024.0)
 }

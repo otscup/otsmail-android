@@ -60,6 +60,9 @@ internal object TimeFmt {
         return null
     }
 
+    /** 原始时间 → epoch 毫秒（合并排序用；解析不出来返回 null，由调用方兜底）。 */
+    internal fun epochMs(raw: String): Long? = toInstant(raw)?.toEpochMilli()
+
     private fun localOf(raw: String): LocalDateTime? =
         toInstant(raw)?.atZone(zone)?.toLocalDateTime()
 

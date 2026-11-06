@@ -21,6 +21,7 @@ import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.LocalOverscrollConfiguration
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.rememberScrollState
@@ -82,6 +83,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.graphics.painter.Painter
@@ -90,6 +92,11 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.otscup.otsmail.R
 import com.otscup.otsmail.data.Api
+import com.otscup.otsmail.data.ExtLocalMail
+import com.otscup.otsmail.data.ExtMailStore
+import com.otscup.otsmail.data.ExtSync
+import com.otscup.otsmail.data.InboxMerge
+import com.otscup.otsmail.data.MergedMail
 import com.otscup.otsmail.data.friendlyError
 import com.otscup.otsmail.data.MailCache
 import com.otscup.otsmail.data.MailItem
@@ -108,6 +115,7 @@ import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 
 /** 滑动删除的延迟提交作用域：不跟 composition 走，3 秒内退到别的页面也照样提交。 */
 private val swipeUndoScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
@@ -165,7 +173,15 @@ internal object InboxUi {
     var searchScope by mutableStateOf(0)
     /** 「全部帐户」已选中时再点一次 = 强制重拉（不改变 listKey，只用来打破「空列表卡住」）。 */
     var forceTick by mutableStateOf(0)
+    /**
+     * 顶部账户筛选：`""` = 全部（otsmail + 所有第三方）；`"ots"` = 只看当前 otsmail 账号；
+     * `"ext:<id>"` = 只看某个已绑定的第三方邮箱。只影响显示，不改服务端分页与缓存 key。
+     */
+    var extFilter by mutableStateOf("")
 }
+
+/** 收件箱顶部筛选与失败提示用的第三方账户摘要（地址 + 最近一次同步失败原因）。 */
+private data class ExtAccountRow(val extId: Long, val address: String, val lastError: String)
 
 /**
  * 抽屉里「分类 / 账户」两组的展开状态：进程级，和 InboxUi 同级。
@@ -177,12 +193,12 @@ internal object DrawerUi {
     var accountsExpanded by mutableStateOf(false)
 }
 
-/** 列表是「日期 stickyHeader + 邮件行」拼起来的扁平索引，恢复滚动位置要按这个口径算。 */
-private fun flatIndexOf(items: List<MailItem>, emailId: Long): Int? {
+/** 合并列表（服务端 + 第三方）的扁平索引，按 LazyColumn 的稳定 key 定位。 */
+private fun flatIndexOfRows(rows: List<MergedMail>, key: String): Int? {
     var idx = 0
-    for ((_, list) in items.groupBy { TimeFmt.dayKey(it.time) }) {
-        idx++ // 分组头
-        val j = list.indexOfFirst { it.emailId == emailId }
+    for ((_, list) in rows.groupBy { TimeFmt.dayKey(it.timeText) }) {
+        idx++
+        val j = list.indexOfFirst { it.key == key }
         if (j >= 0) return idx + j
         idx += list.size
     }
@@ -239,9 +255,12 @@ fun InboxScreen(
     onOpenDrafts: () -> Unit = {},
     /** 行内右滑 → 回复：由 App 负责拿原文并进写信页 */
     onSwipeReply: (MailItem) -> Unit = {},
+    /** 合并列表里点了第三方邮件：交给 App 打开只读详情 */
+    onOpenExtDetail: (Long) -> Unit = {},
 ) {
     val t = OT.type
     val c = OT.colors
+    val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val drawer = rememberDrawerState(DrawerValue.Closed)
     // 抽屉打开时按返回键先收起抽屉，而不是直接退出 App
@@ -273,6 +292,44 @@ fun InboxScreen(
     var accounts by remember { mutableStateOf<List<Pair<Long, String>>>(emptyList()) }
     var counts by remember { mutableStateOf<Map<String, Int>>(emptyMap()) }
     var catCounts by remember { mutableStateOf<Map<String, Int>>(emptyMap()) }
+
+    // 第三方邮箱：账户摘要（含最近一次同步失败原因）+ 本地已拉取的邮件窗口
+    var extAccounts by remember { mutableStateOf<List<ExtAccountRow>>(emptyList()) }
+    var extMails by remember { mutableStateOf<List<ExtLocalMail>>(emptyList()) }
+    /** 第三方列表的分页步进（本地 SQLite 查询，页大小见下方 load 逻辑） */
+    var extPage by remember { mutableStateOf(1) }
+    var extHasMore by remember { mutableStateOf(false) }
+
+    /**
+     * 第三方账户摘要：地址用于顶部筛选，lastError 用于非弹窗的失败提示。
+     * 本地游标的错误优先（刚失败的那一轮还没回写服务端也能显示）；成功同步后本地会清空，
+     * ExtSync 也会顺手把服务端的 last_error 清掉，避免旧错误一直挂着。
+     */
+    LaunchedEffect(ExtSync.rev, MailSync.rev) {
+        if (com.otscup.otsmail.BuildConfig.DEMO) return@LaunchedEffect
+        ExtMailStore.init(context)
+        extAccounts = withContext(Dispatchers.IO) {
+            runCatching {
+                val arr = Api.extAccounts()
+                buildList {
+                    for (i in 0 until arr.length()) {
+                        val o = arr.optJSONObject(i) ?: continue
+                        val extId = o.optLong("ext_id", 0L)
+                        if (extId <= 0) continue
+                        val local = runCatching { ExtMailStore.cursor(extId)?.lastError }.getOrNull().orEmpty()
+                        val remote = o.optString("sync_error").ifBlank { o.optString("last_error") }
+                        add(ExtAccountRow(extId, o.optString("address"), local.ifBlank { remote }))
+                    }
+                }
+            }.getOrDefault(emptyList())
+        }
+        // 正在筛选的账户已经被解绑：退回「全部」，否则列表会一直空白
+        val f = InboxUi.extFilter
+        if (f.startsWith("ext:")) {
+            val id = f.removePrefix("ext:").toLongOrNull()
+            if (id == null || extAccounts.none { it.extId == id }) InboxUi.extFilter = ""
+        }
+    }
 
     /**
      * 计数必须跟随抽屉当前选中的范围：
@@ -366,6 +423,67 @@ fun InboxScreen(
         val maxIndex = (items.size - 1).coerceAtLeast(0)
         val index = store.scrollIndex.coerceIn(0, maxIndex)
         LazyListState(index, if (index == store.scrollIndex) store.scrollOffset else 0)
+    }
+
+    // ---- 合并列表：服务端 email 表（照旧走 MailCache 分页）+ 本地第三方邮件（按窗口补齐）----
+    val serverSnapshot = items.toList()
+    val hasMoreServer = items.size < store.total
+    val extFilter = InboxUi.extFilter
+    val isExtOnly = extFilter.startsWith("ext:")
+    val filterExtIds = remember(extAccounts, extFilter) {
+        when {
+            extFilter == "ots" -> emptyList()
+            extFilter.startsWith("ext:") -> listOfNotNull(extFilter.removePrefix("ext:").toLongOrNull())
+            else -> extAccounts.map { it.extId }
+        }
+    }
+    val extAddressOf = remember(extAccounts) { extAccounts.associate { it.extId to it.address } }
+    // 关键词对第三方邮件做本地过滤；服务端那份仍是接口搜索，两边互不影响
+    val visibleExt = remember(extMails, keyword) {
+        val k = keyword.trim()
+        if (k.isEmpty()) extMails else extMails.filter { m ->
+            m.subject.contains(k, true) || m.fromName.contains(k, true) || m.fromAddr.contains(k, true) ||
+                m.snippet.contains(k, true) || m.bodyText.contains(k, true)
+        }
+    }
+    val rows = remember(serverSnapshot, visibleExt, isExtOnly, extFilter, hasMoreServer) {
+        InboxMerge.merge(
+            server = if (isExtOnly) emptyList() else serverSnapshot,
+            ext = if (extFilter == "ots") emptyList() else visibleExt,
+            serverEpoch = { TimeFmt.epochMs(it.time) },
+            serverHasMore = hasMoreServer,
+        )
+    }
+
+    // 换筛选 / 改关键词 / 换文件夹：第三方分页从第一页重来
+    LaunchedEffect(extFilter, keyword, listKey) { extPage = 1 }
+
+    /**
+     * 读第三方邮件窗口。
+     * - 服务端还有下一页时，只取「已加载最旧一封」及更新的本地邮件（避免整库进内存、也避免把
+     *   尚未加载的服务端行抢先显示出来）；服务端加载完后 floor=0，放开本地库，按页增长。
+     * - 只筛某个第三方账户时不需要时间下界，本地直接按 60 封一页滚。
+     */
+    LaunchedEffect(filterExtIds, extPage, ExtSync.rev, hasMoreServer, items.size, keyword) {
+        if (filterExtIds.isEmpty()) {
+            extMails = emptyList()
+            extHasMore = false
+            return@LaunchedEffect
+        }
+        if (com.otscup.otsmail.BuildConfig.DEMO) return@LaunchedEffect
+        val floor = if (hasMoreServer) {
+            serverSnapshot.lastOrNull()?.let { TimeFmt.epochMs(it.time) } ?: 0L
+        } else {
+            0L
+        }
+        val limit = if (isExtOnly) 60 * extPage else 200 + 80 * (extPage - 1)
+        extMails = withContext(Dispatchers.IO) {
+            runCatching {
+                ExtMailStore.init(context)
+                ExtMailStore.feed(filterExtIds, floor, limit)
+            }.getOrDefault(emptyList())
+        }
+        extHasMore = extMails.size >= limit
     }
 
     // 下拉刷新：只有手指下拉才转圈；离线时给一句轻提示，不清缓存、不打断阅读
@@ -501,7 +619,8 @@ fun InboxScreen(
         val raw = fetchRaw(1)
         val (freshRaw, total) = Api.parseList(raw)
         val fresh = MailCache.dedupeByEmailId(freshRaw)
-        val anchor = listState.layoutInfo.visibleItemsInfo.firstOrNull { it.key is Long }?.key as? Long
+        // 合并列表的 item key 是字符串（s:<emailId> / x:<extId>:<localId>），按 key 找回位置
+        val anchorKey = listState.layoutInfo.visibleItemsInfo.firstOrNull { it.key is String }?.key as? String
         val anchorOffset = listState.firstVisibleItemScrollOffset
         items.clear()
         items.addAll(fresh)
@@ -512,12 +631,12 @@ fun InboxScreen(
         if (toTop && items.isNotEmpty()) {
             // 无条件回到列表最顶端：firstVisibleItemIndex 可能已经是 0，但第一行（日期头）还滚出去了一截
             listState.scrollToItem(0, 0)
-        } else if (anchor != null) {
-            val target = flatIndexOf(items, anchor)
+        } else if (anchorKey != null) {
+            val target = flatIndexOfRows(rows, anchorKey)
             if (target != null && target != listState.firstVisibleItemIndex) {
                 listState.scrollToItem(target, anchorOffset)
             }
-        } else if (items.isNotEmpty() && listState.firstVisibleItemIndex >= items.size) {
+        } else if (items.isNotEmpty() && listState.firstVisibleItemIndex >= rows.size) {
             // 之前滚到第 2..N 页、但这封锚点邮件不在新首页了：夹回最后一封，避免越界空白
             // 列表变成空时不滚：scrollToItem 要等 LazyColumn 布局，空列表没有可布局的项，会一直挂起
             listState.scrollToItem((items.size - 1).coerceAtLeast(0), 0)
@@ -560,12 +679,21 @@ fun InboxScreen(
         if (refreshing) return
         refreshing = true
         notice = ""
+        // 第三方邮箱：手动下拉 = 立即同步（不受 15 分钟节流限制），与列表刷新并行，不互相等
+        if (!com.otscup.otsmail.BuildConfig.DEMO) {
+            scope.launch { runCatching { ExtSync.runOnce(context) } }
+        }
         runCatching { refreshFirst(toTop = true) }
             .onFailure { e ->
                 notice = if (e is com.otscup.otsmail.data.ApiException) friendlyError(e)
                 else "当前离线，显示缓存内容"
             }
         refreshing = false
+    }
+
+    /** 失败横条 / 空态里的「立即同步」：只跑一轮拉取，结果通过 ExtSync.rev 回到 UI。 */
+    fun syncExtNow() {
+        scope.launch { runCatching { ExtSync.runOnce(context) } }
     }
 
     /** 批量动作：逐条串行；失败只汇总失败数，成功项已经由 MailBatchOps 同步列表与缓存。 */
@@ -692,7 +820,19 @@ fun InboxScreen(
         }
             .distinctUntilChanged()
             .collect { (last, count) ->
-                if (items.size in 1 until store.total && last >= count - 4) loadMore()
+                if (items.size in 1 until store.total && !isExtOnly && last >= count - 4) loadMore()
+            }
+    }
+
+    // 第三方邮件是本地 SQLite 查询：触底就按页扩大窗口（无网络开销，最多 40 页兜底）
+    LaunchedEffect(listState, extHasMore, rows.size, isExtOnly) {
+        snapshotFlow {
+            val info = listState.layoutInfo
+            (info.visibleItemsInfo.lastOrNull()?.index ?: 0) to info.totalItemsCount
+        }
+            .distinctUntilChanged()
+            .collect { (last, count) ->
+                if (extHasMore && rows.isNotEmpty() && last >= count - 4 && extPage < 40) extPage++
             }
     }
 
@@ -992,6 +1132,27 @@ fun InboxScreen(
                             }
                         }
                     }
+                    // 账户筛选：全部 / 当前 otsmail 账号 / 每个已绑定的第三方邮箱。
+                    // 没有第三方账户时整行不出现，不额外占高度。
+                    if (extAccounts.isNotEmpty()) {
+                        Row(
+                            Modifier
+                                .fillMaxWidth()
+                                .horizontalScroll(rememberScrollState())
+                                .padding(horizontal = 16.dp, vertical = 2.dp),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            SearchScopeChip("全部", InboxUi.extFilter == "") { InboxUi.extFilter = "" }
+                            SearchScopeChip(session.email, InboxUi.extFilter == "ots") { InboxUi.extFilter = "ots" }
+                            extAccounts.forEach { acc ->
+                                SearchScopeChip(
+                                    acc.address,
+                                    InboxUi.extFilter == "ext:${acc.extId}",
+                                ) { InboxUi.extFilter = "ext:${acc.extId}" }
+                            }
+                        }
+                    }
                 }
                 val visibleTitle = when {
                     selectMode -> ""
@@ -1028,6 +1189,42 @@ fun InboxScreen(
                 if (notice.isNotEmpty()) {
                     Text(notice, style = t.footnote, color = c.label2, modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 8.dp))
                 }
+                // 第三方邮箱同步失败：行内提示 + 重试，不弹窗、不打断阅读
+                val failedExt = extAccounts.filter { it.lastError.isNotBlank() }
+                if (failedExt.isNotEmpty() && !selectMode) {
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .padding(start = 16.dp, end = 8.dp, top = 8.dp)
+                            .clip(RoundedCornerShape(OT.dimens.rMd.dp))
+                            .background(c.bgInput)
+                            .padding(start = 12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Icon(
+                            painterResource(R.drawable.ot_alert),
+                            contentDescription = null,
+                            tint = c.red,
+                            modifier = Modifier.size(16.dp),
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            text = "${failedExt.joinToString("、") { it.address }} 同步失败：" +
+                                failedExt.first().lastError,
+                            style = t.caption1,
+                            color = c.label2,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f),
+                        )
+                        Box(
+                            Modifier.height(36.dp).tapArea { syncExtNow() }.padding(horizontal = 10.dp),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Text("重试", style = t.caption1, color = c.blue)
+                        }
+                    }
+                }
                 CompositionLocalProvider(LocalOverscrollConfiguration provides null) {
                 PullToRefreshBox(
                     isRefreshing = refreshing,
@@ -1045,12 +1242,44 @@ fun InboxScreen(
                     },
                 ) {
                 when {
-                items.isEmpty() && store.loading ->
+                rows.isEmpty() && store.loading && !isExtOnly ->
                     // 只有确实没有缓存才出现加载态；有缓存时直接渲染内容、后台静默刷新
                     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                         CircularProgressIndicator(color = c.blue, strokeWidth = 2.dp, modifier = Modifier.size(22.dp))
                     }
-                items.isEmpty() ->
+                rows.isEmpty() ->
+                    if (isExtOnly) {
+                        val extId = extFilter.removePrefix("ext:").toLongOrNull() ?: 0L
+                        val addr = extAddressOf[extId].orEmpty()
+                        val err = extAccounts.firstOrNull { it.extId == extId }?.lastError.orEmpty()
+                        Box(Modifier.fillMaxSize()) {
+                            Column(
+                                Modifier.fillMaxWidth(),
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                            ) {
+                                OTEmptyState(
+                                    icon = painterResource(R.drawable.ot_mail),
+                                    title = if (err.isNotBlank()) "这个邮箱同步失败" else "这个邮箱还没有邮件",
+                                    text = when {
+                                        err.isNotBlank() -> err
+                                        keyword.isNotBlank() -> "这个邮箱里没有匹配「$keyword」的邮件"
+                                        else -> "$addr 还没有拉取到邮件，点下面立即同步"
+                                    },
+                                )
+                                Box(
+                                    Modifier
+                                        .height(36.dp)
+                                        .clip(RoundedCornerShape(OT.dimens.rMd.dp))
+                                        .background(c.bgInput)
+                                        .tapArea { syncExtNow() }
+                                        .padding(horizontal = 16.dp),
+                                    contentAlignment = Alignment.Center,
+                                ) {
+                                    Text("立即同步", style = t.subhead, color = c.blue)
+                                }
+                            }
+                        }
+                    } else {
                     Box(Modifier.fillMaxSize()) {
                         val (icon, title, text) = when {
                             keyword.isNotBlank() && InboxUi.searchScope == 2 ->
@@ -1071,8 +1300,9 @@ fun InboxScreen(
                             text = text,
                         )
                     }
+                    }
                 else -> {
-                    val groups = items.groupBy { TimeFmt.dayKey(it.time) }
+                    val groups = rows.groupBy { TimeFmt.dayKey(it.timeText) }
                     LazyColumn(
                         state = listState,
                         modifier = Modifier.fillMaxSize().background(c.bgCard),
@@ -1082,8 +1312,40 @@ fun InboxScreen(
                             stickyHeader(key = "h-$day") {
                                 Box(Modifier.fillMaxWidth().background(c.bgCard)) { OTDayHeader(TimeFmt.dayLabel(day)) }
                             }
-                            list.forEachIndexed { index, mail ->
-                                item(key = mail.emailId) {
+                            list.forEachIndexed { index, row ->
+                                item(key = row.key) {
+                                    val mail = row.server
+                                    val ext = row.ext
+                                    if (ext != null) {
+                                        // 第三方邮件：只读展示，星标/写操作本轮不支持
+                                        Column(Modifier.fillMaxWidth().background(c.bgCard)) {
+                                            if (index > 0) {
+                                                OTDivider(inset = 60, endInset = 16)
+                                            }
+                                            OTMailRow(
+                                                from = ext.fromName.ifEmpty {
+                                                    ext.fromAddr.ifEmpty { "（未知发件人）" }
+                                                },
+                                                subject = ext.subject.ifEmpty { "（无主题）" },
+                                                snippet = ext.snippet,
+                                                time = TimeFmt.rowTime(row.timeText),
+                                                unread = !ext.seen,
+                                                starred = false,
+                                                onOpen = { onOpenExtDetail(ext.localId) },
+                                                onStar = { notice = "第三方邮箱，本轮暂不支持写操作" },
+                                                showAvatar = showAvatars,
+                                                accountColor = if (showAvatars) null
+                                                else accountColorFor(
+                                                    extAccounts.indexOfFirst { it.extId == ext.extId },
+                                                    ext.fromAddr,
+                                                ),
+                                                seed = ext.fromAddr,
+                                                mailboxLabel = extAddressOf[ext.extId],
+                                                hasAttachment = ext.attachmentsJson.isNotBlank() &&
+                                                    ext.attachmentsJson != "[]",
+                                            )
+                                        }
+                                    } else if (mail != null) {
                                     MailSwipeRow(
                                         enabled = !selectMode && !batchBusy,
                                         // 已删除列表里右滑 = 恢复到收件箱；其它列表照旧是回复
@@ -1157,6 +1419,7 @@ fun InboxScreen(
                                         )
                                     }
                                     }
+                                    }
                                 }
                             }
                         }
@@ -1166,11 +1429,15 @@ fun InboxScreen(
                                 horizontalAlignment = Alignment.CenterHorizontally,
                             ) {
                                 Text(
-                                    "共 ${store.total} 封 · 第 ${store.page} / ${((store.total + 19) / 20).coerceAtLeast(1)} 页",
+                                    if (isExtOnly) {
+                                        "共 ${rows.size} 封 · 来自第三方邮箱"
+                                    } else {
+                                        "共 ${store.total} 封 · 第 ${store.page} / ${((store.total + 19) / 20).coerceAtLeast(1)} 页"
+                                    },
                                     style = t.footnote,
                                     color = c.label2,
                                 )
-                                if (items.size < store.total) {
+                                if (items.size < store.total || (isExtOnly && extHasMore)) {
                                     Spacer(Modifier.height(12.dp))
                                     CircularProgressIndicator(
                                         color = c.blue,

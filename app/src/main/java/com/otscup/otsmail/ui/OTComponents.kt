@@ -509,6 +509,8 @@ fun OTMailRow(
     mailboxLabel: String? = null,
     /** 全站列表才传：邮件所属用户的登录邮箱，小字缩在 mailboxLabel 下面 */
     ownerLabel: String? = null,
+    /** 有附件时在摘要行末尾加回形针标记 */
+    hasAttachment: Boolean = false,
 ) {
     val t = OT.type
     val c = OT.colors
@@ -602,14 +604,27 @@ fun OTMailRow(
                     }
                 }
                 Spacer(Modifier.height(1.dp))
-                Text(
-                    snippet,
-                    style = t.footnote,
-                    color = if (unread) c.label else c.label2,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.padding(end = 48.dp),
-                )
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        snippet,
+                        style = t.footnote,
+                        color = if (unread) c.label else c.label2,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f),
+                    )
+                    if (hasAttachment) {
+                        Spacer(Modifier.width(6.dp))
+                        Icon(
+                            painterResource(R.drawable.ot_attach),
+                            contentDescription = "含附件",
+                            tint = c.label3,
+                            modifier = Modifier.size(14.dp),
+                        )
+                    }
+                    // 右下角星标按钮的可点区域，避免文字压上去
+                    Spacer(Modifier.width(48.dp))
+                }
             }
         }
         Box(
