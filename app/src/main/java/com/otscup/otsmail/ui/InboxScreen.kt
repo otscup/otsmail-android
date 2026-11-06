@@ -183,6 +183,10 @@ internal object InboxUi {
 /** 收件箱顶部筛选与失败提示用的第三方账户摘要（地址 + 最近一次同步失败原因）。 */
 private data class ExtAccountRow(val extId: Long, val address: String, val lastError: String)
 
+/** `JSONObject.optString` 会把 JSON 的 null 变成字符串 `"null"`，这里统一当空串处理。 */
+private fun org.json.JSONObject.textOrEmpty(key: String): String =
+    if (isNull(key)) "" else optString(key).takeIf { it != "null" }.orEmpty()
+
 /**
  * 抽屉里「分类 / 账户」两组的展开状态：进程级，和 InboxUi 同级。
  * 进详情再返回、切账户都不丢；不落盘，冷启动回到折叠态（默认只露前 3 项）。
@@ -317,7 +321,7 @@ fun InboxScreen(
                         val extId = o.optLong("ext_id", 0L)
                         if (extId <= 0) continue
                         val local = runCatching { ExtMailStore.cursor(extId)?.lastError }.getOrNull().orEmpty()
-                        val remote = o.optString("sync_error").ifBlank { o.optString("last_error") }
+                        val remote = o.textOrEmpty("sync_error").ifBlank { o.textOrEmpty("last_error") }
                         add(ExtAccountRow(extId, o.optString("address"), local.ifBlank { remote }))
                     }
                 }
@@ -1209,7 +1213,7 @@ fun InboxScreen(
                         )
                         Spacer(Modifier.width(8.dp))
                         Text(
-                            text = "${failedExt.joinToString("、") { it.address }} 同步失败：" +
+                            text = "${failedExt.joinToString("、") { it.address }} 同步异常：" +
                                 failedExt.first().lastError,
                             style = t.caption1,
                             color = c.label2,

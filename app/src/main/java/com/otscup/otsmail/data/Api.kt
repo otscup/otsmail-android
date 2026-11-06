@@ -1,5 +1,6 @@
 package com.otscup.otsmail.data
 
+import android.util.Log
 import com.otscup.otsmail.BuildConfig
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
@@ -145,6 +146,8 @@ object Api {
 
     @Volatile var token: String = ""
 
+    private const val TAG = "Api"
+
     private suspend fun raw(
         method: String,
         path: String,
@@ -173,7 +176,19 @@ object Api {
             val stream = if (code in 200..299) conn.inputStream else conn.errorStream
             val text = stream?.bufferedReader()?.use { it.readText() }.orEmpty()
             conn.disconnect()
-            val json = if (text.isBlank()) JSONObject() else JSONObject(text)
+            val json = if (text.isBlank()) {
+                JSONObject()
+            } else {
+                try {
+                    JSONObject(text)
+                } catch (e: org.json.JSONException) {
+                    // 网关错误页 / 413 / 1102 之类不是 JSON：把状态码和开头一段带出来，
+                    // 否则所有这类失败都会被统一翻成「请求失败，请稍后重试」，看不到真实原因
+                    val body = text.replace(Regex("\\s+"), " ").trim().take(160)
+                    Log.w(TAG, "$method $path 非 JSON 响应 HTTP $code：$body")
+                    throw ApiException(code, "HTTP $code $body")
+                }
+            }
             val bizCode = json.optInt("code", code)
             // 业务错误码优先：服务端 2FA 用 428 表达「缺验证码」，HTTP 状态仍是 200
             val failCode = if (code in 200..299) bizCode else code

@@ -1,6 +1,7 @@
 package com.otscup.otsmail.data
 
 import android.content.Context
+import android.util.Log
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.setValue
@@ -33,6 +34,8 @@ data class ExtSyncReport(
 object ExtSync {
 
     const val DEFAULT_LIMIT = 40
+
+    private const val TAG = "ExtSync"
 
     /** 静默触发的最小间隔；界面批次会换成前台/推送触发，这里只防止每次进收件箱都全量跑 */
     private const val INTERVAL_MS = 15 * 60 * 1000L
@@ -114,8 +117,9 @@ object ExtSync {
                     fetched += result.fetched
                     archived += result.archived
                 } catch (e: Throwable) {
-                    // 单账户失败不影响其他账户
-                    val reason = ExtSyncError.reason(e)
+                    // 单账户失败不影响其他账户；这一轮连登录/列 UID 都没过，属于完全失败
+                    val reason = "完全失败：" + ExtSyncError.reason(e)
+                    Log.w(TAG, "账户 #$extId 同步中断：$reason", e)
                     failed++
                     errors += "#$extId $reason"
                     ExtMailStore.markError(extId, reason)
@@ -152,6 +156,9 @@ object ExtSync {
 
         var processed = 0
         var archived = 0
+        // 单封失败不终止整轮：记下跳过数与原因，游标推过这一封，避免同一封反复卡住
+        var skipped = 0
+        val skippedReasons = mutableListOf<String>()
 
         ExtImapClient(server, address, secret).use { imap ->
             val box = imap.login()
@@ -164,51 +171,90 @@ object ExtSync {
 
             // 首次同步只取最近 limit 封，避免新绑定就把几千封历史全拉下来
             val start = if (lastUid > 0) lastUid + 1 else maxOf(1L, box.uidNext - limit)
-            val uids = imap.listUids(start)
+            // IMAP 的 `n:*` 在 n 大于最大 UID 时会返回最后一封，没有新邮件就直接跳过，免得每轮重拉一封
+            val uids = if (box.uidNext > 0 && start >= box.uidNext) emptyList() else imap.listUids(start)
+            Log.i(TAG, "同步开始 ext=$extId start=$start uidNext=${box.uidNext} 待处理=${uids.size}")
 
             for (uid in uids) {
-                if (processed >= limit) break
-                val fetchedMail = imap.fetch(uid)
-                val parsed = MimeParser.parse(fetchedMail.raw, fetchedMail.internalDateMs)
-                val messageId = parsed.messageId.ifBlank { "uid:$uidValidity:$uid" }
-                val attachmentsJson = attArray(parsed.attachments, withData = false).toString()
+                if (processed + skipped >= limit) break
+                try {
+                    val fetchedMail = imap.fetch(uid)
+                    val parsed = MimeParser.parse(fetchedMail.raw, fetchedMail.internalDateMs)
+                    val messageId = parsed.messageId.ifBlank { "uid:$uidValidity:$uid" }
+                    val attachmentsJson = attArray(parsed.attachments, withData = false).toString()
 
-                val ok = archiveToServer(extId, uid, uidValidity, parsed, messageId, fetchedMail.seen)
+                    val ok = archiveToServer(extId, uid, uidValidity, parsed, messageId, fetchedMail.seen)
 
-                ExtMailStore.upsert(
-                    ExtLocalMail(
-                        extId = extId,
-                        uid = uid,
-                        uidValidity = uidValidity,
-                        messageId = messageId,
-                        subject = parsed.subject,
-                        fromName = parsed.fromName,
-                        fromAddr = parsed.fromAddr,
-                        toName = parsed.toName,
-                        toAddr = parsed.toAddr,
-                        cc = parsed.cc,
-                        dateMs = parsed.dateMs,
-                        seen = fetchedMail.seen,
-                        snippet = MimeParser.snippet(parsed.text, parsed.html),
-                        bodyText = parsed.text,
-                        bodyHtml = parsed.html,
-                        attachmentsJson = attachmentsJson,
-                    ),
-                )
+                    ExtMailStore.upsert(
+                        ExtLocalMail(
+                            extId = extId,
+                            uid = uid,
+                            uidValidity = uidValidity,
+                            messageId = messageId,
+                            subject = parsed.subject,
+                            fromName = parsed.fromName,
+                            fromAddr = parsed.fromAddr,
+                            toName = parsed.toName,
+                            toAddr = parsed.toAddr,
+                            cc = parsed.cc,
+                            dateMs = parsed.dateMs,
+                            seen = fetchedMail.seen,
+                            snippet = MimeParser.snippet(parsed.text, parsed.html),
+                            bodyText = parsed.text,
+                            bodyHtml = parsed.html,
+                            attachmentsJson = attachmentsJson,
+                        ),
+                    )
 
-                lastUid = uid
-                ExtMailStore.saveCursor(extId, address, uidValidity, lastUid, box.uidNext)
-                processed++
-                if (ok) archived++
+                    lastUid = uid
+                    ExtMailStore.saveCursor(extId, address, uidValidity, lastUid, box.uidNext)
+                    processed++
+                    if (ok) archived++
+                } catch (e: Throwable) {
+                    // 连接断了后面每封都会同样失败：游标停在上一封，下一轮从那封续拉
+                    if (isConnectionBroken(e)) throw e
+                    skipped++
+                    val reason = ExtSyncError.reason(e)
+                    skippedReasons += "#$uid $reason"
+                    Log.w(TAG, "UID $uid 处理失败已跳过：$reason", e)
+                    // 游标越过这一封，否则同一封会每轮都失败、永远拉不到后面的邮件
+                    lastUid = uid
+                    ExtMailStore.saveCursor(extId, address, uidValidity, lastUid, box.uidNext)
+                }
             }
 
             val hadError = ExtMailStore.cursor(extId)?.lastError.orEmpty().isNotEmpty()
             ExtMailStore.saveCursor(extId, address, uidValidity, lastUid, box.uidNext)
-            // 上一轮失败过、这轮成功：顺手清掉服务端的 last_error，否则界面会一直挂着旧错误
-            if (hadError) runCatching { Api.extSyncError(extId, "", uidValidity) }
+            // 结算这一轮：部分失败要说清同步了几封、跳过几封；全部失败才算整轮失败
+            val status = when {
+                skipped == 0 -> ""
+                processed == 0 -> "完全失败：$skipped 封全部跳过，" + skippedReasons.first()
+                else -> "已同步 $processed 封，跳过 $skipped 封：" + skippedReasons.first()
+            }
+            Log.i(TAG, "同步结束 ext=$extId 成功=$processed 跳过=$skipped 归档=$archived")
+            if (status.isNotEmpty()) {
+                ExtMailStore.markError(extId, status)
+                runCatching { Api.extSyncError(extId, status, uidValidity) }
+            } else if (hadError) {
+                // 上一轮失败过、这轮干净跑完：顺手清掉服务端 last_error，避免界面一直挂旧错误
+                runCatching { Api.extSyncError(extId, "", uidValidity) }
+            }
         }
 
         return AccountResult(processed, archived)
+    }
+
+    /**
+     * 连接级错误：换下一封也一定会再失败，直接结束这一轮，让游标停在上一封等下次续拉。
+     * 其余异常（单封解析、归档被拒、本地落库）都只跳过这一封。
+     */
+    private fun isConnectionBroken(e: Throwable): Boolean = when (e) {
+        is ExtImapException -> when (e.kind) {
+            ExtProbeFailure.TIMEOUT, ExtProbeFailure.HOST_UNREACHABLE, ExtProbeFailure.TLS_FAILED -> true
+            else -> false
+        }
+        is java.io.IOException -> true
+        else -> false
     }
 
     /** 归档到服务端；返回服务端是否是新插入（重复归档也会返回成功） */
