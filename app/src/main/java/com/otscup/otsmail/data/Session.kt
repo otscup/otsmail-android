@@ -111,6 +111,8 @@ class Session(context: Context) {
         // 否则新账号的通知会被上一账号静音的发送者拦掉，且用户找不到原因。
         PushSettings.clear(appContext)
         PushDedupe.clear(appContext)
+        // 「这封不显示图片」是按账号记的，同样不能带到下一个账号
+        ImagePrefs.clear(appContext)
         // WebView 里可能残留上一个账号登录过的网页 cookie（正文里的外链、OAuth 页面）
         runCatching {
             android.webkit.CookieManager.getInstance().removeAllCookies(null)

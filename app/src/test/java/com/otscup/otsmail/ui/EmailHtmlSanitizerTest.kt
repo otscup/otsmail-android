@@ -24,9 +24,34 @@ class EmailHtmlSanitizerTest {
 
     @Test
     fun `普通样式与图片保留`() {
-        val out = sanitizeEmailHtml("<p style=\"color:#333\">hi</p><img src=\"https://e.x/a.png\">")
+        val out = sanitizeEmailHtml("<p style=\"color:#333\">hi</p><img width=\"600\" height=\"300\" src=\"https://e.x/a.png\">")
         assertTrue(out.contains("style="))
         assertTrue(out.contains("https://e.x/a.png"))
+    }
+
+    @Test
+    fun `追踪像素被换成透明占位`() {
+        val out = sanitizeEmailHtml(
+            "<img width=\"1\" height=\"1\" src=\"https://e.x/open?u=1\">" +
+                "<img style=\"width:1px;height:1px\" src=\"https://e.x/p.gif\">" +
+                "<img style=\"display:none\" src=\"https://e.x/hidden.gif\">",
+        )
+        assertFalse(out.contains("e.x/open"))
+        assertFalse(out.contains("e.x/p.gif"))
+        assertFalse(out.contains("e.x/hidden.gif"))
+        assertTrue(out.contains("data:image/gif"))
+    }
+
+    @Test
+    fun `带尺寸的正常图片不被当成追踪像素`() {
+        val out = sanitizeEmailHtml(
+            "<img width=\"600\" src=\"https://e.x/hero.png\">" +
+                "<img height=\"200\" src=\"https://e.x/b.png\">" +
+                "<img style=\"width:100%\" src=\"https://e.x/c.png\">",
+        )
+        assertTrue(out.contains("https://e.x/hero.png"))
+        assertTrue(out.contains("https://e.x/b.png"))
+        assertTrue(out.contains("https://e.x/c.png"))
     }
 
     @Test
@@ -37,7 +62,7 @@ class EmailHtmlSanitizerTest {
     @Test
     fun `相对图片与链接按服务端 origin 补全`() {
         val out = sanitizeEmailHtml(
-            "<img src=\"/api/mail/img?id=1\"><a href=\"/setting\">x</a><img srcset=\"/a.png 1x, /b.png 2x\">",
+            "<img width=\"600\" src=\"/api/mail/img?id=1\"><a href=\"/setting\">x</a><img width=\"600\" srcset=\"/a.png 1x, /b.png 2x\">",
             "https://mail.example.com/",
         )
         assertTrue(out.contains("src=\"https://mail.example.com/api/mail/img?id=1\""))
@@ -49,8 +74,8 @@ class EmailHtmlSanitizerTest {
     @Test
     fun `绝对地址与锚点不被改写`() {
         val out = sanitizeEmailHtml(
-            "<img src=\"https://e.x/a.png\"><a href=\"#top\">x</a><a href=\"mailto:a@b.c\">m</a>" +
-                "<img src=\"//cdn.x/b.png\">",
+            "<img width=\"600\" src=\"https://e.x/a.png\"><a href=\"#top\">x</a><a href=\"mailto:a@b.c\">m</a>" +
+                "<img width=\"600\" src=\"//cdn.x/b.png\">",
             "https://mail.example.com/",
         )
         assertTrue(out.contains("https://e.x/a.png"))

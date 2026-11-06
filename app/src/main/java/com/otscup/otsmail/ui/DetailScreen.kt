@@ -11,6 +11,7 @@ import android.net.Uri
 import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
+import android.util.Log
 import android.util.LruCache
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
@@ -89,6 +90,7 @@ import com.otscup.otsmail.data.Api
 import com.otscup.otsmail.data.AttachmentTooLarge
 import com.otscup.otsmail.data.AttachmentUnavailable
 import com.otscup.otsmail.data.Attachments
+import com.otscup.otsmail.data.ImagePrefs
 import com.otscup.otsmail.data.MailAtt
 import com.otscup.otsmail.data.MailCache
 import com.otscup.otsmail.data.MailDetail
@@ -140,10 +142,23 @@ private fun serverOrigin(): String = Api.base.removeSuffix("/api") + "/"
  * 1) https 正文里的 http 图片被混合内容策略拦掉；
  * 2) 站点防盗链要求同源 Referer；
  * 3) 部分站点拒绝带 "; wv" 的 WebView UA（换普通 Chrome UA 再试一次）。
- * 隐私口径不变：默认仍然屏蔽，只有用户主动点「显示图片」才会走到这里。
+ * 隐私口径：远程图片默认自动加载，追踪像素（1×1/极小/无有效宽高）另行拦掉；
+ * 用户对某一封点「这封不显示图片」后，这封的所有图片都不再取。
  */
 private object InlineImages {
     private const val MAX_BYTES = 20 * 1024 * 1024
+
+    /**
+     * 服务端图片代理基地址：null = App 直连取图（当前行为）。
+     * 代理只是换成图基地址：渲染、缓存、失败占位、追踪像素拦截都不需要跟着改；
+     * 代理模式下内网/本机目标由服务端校验，客户端不再重复判断。
+     */
+    private val PROXY_BASE: String? = null
+
+    private fun fetchUrl(original: String): String =
+        PROXY_BASE?.trimEnd('/')?.let {
+            "$it?url=" + java.net.URLEncoder.encode(original, "UTF-8")
+        } ?: original
 
     /** 重定向上限：短链/CDN 一般 1~2 跳，4 跳足够；每跳都重新校验 scheme 与目标地址。 */
     private const val MAX_REDIRECTS = 4
@@ -178,11 +193,13 @@ private object InlineImages {
 
     fun load(url: String, webViewUa: String): Pair<String, ByteArray>? {
         cache.get(url)?.let { return it }
+        val target = fetchUrl(url)
+        val proxied = target != url
         val referer = runCatching { URL(url).let { "${it.protocol}://${it.host}/" } }.getOrNull()
         // 默认 UA 已带 "; wv"，wispbyte 这类站反而只放行它；明确拒 wv 的站靠第二档
         val attempts = listOf(webViewUa to referer, BROWSER_UA to referer)
         for ((ua, ref) in attempts) {
-            val fetched = tryFetch(url, ua, ref) ?: continue
+            val fetched = tryFetch(target, ua, ref, checkInternal = !proxied) ?: continue
             cache.put(url, fetched)
             return fetched
         }
@@ -229,12 +246,15 @@ private object InlineImages {
         return false
     }
 
-    private fun tryFetch(url: String, ua: String, referer: String?): Pair<String, ByteArray>? {
+    private fun tryFetch(url: String, ua: String, referer: String?, checkInternal: Boolean): Pair<String, ByteArray>? {
         var current = url
         var hops = 0
         while (hops <= MAX_REDIRECTS) {
             val parsed = runCatching { URL(current) }.getOrNull() ?: return null
-            if (!allowed(parsed) || isInternalTarget(parsed.host.orEmpty())) return null
+            if (!allowed(parsed) || (checkInternal && isInternalTarget(parsed.host.orEmpty()))) {
+                Log.w("OtsImg", "blocked scheme/host: $current")
+                return null
+            }
             val conn = runCatching {
                 (parsed.openConnection() as HttpURLConnection).apply {
                     connectTimeout = 5000
@@ -281,9 +301,8 @@ private object InlineImages {
     }
 }
 
-private val IMG_TAG = Regex("<img\\b[^>]*>", RegexOption.IGNORE_CASE)
-private val IMG_SRC = Regex("(?i)src\\s*=\\s*[\"']([^\"']+)[\"']")
-private val IMG_SRCSET = Regex("(?i)srcset\\s*=\\s*[\"']([^\"']+)[\"']")
+private val IMG_TAG = Regex("(?is)<img\\b[^>]*>")
+private val IMG_SRC_QUOTED = Regex("(?i)\\bsrc\\s*=\\s*([\"'])(.*?)\\1")
 
 /** 把加载失败的 <img> 换成明确的占位卡片（带「在浏览器打开」），而不是静默空白。 */
 private fun replaceFailedImages(html: String, failed: Set<String>, baseUrl: String): String {
@@ -291,7 +310,7 @@ private fun replaceFailedImages(html: String, failed: Set<String>, baseUrl: Stri
     return IMG_TAG.replace(html) { tag ->
         val tagHtml = tag.value
         val candidates = buildList {
-            IMG_SRC.find(tagHtml)?.groupValues?.getOrNull(1)?.let(::add)
+            IMG_SRC_QUOTED.find(tagHtml)?.groupValues?.getOrNull(2)?.let(::add)
             IMG_SRCSET.find(tagHtml)?.groupValues?.getOrNull(1)?.let { set ->
                 set.split(',').forEach { part -> add(part.trim().substringBefore(' ')) }
             }
@@ -375,10 +394,16 @@ fun DetailScreen(
     var translated by remember { mutableStateOf("") }
     // 译文默认覆盖原文；false = 显示译文，true = 显示原文。切换只换渲染，不重新请求接口。
     var showingOriginal by remember { mutableStateOf(false) }
-    // 默认屏蔽外部图片：图片 URL 往往带追踪参数，直接加载会把 IP 和"已读时间"暴露给发件人。
-    // 用户主动点「显示图片」才放行，且只影响当前这封。
-    var showImages by remember(emailId) { mutableStateOf(false) }
-    // 点「显示图片」后仍然取不到的 URL：正文里换成占位卡片，顶部给一行可读状态
+    // 远程图片默认自动加载（与 Gmail 一致）；用户点「这封不显示图片」后按 emailId 持久化，
+    // 只影响这一封：同一发件人的其它邮件仍然自动加载。追踪像素另有独立拦截（见 sanitize）。
+    var showImages by remember(emailId) {
+        mutableStateOf(!ImagePrefs.isBlocked(context, emailId))
+    }
+    fun setShowImages(on: Boolean) {
+        showImages = on
+        ImagePrefs.setBlocked(context, emailId, !on)
+    }
+    // 自动加载后仍然取不到的 URL：正文里换成占位卡片，顶部给一行可读状态
     var failedImages by remember(emailId) { mutableStateOf<Set<String>>(emptySet()) }
     // 后台取图线程只往这里塞，正文重组/重载统一在主线程做，避免边加载边循环重载
     val failedImageSink = remember(emailId) { java.util.Collections.synchronizedSet(mutableSetOf<String>()) }
@@ -744,6 +769,11 @@ fun DetailScreen(
                         serverOrigin(),
                     )
                 }
+                // 关闭这封的图片时不能只靠 blockNetworkImage：WebView 的内存/磁盘缓存仍可能把
+                // 已下载过的图直接画出来（切换后图还在）。在 HTML 层把远程 src 换成透明占位才即时生效。
+                val shownHtml = remember(bodyHtml, showImages) {
+                    if (showImages) bodyHtml else stripRemoteImages(bodyHtml)
+                }
                 val extrasHeight = (if (translated.isNotEmpty()) 30.dp else 0.dp) +
                     (if (bodyHtml.isNotBlank()) 30.dp else 0.dp) +
                     (if (m.attachments.isNotEmpty()) (1.dp + 56.dp * m.attachments.size) else 0.dp) +
@@ -771,8 +801,8 @@ fun DetailScreen(
                         )
                     }
                 }
-                // 图片开关：默认屏蔽远程图片（防 IP/已读回执泄露），用户显式点开才加载。
-                // 正文里没有 <img> 就不显示这条——避免「外部图片已屏蔽」出现在纯文字邮件里。
+                // 图片状态：默认自动加载；这里给「这一封」的撤回入口（按 emailId 记住）。
+                // 正文里没有 <img> 就不显示这条，避免出现在纯文字邮件里。
                 if (baseHtml.isNotBlank() && (baseHtml.contains("<img", ignoreCase = true) || failedImages.isNotEmpty())) {
                     Row(
                         Modifier
@@ -782,7 +812,7 @@ fun DetailScreen(
                     ) {
                         Text(
                             if (failedImages.isNotEmpty()) "${failedImages.size} 张图片加载失败"
-                            else if (showImages) "外部图片已显示" else "外部图片已屏蔽",
+                            else if (showImages) "外部图片已自动加载" else "这封邮件的图片已隐藏",
                             style = t.caption1,
                             color = if (failedImages.isNotEmpty()) c.red else c.label2,
                         )
@@ -804,10 +834,10 @@ fun DetailScreen(
                             Spacer(Modifier.width(12.dp))
                         }
                         Text(
-                            if (showImages) "隐藏图片" else "显示图片",
+                            if (showImages) "这封不显示图片" else "这封显示图片",
                             style = t.caption1.copy(fontWeight = FontWeight.Medium),
                             color = c.blue,
-                            modifier = Modifier.tapArea { showImages = !showImages },
+                            modifier = Modifier.tapArea { setShowImages(!showImages) },
                         )
                     }
                 }
@@ -857,7 +887,7 @@ fun DetailScreen(
                                 OpenPerf.mark("web_created")
                                 // 优先用 App 起好后预热好的实例：省掉引擎初始化的 0.9s+
                                 (WebViewPrewarm.take() ?: WebView(ctx)).apply {
-                                    // 外部邮件正文一律不跑 JS：量高、跳转都已经不用 JS 实现
+                                    // 正文来自外部邮件，不跑 JS
                                     settings.javaScriptEnabled = false
                                     // 默认只放行内联 data: 图片；远程图片的 URL 会泄露 IP 与阅读时间
                                     settings.blockNetworkImage = !showImages
@@ -946,8 +976,7 @@ fun DetailScreen(
                                         override fun onPageFinished(view: WebView?, url: String?) {
                                             super.onPageFinished(view, url)
                                             val w = view ?: return
-                                            val hasContent = (w.tag as? String)?.contains("data-ots=1") == true
-                                            if (hasContent) {
+                                            if ((w.tag as? String)?.contains("data-ots=1") == true) {
                                                 OpenPerf.mark("body_loaded")
                                                 measureBody(w)
                                             }
@@ -957,7 +986,7 @@ fun DetailScreen(
                             },
                             update = { wv ->
                                 // 覆盖而不是追加：译文态只渲染译文，原文态渲染原文；都已做过清洗
-                                val html = bodyHtml
+                                val html = shownHtml
                                 wv.settings.blockNetworkImage = !showImages
                                 wv.settings.mixedContentMode = if (showImages) {
                                     WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
@@ -974,8 +1003,11 @@ fun DetailScreen(
                                 // 显式声明 UTF-8 必须排在 viewport 之前、也是整篇第一个 meta：
                                 // 原信正文自带 <meta charset="gb2312"> 时，浏览器会按那个声明解我们写进去的
                                 // UTF-8 字节，中文就成乱码；先出现的 charset 才能锁定解码方式。
-                                val shell = """<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<style>*{max-width:100%!important;box-sizing:border-box}html,body{width:100%;overflow-x:hidden;-webkit-text-size-adjust:100%}
+                                // 必须有 doctype：没有 doctype 时 WebView 进入怪异模式，原信里的
+                                // body{height:100%} 会把 shell 的 body 压成 0px，正文被整体裁掉（Kimi 那封）。
+                                // height:auto!important 再兜一层：原信 CSS 里的 body 高度声明一律不生效。
+                                val shell = """<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<style>*{max-width:100%!important;box-sizing:border-box}html,body{width:100%;overflow-x:hidden;-webkit-text-size-adjust:100%;height:auto!important;min-height:0!important}
 body{margin:0;padding:0;background:transparent;color:$fg;
 font:15px/20px -apple-system,"Noto Sans SC",sans-serif;letter-spacing:-0.24px;word-break:break-word}
 p{margin:0 0 12px}img,video{max-width:100%;height:auto}a{color:$link}
@@ -1697,7 +1729,54 @@ internal fun sanitizeEmailHtml(raw: String, baseUrl: String = ""): String {
         .replace(Regex("(?i)\\son[a-z]+\\s*=\\s*(\"[^\"]*\"|'[^']*'|[^\\s>]+)"), "")
         .replace(Regex("(?i)javascript:"), "#")
         .replace(Regex("(?i)vbscript:"), "#")
-    return if (baseUrl.isBlank()) cleaned else absolutizeHtmlUrls(cleaned, baseUrl)
+    val safe = neutralizeTrackingPixels(cleaned)
+    return if (baseUrl.isBlank()) safe else absolutizeHtmlUrls(safe, baseUrl)
+}
+
+private val IMG_SRCSET = Regex("(?i)srcset\\s*=\\s*[\"']([^\"']+)[\"']")
+
+/**
+ * 关闭某一封的图片：直接把远程 <img> 的 src/srcset 换成透明占位。
+ * 不能只靠 blockNetworkImage——已经进过 WebView 缓存的图在切换后仍会被直接画出来。
+ */
+private fun stripRemoteImages(html: String): String = IMG_TAG.replace(html) { m ->
+    val tag = m.value
+    val src = IMG_SRC_QUOTED.find(tag)?.groupValues?.getOrNull(2).orEmpty()
+    if (src.isBlank() || src.startsWith("data:", ignoreCase = true)) {
+        tag
+    } else {
+        tag
+            .replace(IMG_SRC_QUOTED) { s -> "src=${s.groupValues[1]}$TRANSPARENT_GIF${s.groupValues[1]}" }
+            .replace(IMG_SRCSET, "")
+    }
+}
+private val SIZE_ATTR = Regex("(?i)\\b(width|height)\\s*=\\s*[\"']?\\s*(\\d+)")
+private val SIZE_STYLE = Regex("(?i)(?:^|[;\"'\\s])(width|height)\\s*:\\s*(\\d+)(?:px|%)")
+private const val TRANSPARENT_GIF =
+    "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7"
+
+/**
+ * 追踪像素默认不加载：1×1 / 极小尺寸 / 完全没有有效宽高的 <img> 直接把 src 换成 1px 透明图，
+ * WebView 就不会替发件人上报「已读」。这类图不随「这封显示图片」恢复，用户要的是看图不是被统计。
+ * 判定只看尺寸声明：任一维 ≤3 视为追踪；两维都没有任何声明视为无有效宽高。
+ */
+private fun neutralizeTrackingPixels(html: String): String = html.replace(IMG_TAG) { m ->
+    val tag = m.value
+    if (!isTrackingPixel(tag)) tag
+    else tag.replace(IMG_SRC_QUOTED) { s ->
+        val quote = s.groupValues[1]
+        "src=$quote$TRANSPARENT_GIF$quote"
+    }
+}
+
+private fun isTrackingPixel(tag: String): Boolean {
+    val lower = tag.lowercase()
+    if (lower.contains("display:none") || lower.contains("display: none")) return true
+    val sizes = SIZE_ATTR.findAll(lower).map { it.groupValues[2].toIntOrNull() }.toList() +
+        SIZE_STYLE.findAll(lower).map { it.groupValues[2].toIntOrNull() }.toList()
+    if (sizes.any { it != null && it <= 3 }) return true
+    // 一个宽高声明都没有：无法判断呈现尺寸，按「无有效宽高」拦掉
+    return sizes.isEmpty()
 }
 
 private val URL_ATTR = Regex("(?i)(?<![-\\w])(src|href)\\s*=\\s*([\"'])(.*?)\\2")
