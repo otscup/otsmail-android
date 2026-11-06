@@ -30,6 +30,7 @@ import com.otscup.otsmail.BuildConfig
 import com.otscup.otsmail.data.Api
 import com.otscup.otsmail.data.AuthState
 import com.otscup.otsmail.data.Demo
+import com.otscup.otsmail.data.ExtSync
 import com.otscup.otsmail.data.MailCache
 import com.otscup.otsmail.data.MailDetail
 import com.otscup.otsmail.data.OAuthTiming
@@ -45,6 +46,10 @@ private sealed interface Route {
     data object Login : Route
     data object Inbox : Route
     data class Detail(val id: Long) : Route
+    /** 「全部邮件」里非本人邮件的只读详情（含 userId=0 的无人收件） */
+    data class SiteDetail(val id: Long) : Route
+    /** 聚合收件：本地第三方邮件的只读详情（按 otsmail_ext.db 的 local_id 取） */
+    data class ExtDetail(val localId: Long) : Route
     data class Compose(
         val to: String,
         val subject: String,
@@ -61,6 +66,8 @@ private sealed interface Route {
         val body: String = "",
     ) : Route
     data object Settings : Route
+    /** 聚合收件：第三方邮箱绑定向导（第一批只做绑定与连通性验证） */
+    data object ExtBind : Route
     data object Contacts : Route
     data object Ai : Route
     data object SystemSettings : Route
@@ -158,6 +165,8 @@ fun OtsApp() {
         if (!loggedIn || !inMail) return@LaunchedEffect
         // 登录后 / token 刷新后登记设备；失败静默，不弹任何提示
         PushManager.syncToken(context)
+        // 聚合收件拉取层：客户端直连 IMAP，15 分钟节流，全程静默（本批不做界面）
+        if (route is Route.Inbox) ExtSync.maybeSync(context)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
             !session.notifAsked &&
             context.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
@@ -233,6 +242,7 @@ fun OtsApp() {
                     onOpenContacts = { go(Route.Contacts) },
                     onOpenAi = { go(Route.Ai) },
                     onOpenDrafts = { go(Route.Drafts) },
+                    onOpenExtDetail = { localId -> go(Route.ExtDetail(localId)) },
                 )
 
                 Route.Contacts -> SlidePage(onDismiss = { goBack() }) {
@@ -263,7 +273,38 @@ fun OtsApp() {
                     AllMailScreen(
                         onBack = { goBack() },
                         onOpen = { go(Route.Detail(it)) },
+                        onOpenReadOnly = { go(Route.SiteDetail(it)) },
                         onToast = toast,
+                    )
+                }
+
+                is Route.SiteDetail -> SlidePage(onDismiss = { goBack() }) {
+                    SiteMailDetailScreen(
+                        emailId = r.id,
+                        onBack = { goBack() },
+                        // 与普通详情同一套回复/转发规则：收件人取原信的 From（不是 userId），
+                        // 发信人始终是当前登录账号，不会把 userId=0 的来源当成自己的地址。
+                        onReply = { m, action ->
+                            val quoted = buildQuoteHtml(m.name.ifEmpty { m.from }, m.content)
+                            when (action) {
+                                ReplyAction.REPLY ->
+                                    go(Route.Compose(m.from, reSubject(m.subject), quoted))
+                                ReplyAction.REPLY_ALL -> {
+                                    val (to, cc) = replyAllRecipients(m, session.email)
+                                    go(Route.Compose(to, reSubject(m.subject), quoted, cc = cc, mode = "replyAll"))
+                                }
+                                ReplyAction.FORWARD ->
+                                    go(Route.Compose("", fwdSubject(m.subject), quoted, mode = "forward"))
+                            }
+                        },
+                        onToast = toast,
+                    )
+                }
+
+                is Route.ExtDetail -> SlidePage(onDismiss = { goBack() }) {
+                    ExtMailDetailScreen(
+                        localId = (route as Route.ExtDetail).localId,
+                        onBack = { goBack() },
                     )
                 }
 
@@ -327,6 +368,14 @@ fun OtsApp() {
                         },
                         onToast = toast,
                         onOpenSystemSettings = { go(Route.SystemSettings) },
+                        onOpenExtAccounts = { go(Route.ExtBind) },
+                    )
+                }
+
+                Route.ExtBind -> SlidePage(onDismiss = { goBack() }) {
+                    ExtBindScreen(
+                        onBack = { goBack() },
+                        onToast = toast,
                     )
                 }
 

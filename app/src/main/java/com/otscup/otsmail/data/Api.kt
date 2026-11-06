@@ -66,6 +66,8 @@ data class MailItem(
     val userId: Long = 0,
     /** 收件邮箱原文（服务端 toEmail）：全站列表行内必须显示，否则分不清邮件属于哪个邮箱 */
     val toEmail: String = "",
+    /** 收件人显示名（服务端 toName，来自原始 To 头）；全站列表优先显示它 */
+    val toName: String = "",
     /** 该邮件所属用户的登录邮箱（服务端 userEmail），用于行内归属标签 */
     val userEmail: String = "",
 )
@@ -91,6 +93,21 @@ data class MailDetail(
     val recipient: List<String> = emptyList(),
     /** 原 Cc 列表：回复全部时带入抄送 */
     val cc: List<String> = emptyList(),
+)
+
+/**
+ * 全站只读邮件：不属于当前账号（含 userId=0 的「无人收件」），服务端 /email/detail 按 userId
+ * 过滤拿不到，正文只能来自 /allEmail/list 的整行返回。详情页只读，不提供任何写操作。
+ */
+data class SiteMail(
+    val detail: MailDetail,
+    val userId: Long,
+    val status: Int,
+    val toEmail: String,
+    /** 收件人显示名（服务端 toName）；详情展示优先用它，空则退回地址 */
+    val toName: String,
+    /** 服务端 text 原文，复制正文时优先用它（HTML 只用来渲染） */
+    val plain: String,
 )
 
 /** 翻译结果：成功时服务端返回 translatedContent；alreadyInTargetLang=true 表示正文本来就是目标语言。 */
@@ -373,6 +390,77 @@ object Api {
         return obj("POST", "/account/add", body)
     }
 
+    // ---- 第三方邮箱（聚合收件，第一批只做绑定与探测） ----
+
+    /** GET /ext/providers：服务端自动探测规则表（客户端另有离线副本）。 */
+    suspend fun extProviders(): JSONArray = arr("GET", "/ext/providers")
+
+    /** GET /ext/accounts：已绑定的第三方邮箱元信息，不含凭据。 */
+    suspend fun extAccounts(): JSONArray = arr("GET", "/ext/accounts")
+
+    /**
+     * POST /ext/bind：提交已验证的凭据。
+     * 明文只在这里传一次，服务端立刻 AES-GCM 加密落库；客户端不缓存。
+     */
+    suspend fun bindExtAccount(
+        address: String,
+        providerId: String,
+        authType: String,
+        secret: String,
+        imapOk: Boolean,
+        smtpOk: Boolean,
+        imapIdle: Boolean,
+        imapHost: String = "",
+        imapPort: Int = 0,
+        smtpHost: String = "",
+        smtpPort: Int = 0,
+    ): JSONObject {
+        val probe = JSONObject()
+            .put("imapOk", imapOk)
+            .put("smtpOk", smtpOk)
+            .put("imapIdle", imapIdle)
+        val body = JSONObject()
+            .put("address", address)
+            .put("providerId", providerId)
+            .put("authType", authType)
+            .put("secret", secret)
+            .put("probe", probe)
+        if (imapHost.isNotEmpty() && imapPort > 0) {
+            body.put("imapHost", imapHost).put("imapPort", imapPort)
+        }
+        if (smtpHost.isNotEmpty() && smtpPort > 0) {
+            body.put("smtpHost", smtpHost).put("smtpPort", smtpPort)
+        }
+        return obj("POST", "/ext/bind", body)
+    }
+
+    /** POST /ext/accounts/delete：解绑，同时把凭据行与本地账户行标记删除。 */
+    suspend fun deleteExtAccount(extId: Long) {
+        raw("POST", "/ext/accounts/delete", JSONObject().put("extId", extId))
+    }
+
+    /**
+     * POST /ext/accounts/credential：拉取层临时取口令（服务端解密后经 TLS 单次下发）。
+     * 调用方只在内存里用到连接结束，绝不落盘、绝不写日志。
+     */
+    suspend fun extCredential(extId: Long): JSONObject =
+        obj("POST", "/ext/accounts/credential", JSONObject().put("extId", extId))
+
+    /** POST /ext/mail/archive：一封一封归档，幂等（按账号 + Message-ID 去重）。 */
+    suspend fun archiveExtMail(body: JSONObject): JSONObject =
+        obj("POST", "/ext/mail/archive", body, readTimeoutMs = 60_000)
+
+    /** POST /ext/mail/sync-error：把这一轮失败原因写回服务端游标表，方便换机后看诊断。 */
+    suspend fun extSyncError(extId: Long, message: String, uidValidity: Long) {
+        raw(
+            "POST", "/ext/mail/sync-error",
+            JSONObject()
+                .put("extId", extId)
+                .put("message", message.take(300))
+                .put("uidValidity", uidValidity),
+        )
+    }
+
     /**
      * 通讯录：/contact/list 的 data 是 { list, total }，取 list。返回 名称/邮箱/分组。
      * q 走服务端 LIKE（name/email 包含匹配），联系人表里没有「最近往来 / 使用频次」字段，
@@ -614,6 +702,40 @@ object Api {
         category: String? = null,
     ): Pair<List<MailItem>, Long> =
         parseList(siteEmailsRaw(page, keyword, type, timeSort, category))
+
+    /**
+     * 全站只读详情：/allEmail/list 返回的就是整行（带 content/text），网页端 /all-email 也是直接
+     * 用列表里的正文渲染、详情 404 被吞掉。所以这里不新增服务端接口，只按 emailId 精确取这一封。
+     *
+     * 列表接口本身按 emailId 游标翻页：page<=0 且 timeSort=1 表示「emailId > 参数」升序取 size 条，
+     * 传 id-1 + size=1 就只命中目标那一封；返回 id 对不上说明已被物理删除。
+     * 只为被点开的这一封取正文，列表映射里不保留整页内容，避免内存翻倍。
+     */
+    suspend fun siteMail(emailId: Long): SiteMail {
+        val cursor = (emailId - 1).coerceAtLeast(0)
+        val d = obj("GET", "/allEmail/list?size=1&page=0&timeSort=1&emailId=$cursor")
+        val row = d.optJSONArray("list")?.optJSONObject(0)
+        if (row == null || row.optLong("emailId") != emailId) {
+            throw ApiException(404, "邮件已不存在或无权查看")
+        }
+        return SiteMail(
+            detail = parseDetail(row),
+            userId = row.optLong("userId"),
+            status = row.optInt("status"),
+            toEmail = row.optString("toEmail"),
+            toName = row.optString("toName"),
+            plain = row.optString("text"),
+        )
+    }
+
+    /**
+     * DELETE /allEmail/delete?emailIds=：全站物理删除（不进回收站）。
+     * 只用于「全部邮件」里不属于当前账号的那封；权限由服务端 all-email:delete 判定，
+     * 403 会原样抛给调用方提示，不做假成功。
+     */
+    suspend fun siteDelete(emailId: Long) {
+        obj("DELETE", "/allEmail/delete?emailIds=$emailId")
+    }
 
     /** GET /analysis/echarts：总览计数、15 天用户/邮件增长、发件人占比、今日发送。 */
     suspend fun analysisEcharts(): JSONObject = obj("GET", "/analysis/echarts")
@@ -919,6 +1041,7 @@ object Api {
                 recipient = firstAddress(o.optString("recipient")),
                 userId = o.optLong("userId"),
                 toEmail = o.optString("toEmail"),
+                toName = o.optString("toName"),
                 userEmail = o.optString("userEmail"),
             )
         }

@@ -92,6 +92,7 @@ fun SettingsScreen(
     onBack: () -> Unit,
     onToast: (String) -> Unit,
     onOpenSystemSettings: () -> Unit = {},
+    onOpenExtAccounts: () -> Unit = {},
 ) {
     val c = OT.colors
     val t = OT.type
@@ -310,6 +311,13 @@ fun SettingsScreen(
 
             OTGroupHeader("第三方账户")
             OTGroup(Modifier.padding(horizontal = OTSpace.s4)) {
+                SettingRow(
+                    title = "聚合邮箱",
+                    value = "Gmail / Outlook / 163 / QQ",
+                    showChevron = true,
+                    onClick = onOpenExtAccounts,
+                )
+                OTDivider(inset = 16)
                 SettingRow(title = "GitHub", value = "仅网页端")
                 OTDivider(inset = 16)
                 SettingRow(title = "Google", value = "仅网页端")
