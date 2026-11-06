@@ -72,6 +72,29 @@ class EmailHtmlSanitizerTest {
     }
 
     @Test
+    fun `CSS 背景图与 video poster 的相对地址也按服务端 origin 补全`() {
+        val out = sanitizeEmailHtml(
+            "<div style=\"background-image:url('/api/proxy/image?url=x')\">x</div>" +
+                "<video poster=\"/api/proxy/image?url=y\"></video>" +
+                "<style>.b{background:url(/api/proxy/image?url=z)}</style>",
+            "https://mail.example.com/",
+        )
+        assertTrue(out.contains("url('https://mail.example.com/api/proxy/image?url=x')"))
+        assertTrue(out.contains("poster=\"https://mail.example.com/api/proxy/image?url=y\""))
+        assertTrue(out.contains("url(https://mail.example.com/api/proxy/image?url=z)"))
+    }
+
+    @Test
+    fun `CSS 里的 data 与锚点引用不被改写`() {
+        val out = sanitizeEmailHtml(
+            "<div style=\"background:url(#grad)\"></div><img width=\"600\" src=\"data:image/gif;base64,R0lGOD\">",
+            "https://mail.example.com/",
+        )
+        assertTrue(out.contains("url(#grad)"))
+        assertTrue(out.contains("data:image/gif;base64"))
+    }
+
+    @Test
     fun `绝对地址与锚点不被改写`() {
         val out = sanitizeEmailHtml(
             "<img width=\"600\" src=\"https://e.x/a.png\"><a href=\"#top\">x</a><a href=\"mailto:a@b.c\">m</a>" +
