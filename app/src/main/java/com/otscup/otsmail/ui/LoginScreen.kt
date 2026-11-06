@@ -296,14 +296,19 @@ fun LoginScreen(session: Session, onLoggedIn: () -> Unit) {
                     OAuthRequest(url, cfg.optString("callbackUrl"), "oidc", id, state, nonce, verifier)
                 } else {
                     val state = "${p.key}:$nonce"
+                    // GitHub / Google / linux.do 同样走 PKCE：自定义 scheme 回调没有 App Links
+                    // 校验，没有 PKCE 时 code 一旦被同设备 App 截获就能直接换 token。
+                    val verifier = randomVerifier()
                     val url = p.authorize + "?" + encodeQuery(
                         "client_id" to p.clientId,
                         "redirect_uri" to p.callback,
                         "response_type" to "code",
                         "scope" to p.scope,
                         "state" to state,
+                        "code_challenge" to pkceChallenge(verifier),
+                        "code_challenge_method" to "S256",
                     )
-                    OAuthRequest(url, p.callback, p.key, "", state, nonce, "")
+                    OAuthRequest(url, p.callback, p.key, "", state, nonce, verifier)
                 }
             }.onSuccess {
                 oauthPending = it

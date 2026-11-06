@@ -6,6 +6,7 @@ import android.util.Log
 import com.google.firebase.messaging.FirebaseMessagingService
 import com.google.firebase.messaging.RemoteMessage
 import com.otscup.otsmail.data.PushManager
+import com.otscup.otsmail.data.Session
 import com.otscup.otsmail.ui.MailSync
 
 /**
@@ -42,8 +43,11 @@ class OtsMessagingService : FirebaseMessagingService() {
             .ifEmpty { message.notification?.body.orEmpty() }
 
         if (emailId > 0L) {
+            // 未登录（或已退出登录但服务端仍登记着这台设备）时不展示任何通知：
+            // 否则通知栏会露出上一个账号的发件人/主题/摘要。
+            val loggedIn = Session(this).token.isNotEmpty()
             // 去重：data-only 永远为 true（保持现状）；带 notification 块且同 emailId 已展示过则跳过
-            val show = PushDedupe.decide(this, emailId, message.notification != null)
+            val show = loggedIn && PushDedupe.decide(this, emailId, message.notification != null)
             if (show) {
                 PushNotifications.showMail(this, emailId, from, name, subject, snippet)
             }

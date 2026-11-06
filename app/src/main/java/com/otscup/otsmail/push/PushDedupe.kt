@@ -63,6 +63,13 @@ object PushDedupe {
         return result
     }
 
+    /** 退出登录/换号：去重表属于上一个账号的通知历史，不能带到下一个账号。 */
+    @Synchronized
+    fun clear(ctx: Context) {
+        mem.clear()
+        ctx.getSharedPreferences(SP, Context.MODE_PRIVATE).edit().remove(KEY).apply()
+    }
+
     private fun read(ctx: Context): Map<Long, Long> {
         val raw = ctx.getSharedPreferences(SP, Context.MODE_PRIVATE).getString(KEY, null) ?: return emptyMap()
         val arr = runCatching { JSONArray(raw) }.getOrNull() ?: return emptyMap()

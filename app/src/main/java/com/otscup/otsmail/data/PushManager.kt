@@ -18,8 +18,8 @@ import kotlin.coroutines.resume
  * FCM token 的获取与「设备登记」上报。
  *
  * 约定见 [PushScaffold]：POST /push/device、DELETE /push/device。
- * 服务端还没实现该接口，所以这里所有失败都必须静默（只写 logcat），不能影响任何界面；
- * 失败后写退避时间，下次进收件箱不会立刻再打一次，避免 404 重试风暴。
+ * 登录态过期、断网、服务端 5xx 都可能让登记/注销失败；失败只写 logcat + 退避，
+ * 不能影响任何界面（服务端接口已上线，但错误处理不能假设它总是成功）。
  */
 object PushManager {
 
@@ -87,7 +87,7 @@ object PushManager {
         }
     }
 
-    /** 退出登录时注销设备；失败静默（服务端接口未实现时就是 404）。 */
+    /** 退出登录时注销设备；失败只记日志并清掉登记标记，下次登录会重新登记。 */
     fun unregisterAsync(context: Context) {
         if (!PushScaffold.ENABLED) return
         val app = context.applicationContext

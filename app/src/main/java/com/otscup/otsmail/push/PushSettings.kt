@@ -64,6 +64,14 @@ object PushSettings {
         sp(context).edit().putStringSet(KEY_MUTED, mutedSenders(context) - k).apply()
     }
 
+    /**
+     * 退出登录/换号：只清与账号绑定的静音名单（它来自上一个账号的邮件与联系人）。
+     * 总开关/声音/震动/免打扰是设备级偏好，下个账号继续沿用，不清。
+     */
+    fun clear(context: Context) {
+        sp(context).edit().remove(KEY_MUTED).apply()
+    }
+
     fun dndEnabled(context: Context): Boolean = sp(context).getBoolean(KEY_DND_ON, false)
 
     fun setDndEnabled(context: Context, value: Boolean) {
