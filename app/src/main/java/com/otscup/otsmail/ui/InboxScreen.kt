@@ -249,7 +249,9 @@ fun InboxScreen(
     // 入口选择放在 InboxUi 里：进详情会把这里的 composition 整个销毁，
     // 只有进程级状态能让返回时还是同一个 mailbox / 分类 / 搜索词。
     val current = mailboxes.firstOrNull { it.key == InboxUi.boxKey } ?: mailboxes[0]
-    val keyword = InboxUi.keyword
+    // 星标列表的 /star/list 不接受 keyword：进星标时把关键词视为空（搜索框也隐藏），
+    // 否则会把"全部星标"当成关键词搜索结果缓存进快照，看起来像搜索坏了。
+    val keyword = if (current.key == "starred") "" else InboxUi.keyword
     /** 输入框里的字（防抖 280ms 后才成为真正生效的 keyword，避免每敲一个字就换一份列表快照） */
     var kwText by remember { mutableStateOf(InboxUi.keyword) }
     LaunchedEffect(kwText) {
@@ -257,6 +259,10 @@ fun InboxScreen(
             kotlinx.coroutines.delay(280)
             InboxUi.keyword = kwText
         }
+    }
+    // 搜索框清空后，带关键词的快照就只是垃圾，立刻释放内存（磁盘行由字节预算兜底回收）
+    LaunchedEffect(keyword) {
+        if (keyword.isBlank()) MailCache.dropKeywordSnapshots()
     }
     val category = if (current.key == "receive") InboxUi.category else ""
     val allAccounts = InboxUi.allAccounts
@@ -938,7 +944,10 @@ fun InboxScreen(
                             )
                         }
                         Spacer(Modifier.width(8.dp))
-                        OTSearchPill(value = kwText, onValueChange = { kwText = it }) {
+                        if (current.key == "starred") {
+                            // 星标接口不支持关键词：这里不展示搜索框，避免"搜了却返回全部星标"的错觉。
+                            // AI 入口保留，否则星标页会少一个快捷方式。
+                            Spacer(Modifier.weight(1f))
                             Box(
                                 Modifier
                                     .size(38.dp)
@@ -947,6 +956,18 @@ fun InboxScreen(
                                 contentAlignment = Alignment.Center,
                             ) {
                                 AiStarGradient(22.dp)
+                            }
+                        } else {
+                            OTSearchPill(value = kwText, onValueChange = { kwText = it }) {
+                                Box(
+                                    Modifier
+                                        .size(38.dp)
+                                        .clip(CircleShape)
+                                        .tapArea { onOpenAi() },
+                                    contentAlignment = Alignment.Center,
+                                ) {
+                                    AiStarGradient(22.dp)
+                                }
                             }
                         }
                     }

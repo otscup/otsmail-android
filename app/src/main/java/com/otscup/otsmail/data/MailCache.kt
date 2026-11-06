@@ -33,6 +33,8 @@ class ListSnapshot(val key: String, val accountId: Long) {
     var scrollOffset by mutableStateOf(0)
     /** 已应用过的 MailSync 版本；用于判断「详情里改过东西，回来要静默刷新」。 */
     var syncRev by mutableStateOf(-1)
+    /** 最近一次被 [MailCache.list] 取用的时间，只用来做内存淘汰。 */
+    var lastUsedAt: Long = 0L
 }
 
 /**
@@ -67,16 +69,56 @@ object MailCache {
     private var db: CacheDb? = null
     private val lists = HashMap<String, ListSnapshot>()
     private val details = HashMap<Long, DetailEntry>()
-    private val translations = HashMap<Long, String>()
+    private val translations = LinkedHashMap<Long, String>()
+
+    /*
+     * 内存上限：磁盘有字节预算，内存也需要一条硬线，否则长会话（反复搜索 + 连续读长正文）
+     * 会一直涨到 OOM。数值按"够用且可解释"取：
+     * - 8 个列表快照 = 当前入口 + 最近 7 个入口（抽屉里 5 个信箱 + 常驻的分类/搜索）；
+     * - 50 封正文 ≈ 5~10MB HTML（单封正文页通常 100~200KB），够覆盖一次连续阅读；
+     * - 50 条译文同上，翻译缓存只是切"原文/译文"用的热数据。
+     * 淘汰按"最久没被打开"，被淘汰的数据仍在 SQLite 里，回来时从磁盘读。
+     */
+    private const val MAX_LIST_SNAPSHOTS = 8
+    private const val MAX_DETAIL_ENTRIES = 50
+    private const val MAX_TRANSLATIONS = 50
 
     private data class DetailEntry(val mail: MailDetail, val at: Long, val opened: Boolean)
+
+    /** 正文内存上限：超了就从最久没写入的开始丢，磁盘副本还在。 */
+    private fun evictDetailsIfNeeded() {
+        if (details.size <= MAX_DETAIL_ENTRIES) return
+        details.entries.sortedBy { it.value.at }
+            .take(details.size - MAX_DETAIL_ENTRIES)
+            .forEach { details.remove(it.key) }
+    }
 
     fun init(context: Context) {
         if (db == null) db = CacheDb(context.applicationContext)
     }
 
-    fun list(key: String, accountId: Long): ListSnapshot =
-        lists.getOrPut(key) { ListSnapshot(key, accountId) }
+    fun list(key: String, accountId: Long): ListSnapshot {
+        lists[key]?.let {
+            it.lastUsedAt = System.currentTimeMillis()
+            return it
+        }
+        // 超出上限先淘汰最久没用过的快照；被淘汰的数据仍在 SQLite，回来时重新读盘
+        if (lists.size >= MAX_LIST_SNAPSHOTS) {
+            lists.entries.minByOrNull { it.value.lastUsedAt }?.let { lists.remove(it.key) }
+        }
+        return ListSnapshot(key, accountId).also {
+            it.lastUsedAt = System.currentTimeMillis()
+            lists[key] = it
+        }
+    }
+
+    /**
+     * 搜索框被清空时调用：所有带关键词的快照都只是临时查询结果，连内存带引用一起释放。
+     * 当前正在看的空关键词快照（key 以 "|kw:" 结尾）不受影响。
+     */
+    fun dropKeywordSnapshots() {
+        lists.keys.filter { it.substringAfter("|kw:", "").isNotEmpty() }.forEach { lists.remove(it) }
+    }
 
     /** 从任意已加载快照里找一行：详情页一进来就能先用列表里的标题/发件人占位。 */
     fun findItem(emailId: Long): MailItem? {
@@ -94,6 +136,9 @@ object MailCache {
     fun translation(emailId: Long): String? = translations[emailId]
 
     fun putTranslation(emailId: Long, html: String) {
+        if (!translations.containsKey(emailId) && translations.size >= MAX_TRANSLATIONS) {
+            translations.keys.firstOrNull()?.let { translations.remove(it) }
+        }
         translations[emailId] = html
     }
 
@@ -132,6 +177,7 @@ object MailCache {
      */
     suspend fun saveDetail(mail: MailDetail, opened: Boolean = true) {
         details[mail.emailId] = DetailEntry(mail, System.currentTimeMillis(), opened)
+        evictDetailsIfNeeded()
         withContext(Dispatchers.IO) {
             val h = db ?: return@withContext
             val now = System.currentTimeMillis()
