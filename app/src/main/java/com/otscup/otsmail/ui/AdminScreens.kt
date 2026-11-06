@@ -111,7 +111,12 @@ internal object AllMailUi {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun AllMailScreen(onBack: () -> Unit, onOpen: (Long) -> Unit, onToast: (String) -> Unit) {
+fun AllMailScreen(
+    onBack: () -> Unit,
+    onOpen: (Long) -> Unit,
+    onOpenReadOnly: (Long) -> Unit,
+    onToast: (String) -> Unit,
+) {
     val c = OT.colors
     val t = OT.type
     val d = OT.dimens
@@ -359,9 +364,10 @@ fun AllMailScreen(onBack: () -> Unit, onOpen: (Long) -> Unit, onToast: (String) 
                     starred = m.starred,
                     category = null,
                     onOpen = {
-                        // 服务端 /email/detail 仍按 userId 校验：别人的邮件点开只会报错
+                        // /email/detail 按 userId 过滤，别人的邮件（含 userId=0 的无人收件）必然 404；
+                        // 这类走全站只读详情，正文取 /allEmail/list 带回的整行内容。
                         if (myUserId > 0 && m.userId != myUserId) {
-                            notice = "他人邮件：全站列表只读，详情请到网页端查看"
+                            onOpenReadOnly(m.emailId)
                         } else {
                             onOpen(m.emailId)
                         }
@@ -370,8 +376,10 @@ fun AllMailScreen(onBack: () -> Unit, onOpen: (Long) -> Unit, onToast: (String) 
                     selectionMode = false,
                     selected = false,
                     onStar = {},
-                    // 全站数据里同一账户/不同账户混杂：行尾必须显示收件邮箱，拿不到才退回收件人
-                    mailboxLabel = m.toEmail.takeIf { it.isNotBlank() }
+                    // 全站数据里同一账户/不同账户混杂：行尾显示收件人姓名（服务端 toName），
+                    // 没有姓名才退回收件邮箱，最后退回收件人字段
+                    mailboxLabel = m.toName.takeIf { it.isNotBlank() }
+                        ?: m.toEmail.takeIf { it.isNotBlank() }
                         ?: m.recipient.takeIf { it.isNotBlank() },
                     // 所属用户（登录邮箱）单列一行小字；userId 只用来判断是否本人，不直接展示
                     ownerLabel = m.userEmail.takeIf { it.isNotBlank() && it != m.toEmail },
