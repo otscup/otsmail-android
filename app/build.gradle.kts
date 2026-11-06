@@ -45,8 +45,8 @@ android {
 
     /**
      * 版本号规则（确定性、可校验）：
-     * - versionName 由 tag 派生（CI 传 -PversionName=vX.Y.Z 去掉 v），本地默认 0.2.4；
-     * - versionCode = major*10000 + minor*100 + patch，例如 0.2.4 -> 204，0.3.0 -> 300。
+     * - versionName 由 tag 派生（CI 传 -PversionName=vX.Y.Z 去掉 v），本地默认 0.2.5；
+     * - versionCode = major*10000 + minor*100 + patch，例如 0.2.5 -> 205，0.3.0 -> 300。
      *   只升不降：major/minor/patch 任一位递增后都比旧值大。
      * release.yml 会用 aapt 断言包内版本与 tag 一致，versionCode 与上式一致。
      */
@@ -62,7 +62,7 @@ android {
         ?.removePrefix("v")
         ?.trim()
         ?.takeIf { it.isNotEmpty() }
-        ?: "0.2.4"
+        ?: "0.2.5"
     val tagVersionCode = (project.findProperty("versionCode") as String?)?.toIntOrNull()
         ?: versionCodeOf(tagVersionName)
 

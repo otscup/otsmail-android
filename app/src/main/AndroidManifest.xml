@@ -71,7 +71,7 @@
         <!-- 服务端走 data 消息时才用得上这两个兜底（通知栏小图标/渠道） -->
         <meta-data
             android:name="com.google.firebase.messaging.default_notification_icon"
-            android:resource="@drawable/ot_mail" />
+            android:resource="@drawable/ic_notif_at" />
         <meta-data
             android:name="com.google.firebase.messaging.default_notification_channel_id"
             android:value="ot_mail_push" />

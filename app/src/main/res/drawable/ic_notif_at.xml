@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 通知小图标：24dp 单色剪影，@ 描边路径取自 ic_brand_mark（512 视口，stroke 40.07），
+     缩放后笔画约 1.9dp，和预览图里 72px 下 5px 的粗细一致。透明底、无外框，
+     颜色由系统按状态栏主题统一着色（深色主题白、浅色主题深灰），这里填白色即可。 -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="512"
+    android:viewportHeight="512">
+    <path
+        android:fillColor="@android:color/transparent"
+        android:strokeColor="#FFFFFFFF"
+        android:strokeWidth="40.07"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:pathData="M331.65,239.08L331.65,324.91L422.07,324.91M276.76,396.44A147.54,147.54 0 1,1 378.91,324.91M170.64,251.14a80.51,80.51 0 1,0 161.01,0a80.51,80.51 0 1,0 -161.01,0" />
+</vector>

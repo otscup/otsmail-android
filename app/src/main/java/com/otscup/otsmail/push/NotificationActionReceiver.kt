@@ -42,7 +42,6 @@ class NotificationActionReceiver : BroadcastReceiver() {
                         PushNotifications.ACTION_READ -> markRead(app, emailId)
                         PushNotifications.ACTION_DELETE -> delete(app, emailId)
                         PushNotifications.ACTION_REPLY -> reply(app, intent, emailId)
-                        PushNotifications.ACTION_MUTE_SENDER -> muteSender(app, intent)
                     }
                 }
             } catch (e: Throwable) {
@@ -97,17 +96,6 @@ class NotificationActionReceiver : BroadcastReceiver() {
         )
         notifyListChanged()
         PushNotifications.cancel(context, emailId)
-    }
-
-    /** 静音发件人：纯本地偏好，不发网络；通知本身保留（已读/删除另有两个按钮）。 */
-    private fun muteSender(context: Context, intent: Intent) {
-        val sender = intent.getStringExtra(PushNotifications.EXTRA_SENDER).orEmpty().trim()
-        if (sender.isEmpty()) {
-            toast(context, "缺少发件人地址，无法静音")
-            return
-        }
-        PushSettings.mute(context, sender)
-        toast(context, "已静音 $sender")
     }
 
     private fun reSubject(subject: String): String {

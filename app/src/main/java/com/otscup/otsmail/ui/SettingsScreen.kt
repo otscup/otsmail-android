@@ -657,6 +657,7 @@ fun SystemSettingsScreen(
     var pushSound by remember { mutableStateOf(PushSettings.sound(context)) }
     var pushVibrate by remember { mutableStateOf(PushSettings.vibrate(context)) }
     var mutedSenders by remember { mutableStateOf(PushSettings.mutedSenders(context)) }
+    var muteInput by remember { mutableStateOf("") }
     var dndOn by remember { mutableStateOf(PushSettings.dndEnabled(context)) }
     var dndStart by remember { mutableStateOf(PushSettings.dndStart(context)) }
     var dndEnd by remember { mutableStateOf(PushSettings.dndEnd(context)) }
@@ -856,11 +857,48 @@ fun SystemSettingsScreen(
                 modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp),
             )
             Text(
-                "被静音的发件人不再弹通知；邮件仍进列表，未读数照常。可在通知的「静音此发件人」按钮里添加。",
+                "被静音的发件人不再弹通知；邮件仍进列表，未读数照常。可在邮件详情「更多」里加入，也可以在下面手动添加。",
                 style = t.footnote,
                 color = c.label2,
                 modifier = Modifier.padding(horizontal = 20.dp, vertical = 4.dp),
             )
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                BasicTextField(
+                    value = muteInput,
+                    onValueChange = { muteInput = it },
+                    singleLine = true,
+                    textStyle = t.body.copy(color = c.label),
+                    cursorBrush = SolidColor(c.blue),
+                    modifier = Modifier.weight(1f),
+                    decorationBox = { inner ->
+                        if (muteInput.isEmpty()) {
+                            Text("发件人邮箱，如 someone@example.com", style = t.body, color = c.label3)
+                        }
+                        inner()
+                    },
+                )
+                Text(
+                    "添加",
+                    style = t.subhead,
+                    color = c.blue,
+                    modifier = Modifier.tapArea {
+                        val addr = muteInput.trim().lowercase()
+                        when {
+                            !isEmailLike(addr) -> onToast("请输入有效的邮箱地址")
+                            mutedSenders.contains(addr) -> onToast("该发件人已在静音列表")
+                            else -> {
+                                PushSettings.mute(context, addr)
+                                mutedSenders = PushSettings.mutedSenders(context)
+                                muteInput = ""
+                                onToast("已静音该发件人；静音只影响弹通知，邮件照常进入列表")
+                            }
+                        }
+                    },
+                )
+            }
             if (mutedSenders.isEmpty()) {
                 Text(
                     "还没有静音的发件人",
@@ -1018,6 +1056,11 @@ fun SystemSettingsScreen(
 /** 系统层面该 App 的通知是否打开（Android 13+ 还包含 POST_NOTIFICATIONS 的结果）。 */
 private fun notificationsEnabled(context: Context): Boolean =
     context.getSystemService(NotificationManager::class.java)?.areNotificationsEnabled() ?: true
+
+/** 只做基本格式校验，不校验 DNS/可达性。 */
+private val EMAIL_LIKE = Regex("^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}$")
+
+private fun isEmailLike(value: String): Boolean = EMAIL_LIKE.matches(value)
 
 /** 免打扰时间选择：用系统时钟对话框，分钟数存回 prefs。 */
 private fun pickTime(context: Context, initialMinutes: Int, onPicked: (Int) -> Unit) {

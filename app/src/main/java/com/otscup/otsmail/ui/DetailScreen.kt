@@ -94,6 +94,7 @@ import com.otscup.otsmail.data.MailCache
 import com.otscup.otsmail.data.MailDetail
 import com.otscup.otsmail.data.aiErrorText
 import com.otscup.otsmail.data.friendlyError
+import com.otscup.otsmail.push.PushSettings
 import com.otscup.otsmail.ui.theme.OT
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
@@ -1179,6 +1180,20 @@ blockquote{margin:8px 0;padding-left:10px;border-left:3px solid $quote;color:$sy
                         MoreItem("移动") {
                             moreOpen = false
                             moveSheet = true
+                        }
+                        // 通知栏最多 3 个按钮，静音入口放这里才点得到
+                        MoreItem(if (PushSettings.isMuted(context, m.from)) "取消静音发件人" else "静音此发件人") {
+                            moreOpen = false
+                            val sender = m.from.trim()
+                            if (sender.isEmpty()) {
+                                onToast("该邮件没有发件人地址，无法静音")
+                            } else if (PushSettings.isMuted(context, sender)) {
+                                PushSettings.unmute(context, sender)
+                                onToast("已取消静音，该发件人之后会恢复弹通知")
+                            } else {
+                                PushSettings.mute(context, sender)
+                                onToast("已静音该发件人；静音只影响弹通知，邮件照常进入列表")
+                            }
                         }
                         MoreItem("打印", dimmed = true) {
                             moreOpen = false

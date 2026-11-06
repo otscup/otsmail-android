@@ -38,7 +38,6 @@ object PushNotifications {
     const val ACTION_READ = "com.otscup.otsmail.push.READ"
     const val ACTION_DELETE = "com.otscup.otsmail.push.DELETE"
     const val ACTION_REPLY = "com.otscup.otsmail.push.REPLY"
-    const val ACTION_MUTE_SENDER = "com.otscup.otsmail.push.MUTE_SENDER"
     const val EXTRA_REPLY_TEXT = "replyText"
     const val EXTRA_SENDER = "sender"
     const val EXTRA_SUBJECT = "subject"
@@ -174,7 +173,7 @@ object PushNotifications {
 
         val group = "sender:" + from.trim().lowercase().ifEmpty { "unknown" }
 
-        // 四个快捷操作：已读、删除、快速回复（RemoteInput 允许在通知栏直接输入）、静音发件人
+        // 三个快捷操作：已读、删除、快速回复（RemoteInput 允许在通知栏直接输入）
         val readPending = actionIntent(context, emailId, ACTION_READ, mutable = false)
         val deletePending = actionIntent(context, emailId, ACTION_DELETE, mutable = false)
         val replyPending = actionIntent(
@@ -187,16 +186,10 @@ object PushNotifications {
             .addRemoteInput(replyInput)
             .setAllowGeneratedReplies(true)
             .build()
-        // 没有发件人地址就没法静音，这种情况不挂这个按钮
-        val muteAction = from.trim().takeIf { it.isNotEmpty() }?.let { sender ->
-            Notification.Action.Builder(
-                0, "静音此发件人",
-                actionIntent(context, emailId, ACTION_MUTE_SENDER, mutable = false, from = sender),
-            ).build()
-        }
-
+        // 通知最多只渲染 3 个 action，第 4 个会被 SystemUI 直接丢弃；
+        // 静音入口改放邮件详情「更多」与设置页，避免按钮存在但点不到。
         val builder = Notification.Builder(context, PushSettings.channelId(context))
-            .setSmallIcon(R.drawable.ot_mail)
+            .setSmallIcon(R.drawable.ic_notif_at)
             .setColor(0xFF2F6FED.toInt())
             .setContentTitle(senderLine)
             .setContentText(title)
@@ -213,7 +206,6 @@ object PushNotifications {
             .addAction(readAction)
             .addAction(deleteAction)
             .addAction(replyAction)
-            .apply { if (muteAction != null) addAction(muteAction) }
 
         runCatching { nm.notify(notificationId(emailId), builder.build()) }
     }
