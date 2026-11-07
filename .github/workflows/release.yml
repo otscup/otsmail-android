@@ -7,8 +7,9 @@ on:
     inputs:
       version:
         description: '版本号（X.Y.Z；workflow_dispatch 只出 artifact，不建 Release）'
-        required: false
-        default: '0.2.4'
+        # 不设默认值：任何写死的默认号都会随版本推进过期（0.2.4 就是这样误发过），
+        # 手动档要求显式填写，宁可多敲一次，也不让默认值把包发错。
+        required: true
 
 # 默认只读：只有 release job 需要写权限，避免其它步骤（构建/测试）拿到 contents: write
 permissions:
@@ -130,38 +131,65 @@ jobs:
             --title "OTSMail Android ${{ steps.ver.outputs.value }}" \
             --notes "正式签名包，可直接覆盖升级。SHA-256：\`$(sha256sum "$ASSET" | cut -d' ' -f1)\`"
 
-      # 本次 Release 成功创建之后才清理旧版本，保证仓库里只留当前 tag 这一个 Release。
-      # continue-on-error：删旧失败（权限/限流/tag 已不存在）只记日志，不影响本次发布、不让 workflow 变红。
+      # 发版后保留最近 3 个 Release（按版本号排序删更旧的），远端 tag 一律不动。
+      # 删 Release 会连带删除它挂的 asset；tag 保留才能追溯历史、按 tag 重新构建。
+      # 该删没删掉的逐条给出 ::warning::，不留静默失败；这一步本身不判红，避免清理问题阻断发布。
       - name: Clean up older releases
         if: startsWith(github.ref, 'refs/tags/')
-        continue-on-error: true
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           CURRENT="$GITHUB_REF_NAME"
+          KEEP=3
           # 保护性匹配：本次 tag 必须是 vX.Y.Z；不合规就不清理，避免误删自定义 tag
           if ! [[ "$CURRENT" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             echo "当前 tag '$CURRENT' 不是 vX.Y.Z 形态，跳过清理"
             exit 0
           fi
           # 列表为空也不报错，直接跳过
-          TAGS=$(gh release list --limit 100 --json tagName --jq '.[].tagName' 2>/dev/null || true)
-          if [ -z "$TAGS" ]; then
-            echo "远端没有其它 Release，跳过清理"
+          if ! TAGS=$(gh release list --limit 100 --json tagName --jq '.[].tagName' 2>&1); then
+            echo "::warning::读取 Release 列表失败，跳过清理：$TAGS"
             exit 0
           fi
-          for TAG in $TAGS; do
-            # 只删 vX.Y.Z，且绝不删刚发布的这个
-            if [ "$TAG" = "$CURRENT" ]; then
-              continue
-            fi
-            if ! [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+          # 只接受 vX.Y.Z；其余名字（预发布/自定义 tag）一律跳过并打印原因
+          VALID=()
+          while IFS= read -r TAG; do
+            [ -z "$TAG" ] && continue
+            if [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              VALID+=("$TAG")
+            else
               echo "跳过非版本号 Release：$TAG"
+            fi
+          done <<< "$TAGS"
+          if [ ${#VALID[@]} -eq 0 ]; then
+            echo "没有 vX.Y.Z 形态的 Release，跳过清理"
+            exit 0
+          fi
+          # 按版本号降序；最近 KEEP 个保留，当前版本无论排第几都不删
+          mapfile -t SORTED < <(printf '%s\n' "${VALID[@]}" | sort -V -r)
+          KEPT=0
+          FAILED=0
+          for TAG in "${SORTED[@]}"; do
+            if [ "$TAG" = "$CURRENT" ]; then
+              echo "保留当前发布版本：$TAG"
+              KEPT=$((KEPT + 1))
               continue
             fi
-            echo "删除旧 Release：$TAG"
-            gh release delete "$TAG" --yes || echo "删除 Release $TAG 失败，跳过"
-            # 连带删除远端 tag；已被删除时 git push 失败也无妨
-            git push origin ":refs/tags/$TAG" 2>/dev/null || echo "远端 tag $TAG 不存在或删除失败，跳过"
+            if [ "$KEPT" -lt "$KEEP" ]; then
+              echo "保留（最近 $KEEP 个之一）：$TAG"
+              KEPT=$((KEPT + 1))
+              continue
+            fi
+            if gh release delete "$TAG" --yes; then
+              echo "已删除旧 Release：$TAG（远端 tag 保留）"
+            else
+              FAILED=$((FAILED + 1))
+              echo "::warning::删除旧 Release 失败：$TAG（保留 tag，可直接重试）"
+            fi
           done
+          if [ "$FAILED" -gt 0 ]; then
+            echo "::warning::本轮有 $FAILED 个旧 Release 未删除成功，请检查上方逐条结果"
+          else
+            echo "清理完成：保留最近 $KEEP 个 Release，未删除任何 tag"
+          fi

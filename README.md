@@ -38,9 +38,15 @@ OTS Mail 的 Android 客户端。Kotlin + Jetpack Compose，Material 3，单 Act
 
 ## 普通用户：下载安装
 
-从 [Releases](https://github.com/otscup/otsmail-android/releases/tag/v0.2.3) 下载 `otsmail-0.2.3-release.apk`，传到手机点击安装。首次安装需要在系统设置里允许「安装未知来源应用」。
+| 平台 | 最新版 | 位置 |
+|---|---|---|
+| Android | [本仓库 Releases](https://github.com/otscup/otsmail-android/releases) | `otsmail-X.Y.Z-release.apk`，签名固定，可直接覆盖升级 |
+| Web | [otscup/otsmail Releases](https://github.com/otscup/otsmail/releases) | 网页端与服务端，和安卓包分开发布 |
 
-下载入口也提供在 [otscup/otsmail 的 Releases](https://github.com/otscup/otsmail/releases/tag/android-v0.2.3)（同一个安装包，与服务端/网页版放在一起）。
+下载最新的 `otsmail-X.Y.Z-release.apk`，传到手机点击安装。首次安装需要在系统设置里允许「安装未知来源应用」。
+
+> **发版只走 tag**：推送 `vX.Y.Z` 标签由 [`.github/workflows/release.yml`](.github/workflows/release.yml) 自动构建并创建 Release，只发布在 `otscup/otsmail-android`；不手工建 Release，也不发到网页仓库。手动运行该 workflow（workflow_dispatch）只产出构建 artifact，不建 Release，且版本号必须手填。
+> 清理口径：每次发版后只保留**最近 3 个** Release（按版本号排序删除更旧的），**远端 tag 永久保留**，历史版本随时可以按 tag 重新构建；删除失败会在 Actions 日志里以 warning 标注。
 
 **首次打开会先要求填写你自己的服务器地址**（形如 `https://mail.example.com`）。客户端不带任何默认服务器，作者也不提供公共邮箱服务；请先按下面的「自托管」一节部署你自己的实例。地址会通过 `/api/setting/websiteConfig` 校验，通过后才会进入登录页；之后可在登录页右上角「服务器」或设置 → 系统设置 → 服务器里修改（修改会退出登录）。
 

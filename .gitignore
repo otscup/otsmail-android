@@ -11,6 +11,8 @@ captures/
 .kotlin/
 secrets/
 app/google-services.json
+# 本地 dev 版本序号（每次打包自增，不入库）
+.dev-version
 # 真机截图只留本地，不入库
 shots/
 # 图标等预览产物只留本地，不入库
