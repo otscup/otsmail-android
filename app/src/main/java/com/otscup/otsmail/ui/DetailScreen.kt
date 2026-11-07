@@ -166,6 +166,10 @@ p{margin:0 0 12px}img,video{max-width:100%;height:auto}a{color:$link}
    只靠 * 规则压不住；具体像素宽度在 [normalizeFixedWidths] 里清洗成百分比/自适应，
    这里只做兜底：表格与单元格都不允许越过视口。百分比列宽（width="33%"）保持不变。 */
 table,td,th{max-width:100%!important;min-width:0!important;box-sizing:border-box}
+/* GitHub 状态列表头被折成 Sta/tus：body 上的 word-break:break-word 等价 anywhere，
+   会让单元格最小宽度退化到 1 个字符，表格自动布局就把窄列压到放不下整个 "Status"。
+   表头改为只在整词放不下时才断；数据单元格不动，长 URL/订单号仍可断行。 */
+th{word-break:normal;overflow-wrap:break-word}
 /* 纯文本兜底：<pre> 的长行在窄屏同样需要折行，不能让整页横向溢出 */
 pre{white-space:pre-wrap!important;overflow-wrap:anywhere}
 blockquote{margin:8px 0;padding-left:10px;border-left:3px solid $quote;color:$sys}
@@ -1800,6 +1804,14 @@ internal fun sanitizeEmailHtml(raw: String, baseUrl: String = ""): String {
  */
 private const val FIXED_WIDTH_MIN = 360
 
+/**
+ * 单元格侧的最小阈值：多列表格常把每列写成 width="200"（200 < 360，不会被改成 100%），
+ * 三列累加 600px 后在 360–400dp 窄屏上仍会横向溢出、被 WebView 裁掉右侧。
+ * 因此 td/th 上的像素列宽（≥40）直接去掉，交给表格自动布局按内容分配；
+ * 1–39px 的间距/图标单元格、百分比列宽保持不动，避免破坏模板对齐。
+ */
+private const val CELL_WIDTH_MIN = 40
+
 private val CSS_PX_WIDTH = Regex("(?i)(?<![-\\w])width\\s*:\\s*(\\d{2,4})\\s*px")
 private val ATTR_PX_WIDTH = Regex("(?i)\\bwidth\\s*=\\s*[\"']?\\s*(\\d{2,4})")
 private val TABLE_LIKE_TAG = Regex("(?is)<(table|td|th)\\b[^>]*>")
@@ -1810,9 +1822,22 @@ internal fun normalizeFixedWidths(html: String): String {
     }
     // 只改表格/单元格的属性宽度：<img width="600"> 保持 600，避免在大屏上被拉成 100% 放大
     return TABLE_LIKE_TAG.replace(cssFixed) { tag ->
-        ATTR_PX_WIDTH.replace(tag.value) { m ->
-            if (m.groupValues[1].toInt() >= FIXED_WIDTH_MIN) "width=\"100%\"" else m.value
+        val isCell = !tag.value.startsWith("<table", ignoreCase = true)
+        var value = ATTR_PX_WIDTH.replace(tag.value) { m ->
+            val w = m.groupValues[1].toInt()
+            when {
+                isCell && w >= CELL_WIDTH_MIN -> ""          // 列宽去掉，避免多列累加后溢出
+                w >= FIXED_WIDTH_MIN -> "width=\"100%\""      // 表格整体铺满视口
+                else -> m.value
+            }
         }
+        // 单元格 style 里的像素列宽同样去掉；≥360 的已在上面统一换成 max-width:100%
+        if (isCell) {
+            value = CSS_PX_WIDTH.replace(value) { m ->
+                if (m.groupValues[1].toInt() >= CELL_WIDTH_MIN) "" else m.value
+            }
+        }
+        value
     }
 }
 

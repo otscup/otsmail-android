@@ -125,6 +125,32 @@ class EmailHtmlSanitizerTest {
     }
 
     @Test
+    fun `多列像素列宽被去掉避免窄屏裁切`() {
+        val out = sanitizeEmailHtml(
+            "<table width=\"600\"><tr>" +
+                "<td width=\"200\">A</td><td style=\"width:200px\">B</td><td>C</td></tr></table>",
+        )
+        // 表格整体改成 100%，单元格列宽不再累加出 600px 的横向溢出
+        assertTrue(out.contains("width=\"100%\""))
+        assertFalse(Regex("(?i)width=\"200\"").containsMatchIn(out))
+        assertFalse(Regex("(?i)width:200px").containsMatchIn(out))
+        assertTrue(out.contains(">A<"))
+        assertTrue(out.contains(">B<"))
+    }
+
+    @Test
+    fun `单元格小宽度与百分比列宽保持原样`() {
+        val out = sanitizeEmailHtml(
+            "<table width=\"100%\"><tr>" +
+                "<td width=\"24\">i</td><td width=\"33%\">a</td><td width=\"200\">b</td></tr></table>",
+        )
+        // 图标/间距单元格与百分比列宽不动，只有普通像素列宽被去掉
+        assertTrue(out.contains("width=\"24\""))
+        assertTrue(out.contains("width=\"33%\""))
+        assertFalse(out.contains("width=\"200\""))
+    }
+
+    @Test
     fun `图片与百分比列宽保持原样`() {
         val out = sanitizeEmailHtml(
             "<img width=\"600\" src=\"https://e.x/hero.png\">" +
