@@ -101,6 +101,7 @@ import com.otscup.otsmail.data.MailAtt
 import com.otscup.otsmail.data.MailCache
 import com.otscup.otsmail.data.MailDetail
 import com.otscup.otsmail.data.SiteMail
+import com.otscup.otsmail.data.VerificationCode
 import com.otscup.otsmail.data.aiErrorText
 import com.otscup.otsmail.data.friendlyError
 import com.otscup.otsmail.push.PushSettings
@@ -827,6 +828,52 @@ fun DetailScreen(
                 Spacer(Modifier.height(12.dp))
             }
             OTDivider(strong = true)
+
+            // 验证码只做「识别 + 一键复制」：没识别到就完全不占位，不放灰按钮。
+            // 与通知栏共用 VerificationCode.find，避免两套正则给出不同结果。
+            val vcode = remember(m.subject, m.content, translated, showingOriginal) {
+                VerificationCode.find(
+                    m.subject + "\n" +
+                        if (translated.isNotEmpty() && !showingOriginal) translated else m.content,
+                )
+            }
+            if (vcode != null) {
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .padding(start = 20.dp, end = 20.dp, top = 12.dp)
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(c.bgGrouped)
+                        .padding(start = 14.dp, end = 6.dp, top = 6.dp, bottom = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text("识别到验证码", style = t.caption1, color = c.label2)
+                        Text(
+                            vcode.code,
+                            style = t.subhead.copy(fontWeight = FontWeight.SemiBold),
+                            color = c.label,
+                        )
+                    }
+                    Box(
+                        Modifier
+                            .clip(RoundedCornerShape(100))
+                            .background(c.blue)
+                            .tapArea {
+                                val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                                cm.setPrimaryClip(ClipData.newPlainText("验证码", vcode.code))
+                                onToast("已复制验证码")
+                            }
+                            .padding(horizontal = 14.dp, vertical = 8.dp),
+                    ) {
+                        Text(
+                            "复制验证码",
+                            style = t.caption1.copy(fontWeight = FontWeight.Medium),
+                            color = Color.White,
+                        )
+                    }
+                }
+            }
 
             // 内容区占满剩余高度，底部动作条才能贴屏底；正文按可用高度铺满
             BoxWithConstraints(Modifier.weight(1f)) {

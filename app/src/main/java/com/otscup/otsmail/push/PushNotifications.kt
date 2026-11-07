@@ -16,6 +16,7 @@ import android.provider.Settings
 import android.util.Log
 import com.otscup.otsmail.MainActivity
 import com.otscup.otsmail.R
+import com.otscup.otsmail.data.VerificationCode
 
 /**
  * 新邮件通知：按「声音 × 震动」预建四条渠道，按发件人分组，
@@ -186,6 +187,31 @@ object PushNotifications {
         return PendingIntent.getBroadcast(context, notificationId(emailId), intent, flags)
     }
 
+    /**
+     * 「复制验证码」action：拉起透明 [CopyCodeActivity]。
+     * Android 10+ 后台进程直接写剪贴板会被系统拒绝且不报错，所以必须由一个前台 Activity 完成。
+     */
+    private fun copyCodeAction(
+        context: Context,
+        id: Long,
+        code: String,
+        ext: Boolean = false,
+    ): Notification.Action {
+        val intent = Intent(context, CopyCodeActivity::class.java).apply {
+            // data 参与 PendingIntent 匹配，site / ext 两套 id 不会互相覆盖
+            data = Uri.parse("otsmail://copy-code/${if (ext) "ext" else "site"}/$id")
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_NO_ANIMATION)
+            putExtra(CopyCodeActivity.EXTRA_CODE, code)
+        }
+        val pending = PendingIntent.getActivity(
+            context,
+            notificationId(id) xor 0x5A5A,
+            intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+        return Notification.Action.Builder(0, "复制验证码", pending).build()
+    }
+
     fun showMail(
         context: Context,
         emailId: Long,
@@ -211,6 +237,12 @@ object PushNotifications {
         val senderLine = if (from.isNotBlank() && who != from.trim()) "$who <$from>" else who
         val title = subject.trim().ifEmpty { "（无主题）" }
         val body = snippet.trim().replace('\n', ' ')
+        // 通知正文里直接标出识别到的验证码；复制走透明 Activity，后台写剪贴板会被系统拒绝
+        val code = VerificationCode.find("$subject\n$snippet")?.code
+        val bigText = buildString {
+            append(if (body.isEmpty()) title else "$title\n$body")
+            if (code != null) append("\n验证码：$code")
+        }
 
         val intent = Intent(context, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP
@@ -238,26 +270,24 @@ object PushNotifications {
             .addRemoteInput(replyInput)
             .setAllowGeneratedReplies(true)
             .build()
-        // 通知最多只渲染 3 个 action，第 4 个会被 SystemUI 直接丢弃；
-        // 静音入口改放邮件详情「更多」与设置页，避免按钮存在但点不到。
+        // 通知最多只渲染 3 个 action，第 4 个会被 SystemUI 直接丢弃。
+        // 有验证码时用「复制验证码」占掉删除的位置（删除仍可在详情页「更多」里做）；
+        // 静音入口改放邮件详情与设置页，避免按钮存在但点不到。
+        val copyAction = code?.let { copyCodeAction(context, emailId, it) }
         val builder = Notification.Builder(context, PushSettings.channelId(context))
             .setSmallIcon(R.drawable.ic_notif_at)
             .setColor(0xFF2F6FED.toInt())
             .setContentTitle(senderLine)
             .setContentText(title)
-            .setStyle(
-                Notification.BigTextStyle().bigText(
-                    if (body.isEmpty()) title else "$title\n$body",
-                ),
-            )
+            .setStyle(Notification.BigTextStyle().bigText(bigText))
             .setAutoCancel(true)
             .setGroup(group)
             .setCategory(Notification.CATEGORY_EMAIL)
             .setShowWhen(true)
             .setContentIntent(pending)
             .addAction(readAction)
-            .addAction(deleteAction)
-            .addAction(replyAction)
+        if (copyAction != null) builder.addAction(copyAction) else builder.addAction(deleteAction)
+        builder.addAction(replyAction)
 
         runCatching { nm.notify(notificationId(emailId), builder.build()) }
     }
@@ -298,6 +328,11 @@ object PushNotifications {
         val senderLine = if (from.isNotBlank() && who != from.trim()) "$who <${from.trim()}>" else who
         val title = subject.trim().ifEmpty { "（无主题）" }
         val body = snippet.trim().replace('\n', ' ')
+        val code = VerificationCode.find("$subject\n$snippet")?.code
+        val bigText = buildString {
+            append(if (body.isEmpty()) title else "$title\n$body")
+            if (code != null) append("\n验证码：$code")
+        }
 
         val intent = Intent(context, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP
@@ -318,16 +353,14 @@ object PushNotifications {
             .setColor(0xFF2F6FED.toInt())
             .setContentTitle(senderLine)
             .setContentText(title)
-            .setStyle(
-                Notification.BigTextStyle().bigText(
-                    if (body.isEmpty()) title else "$title\n$body",
-                ),
-            )
+            .setStyle(Notification.BigTextStyle().bigText(bigText))
             .setAutoCancel(true)
             .setGroup(group)
             .setCategory(Notification.CATEGORY_EMAIL)
             .setShowWhen(true)
             .setContentIntent(pending)
+        // 外部邮箱通知本来没有 action，验证码命中时加一个「复制验证码」不挤占其它按钮
+        code?.let { builder.addAction(copyCodeAction(context, localId, it, ext = true)) }
 
         runCatching { nm.notify(EXT_TAG, notificationId(localId), builder.build()) }
     }

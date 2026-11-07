@@ -103,6 +103,15 @@
             android:name=".push.NotificationActionReceiver"
             android:exported="false" />
 
+        <!-- 通知栏「复制验证码」：透明、无动画、无历史，复制完立即 finish -->
+        <activity
+            android:name=".push.CopyCodeActivity"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:noHistory="true"
+            android:taskAffinity=""
+            android:theme="@style/Theme.OtsMail.CopyCode" />
+
         <!-- 定时发送到点触发：只接本 App 的 PendingIntent（exported=false） -->
         <receiver
             android:name=".schedule.ScheduledSendReceiver"
