@@ -224,8 +224,8 @@ fun OtsApp() {
         route = Route.ExtDetail(localId)
     }
 
-    // 第三方邮件提醒：默认一律挂 IMAP IDLE（服务端尚未给外部邮箱下发 FCM，不能按设备能力
-    // 关掉 IDLE）。otsmail 自己的邮件仍走 FCM；判断与降级详见 ExtIdleManager，重复调用幂等。
+    // 第三方邮件提醒：默认走 IMAP IDLE；用户可在外部邮箱页选「关闭第三方邮件提醒」。
+    // otsmail 自己的邮件始终走 FCM，与这里无关；判断与停止路径详见 ExtIdleManager，重复调用幂等。
     LaunchedEffect(session.token.isNotEmpty()) {
         if (session.token.isEmpty()) {
             ExtIdleManager.stop(context)

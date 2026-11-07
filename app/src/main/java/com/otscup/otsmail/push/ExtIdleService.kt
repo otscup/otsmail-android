@@ -28,7 +28,6 @@ import com.otscup.otsmail.data.ExtProviders
 import com.otscup.otsmail.data.ExtServer
 import com.otscup.otsmail.data.ExtSync
 import com.otscup.otsmail.data.ExtSyncError
-import com.otscup.otsmail.data.PushManager
 import com.otscup.otsmail.data.Session
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -46,30 +45,17 @@ import java.util.concurrent.ConcurrentHashMap
 /**
  * 按**账户类型**判定，不是按设备一刀切：
  * - otsmail 自己的邮件继续走服务端 FCM，与这里无关；
- * - 第三方账户默认一律挂 IMAP IDLE，不管设备有没有 GMS / 能不能拿到 token。
+ * - 第三方账户只有两种状态：自动 = 挂 IMAP IDLE；关闭 = 不连 IDLE、不轮询、不提醒。
  *
- * 原因：服务端目前只为 otsmail 邮件下发 FCM，第三方邮件没有服务端触发点。
- * 若按「有 token 就不挂 IDLE」，有 GMS 的设备就永远收不到第三方邮件提醒。
- * 只有 [SERVER_EXT_FCM_SUPPORTED] 为 true（服务端补上第三方触发点）时，
- *「自动」模式才允许改走 FCM；[PushSettings.extPushMode] 另提供强制 IDLE / 强制 FCM
- * 两个对照开关，供真机验证。
+ * 服务端目前只为 otsmail 邮件下发 FCM，第三方邮件没有服务端触发点，
+ * 所以「自动」实际就是 IDLE，代码里不再保留「第三方走 FCM」的分支。
  */
 object ExtIdleManager {
 
     private const val TAG = "ExtIdle"
-    private const val SP = "otsmail_ext_idle"
-    private const val KEY_MODE = "mode"
-    private const val KEY_AT = "modeAt"
-    internal const val MODE_FCM = "fcm"
     internal const val MODE_IDLE = "idle"
-    private const val MODE_TTL_MS = 12 * 60 * 60 * 1000L
-
-    /**
-     * 服务端是否已支持「第三方邮件」的 FCM 下发。
-     * 现在没有：服务端只在 otsmail 自己收信时下发，所以这里必须是 false，
-     * 保证第三方账户一律走 IDLE。等服务端补上第三方触发点后再改成 true。
-     */
-    private const val SERVER_EXT_FCM_SUPPORTED = false
+    /** 用户选择「关闭第三方邮件提醒」：不启动服务，自然也没有 15 分钟轮询兜底。 */
+    internal const val MODE_OFF = "off"
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
@@ -92,10 +78,9 @@ object ExtIdleManager {
                 val accounts = extAccountIdsOrNull()
                 Log.i(
                     TAG,
-                    "第三方邮件提醒方式=$mode（设置=${PushSettings.extPushMode(app)}，" +
-                        "服务端支持外部邮箱 FCM=$SERVER_EXT_FCM_SUPPORTED）账户=" +
+                    "第三方邮件提醒方式=$mode（设置=${PushSettings.extPushMode(app)}）账户=" +
                         (accounts?.size ?: "获取失败") + " → " +
-                        if (mode == MODE_IDLE) "挂 IMAP IDLE" else "等 FCM 触发，不挂 IDLE",
+                        if (mode == MODE_IDLE) "挂 IMAP IDLE" else "已关闭，不连 IDLE、不轮询",
                 )
                 if (mode != MODE_IDLE) {
                     ExtIdleService.stop(app)
@@ -134,37 +119,20 @@ object ExtIdleManager {
         startIfNeeded(context.applicationContext)
     }
 
-    /** 服务运行期读缓存，避免在 Service 里做网络/token 判定。 */
-    internal fun currentMode(context: Context): String =
-        context.getSharedPreferences(SP, Context.MODE_PRIVATE)
-            .getString(KEY_MODE, MODE_IDLE).orEmpty().ifEmpty { MODE_IDLE }
+    /** 服务运行期读设置，避免在 Service 里做网络/token 判定。 */
+    internal fun currentMode(context: Context): String = resolveMode(context)
 
-    /** 读设置决定方式；「自动」只在服务端支持第三方邮件 FCM 时才看设备 token。 */
-    internal suspend fun resolveMode(context: Context): String {
-        val app = context.applicationContext
-        val prefs = app.getSharedPreferences(SP, Context.MODE_PRIVATE)
-
-        val mode = when (PushSettings.extPushMode(app)) {
-            PushSettings.EXT_PUSH_IDLE -> MODE_IDLE
-            PushSettings.EXT_PUSH_FCM -> MODE_FCM
-            else -> {
-                if (!SERVER_EXT_FCM_SUPPORTED) {
-                    MODE_IDLE
-                } else {
-                    val at = prefs.getLong(KEY_AT, 0L)
-                    val cached = prefs.getString(KEY_MODE, "").orEmpty()
-                    if (cached.isNotEmpty() && System.currentTimeMillis() - at < MODE_TTL_MS) {
-                        cached
-                    } else {
-                        val token = PushManager.ensureToken(app)
-                        if (token.isNullOrEmpty()) MODE_IDLE else MODE_FCM
-                    }
-                }
-            }
+    /**
+     * 读设置决定方式：只有「自动（IDLE）」与「关闭」两种。
+     * 旧值 `fcm` 已在 [PushSettings.normalizeExtPushMode] 里归一到 off。
+     * 注意：这里全程不碰 FCM token，otsmail 自己的推送因此不受任何影响。
+     */
+    internal fun resolveMode(context: Context): String =
+        if (PushSettings.extPushMode(context.applicationContext) == PushSettings.EXT_PUSH_OFF) {
+            MODE_OFF
+        } else {
+            MODE_IDLE
         }
-        prefs.edit().putString(KEY_MODE, mode).putLong(KEY_AT, System.currentTimeMillis()).apply()
-        return mode
-    }
 
     /** 当前绑定的第三方账户 id；网络失败返回空（服务不启动，下次再试）。 */
     internal suspend fun extAccountIds(): List<Long> = extAccountIdsOrNull().orEmpty()
@@ -183,7 +151,7 @@ object ExtIdleManager {
     /** 绑定/解绑/登录/手动刷新后调用：让常驻服务立刻对齐账户，不用每分钟轮询接口。 */
     fun onAccountsChanged(context: Context) {
         val app = context.applicationContext
-        // 用户选「只用设备推送」时服务本就不该在跑，别为一个对齐请求把它拉起来闪一条通知
+        // 用户选「关闭第三方邮件提醒」时服务本就不该在跑，别为一个对齐请求把它拉起来闪一条通知
         if (currentMode(app) != MODE_IDLE) return
         val intent = Intent(app, ExtIdleService::class.java).setAction(ExtIdleService.ACTION_ACCOUNTS_CHANGED)
         runCatching { ContextCompat.startForegroundService(app, intent) }

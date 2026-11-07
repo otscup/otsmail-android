@@ -69,7 +69,6 @@ fun ExtBindScreen(
     var bound by remember { mutableStateOf<List<BoundAccount>>(emptyList()) }
     var pendingRemove by remember { mutableStateOf<BoundAccount?>(null) }
     var pushMode by remember { mutableStateOf(PushSettings.extPushMode(context)) }
-    var modeSheet by remember { mutableStateOf(false) }
     // 通知权限被系统关掉时，绑定成功也收不到提醒：这里与绑定结果一起明确提示
     var notifEnabled by remember { mutableStateOf(PushNotifications.enabled(context)) }
 
@@ -171,18 +170,17 @@ fun ExtBindScreen(
 
             OTGroupHeader("新邮件提醒")
             OTGroup(Modifier.padding(horizontal = OTSpace.s4)) {
-                SettingRow(
-                    title = "提醒方式",
-                    value = extPushModeLabel(pushMode),
-                    showChevron = true,
-                    onClick = { modeSheet = true },
-                )
+                OTSwitchRow(
+                    title = "保持长连接（第三方邮件提醒）",
+                    checked = pushMode != PushSettings.EXT_PUSH_OFF,
+                    subtitle = "开启：保持 IMAP 长连接，第三方邮箱新邮件立即提醒。关闭：不连 IDLE、不轮询、不弹第三方通知，省电；手动同步与下拉刷新照旧。",
+                ) { on ->
+                    val mode = if (on) PushSettings.EXT_PUSH_AUTO else PushSettings.EXT_PUSH_OFF
+                    PushSettings.setExtPushMode(context, mode)
+                    pushMode = mode
+                    ExtIdleManager.applyModeChange(context)
+                }
             }
-            Text(
-                extPushModeSummary(pushMode),
-                style = t.footnote, color = c.label2,
-                modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp),
-            )
 
             if (bound.isNotEmpty()) {
                 OTGroupHeader("已绑定")
@@ -222,50 +220,6 @@ fun ExtBindScreen(
                 )
             }
         }
-    }
-
-    if (modeSheet) {
-        AlertDialog(
-            onDismissRequest = { modeSheet = false },
-            title = { Text("新邮件提醒方式") },
-            text = {
-                Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                    ExtPushModeChoice(
-                        title = "自动（推荐）",
-                        subtitle = "服务端支持第三方邮件推送时用设备推送，否则用长连接。当前实际使用长连接。",
-                        selected = pushMode == PushSettings.EXT_PUSH_AUTO,
-                    ) {
-                        PushSettings.setExtPushMode(context, PushSettings.EXT_PUSH_AUTO)
-                        pushMode = PushSettings.EXT_PUSH_AUTO
-                        modeSheet = false
-                        ExtIdleManager.applyModeChange(context)
-                    }
-                    ExtPushModeChoice(
-                        title = "始终用长连接",
-                        subtitle = "IMAP 长连接保持在线，收到新邮件立刻提醒；通知栏会常驻一条服务提示。",
-                        selected = pushMode == PushSettings.EXT_PUSH_IDLE,
-                    ) {
-                        PushSettings.setExtPushMode(context, PushSettings.EXT_PUSH_IDLE)
-                        pushMode = PushSettings.EXT_PUSH_IDLE
-                        modeSheet = false
-                        ExtIdleManager.applyModeChange(context)
-                    }
-                    ExtPushModeChoice(
-                        title = "只用设备推送（调试）",
-                        subtitle = "仅用于对照验证。服务端暂不支持第三方邮件推送，选这个收不到提醒。",
-                        selected = pushMode == PushSettings.EXT_PUSH_FCM,
-                    ) {
-                        PushSettings.setExtPushMode(context, PushSettings.EXT_PUSH_FCM)
-                        pushMode = PushSettings.EXT_PUSH_FCM
-                        modeSheet = false
-                        ExtIdleManager.applyModeChange(context)
-                    }
-                }
-            },
-            confirmButton = {
-                TextButton(onClick = { modeSheet = false }) { Text("关闭") }
-            },
-        )
     }
 
     pendingRemove?.let { item ->
@@ -515,7 +469,7 @@ private fun DoneStep(binder: ExtBinder, onAgain: () -> Unit) {
         modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp),
     )
     Text(
-        "绑定后 App 会在后台保持 IMAP 长连接，这个邮箱收到新邮件时立即提醒；不需要等服务端推送。",
+        "开启「保持长连接」后 App 会在后台维持 IMAP 长连接，这个邮箱收到新邮件时立即提醒；不需要等服务端推送。",
         style = t.footnote, color = c.label2,
         modifier = Modifier.padding(horizontal = 20.dp, vertical = 2.dp),
     )
@@ -526,38 +480,3 @@ private fun DoneStep(binder: ExtBinder, onAgain: () -> Unit) {
     Spacer(Modifier.height(20.dp))
 }
 
-private fun extPushModeLabel(mode: String): String = when (mode) {
-    PushSettings.EXT_PUSH_IDLE -> "始终用长连接"
-    PushSettings.EXT_PUSH_FCM -> "只用设备推送（调试）"
-    else -> "自动（推荐）"
-}
-
-private fun extPushModeSummary(mode: String): String = when (mode) {
-    PushSettings.EXT_PUSH_IDLE ->
-        "强制使用 IMAP 长连接：通知栏会常驻一条「外部邮箱实时收取服务」，收到新邮件立刻提醒。"
-    PushSettings.EXT_PUSH_FCM ->
-        "强制走设备推送（调试用）：服务端还没有第三方邮件的推送触发点，这个模式下收不到外部邮箱提醒。"
-    else ->
-        "自动：服务端支持第三方邮件推送时用设备推送，否则用 IMAP 长连接。当前服务端只推送 otsmail 邮件，所以实际走长连接。"
-}
-
-@Composable
-private fun ExtPushModeChoice(
-    title: String,
-    subtitle: String,
-    selected: Boolean,
-    onSelect: () -> Unit,
-) {
-    val c = OT.colors
-    val t = OT.type
-    Column(
-        Modifier.fillMaxWidth().tapArea(onSelect).padding(vertical = 8.dp),
-    ) {
-        Text(
-            if (selected) "✓ $title" else title,
-            style = t.body,
-            color = if (selected) c.blue else c.label,
-        )
-        Text(subtitle, style = t.caption1, color = c.label2)
-    }
-}

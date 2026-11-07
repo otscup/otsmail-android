@@ -41,16 +41,36 @@ object PushSettings {
         sp(context).edit().putBoolean(KEY_EXT_ENABLED, value).apply()
     }
 
-    /** 外部邮箱新邮件到达方式：自动 / 强制长连接 / 强制设备推送。 */
+    /**
+     * 第三方邮件提醒：外部邮箱设置页只有一个「保持长连接」开关。
+     * - 开（[EXT_PUSH_AUTO]）：第三方邮箱走 IMAP IDLE，正常弹第三方邮件通知；
+     * - 关（[EXT_PUSH_OFF]）：不连 IDLE、不轮询、不弹第三方通知，手动同步照旧。
+     *
+     * 默认开，沿用升级前用户的实际行为，不能突然静默。
+     * 历史值 `auto`/`idle` 归一到开；历史值 `fcm`（旧的「只用设备推送（调试）」）归一到关——
+     * 它本来就收不到提醒，语义上最接近「关闭」，绝不能归一到开以免突然开始耗电。
+     */
     const val EXT_PUSH_AUTO = "auto"
-    const val EXT_PUSH_IDLE = "idle"
-    const val EXT_PUSH_FCM = "fcm"
+    const val EXT_PUSH_OFF = "off"
+
+    /** 读取时归一化历史值，纯函数，便于单测覆盖老数据。 */
+    fun normalizeExtPushMode(raw: String?): String = when (raw?.trim()?.lowercase()) {
+        EXT_PUSH_OFF, "fcm" -> EXT_PUSH_OFF
+        else -> EXT_PUSH_AUTO
+    }
 
     fun extPushMode(context: Context): String =
-        sp(context).getString(KEY_EXT_PUSH_MODE, EXT_PUSH_AUTO).orEmpty().ifEmpty { EXT_PUSH_AUTO }
+        normalizeExtPushMode(sp(context).getString(KEY_EXT_PUSH_MODE, EXT_PUSH_AUTO))
 
     fun setExtPushMode(context: Context, mode: String) {
-        sp(context).edit().putString(KEY_EXT_PUSH_MODE, mode).apply()
+        sp(context).edit().putString(KEY_EXT_PUSH_MODE, normalizeExtPushMode(mode)).apply()
+    }
+
+    /** 开关形态：开 = 保持 IMAP 长连接并提醒第三方新邮件。 */
+    fun extPushKeepAlive(context: Context): Boolean = extPushMode(context) != EXT_PUSH_OFF
+
+    fun setExtPushKeepAlive(context: Context, value: Boolean) {
+        setExtPushMode(context, if (value) EXT_PUSH_AUTO else EXT_PUSH_OFF)
     }
 
     fun sound(context: Context): Boolean = sp(context).getBoolean(KEY_SOUND, true)
