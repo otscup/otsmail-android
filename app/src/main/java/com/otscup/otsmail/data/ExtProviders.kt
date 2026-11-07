@@ -79,7 +79,9 @@ object ExtProviders {
                     note = "OAuth 授权在下一批接入；本批请用应用专用密码。",
                 ),
             ),
-            note = "Gmail 的 IMAP 需要在网页版「转发和 POP/IMAP」里保持启用。",
+            note = "Gmail 只接受「应用专用密码」：先开两步验证再生成 16 位密码，不能直接填 Google 账号密码；" +
+                "OAuth 尚未接入。另外需要能访问 Google 服务器的网络，否则会停在 TLS/连接阶段（不是授权码错误）。" +
+                "IMAP 需在网页版「转发和 POP/IMAP」里保持启用。",
         ),
         ExtProvider(
             id = "outlook",

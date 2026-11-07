@@ -69,11 +69,7 @@ class SocketSmtpChannel private constructor(private var socket: Socket) : SmtpCh
     }
 
     override fun upgradeTls(host: String) {
-        val ssl = (SSLSocketFactory.getDefault() as SSLSocketFactory)
-            .createSocket(socket, host, socket.port, true) as SSLSocket
-        ssl.soTimeout = READ_TIMEOUT_MS
-        ssl.useClientMode = true
-        ssl.startHandshake()
+        val ssl = ExtTls.wrap(socket, host, socket.port, READ_TIMEOUT_MS)
         socket = ssl
         input = BufferedReader(InputStreamReader(ssl.getInputStream(), Charsets.UTF_8))
         output = OutputStreamWriter(ssl.getOutputStream(), Charsets.UTF_8)
@@ -98,21 +94,12 @@ class SocketSmtpChannel private constructor(private var socket: Socket) : SmtpCh
             }
             if (!secure) return SocketSmtpChannel(raw)
             val ssl = try {
-                (SSLSocketFactory.getDefault() as SSLSocketFactory)
-                    .createSocket(raw, host, port, true) as SSLSocket
+                ExtTls.wrap(raw, host, port, READ_TIMEOUT_MS)
             } catch (e: Throwable) {
                 runCatching { raw.close() }
                 throw mapConnectError(e)
             }
-            return try {
-                ssl.soTimeout = READ_TIMEOUT_MS
-                ssl.useClientMode = true
-                ssl.startHandshake()
-                SocketSmtpChannel(ssl)
-            } catch (e: Throwable) {
-                runCatching { ssl.close() }
-                throw mapConnectError(e)
-            }
+            return SocketSmtpChannel(ssl)
         }
 
         private fun mapConnectError(e: Throwable): ExtSmtpException = when (e) {

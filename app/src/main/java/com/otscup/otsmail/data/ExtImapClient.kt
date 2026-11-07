@@ -67,6 +67,24 @@ class ExtImapClient(
             throw ExtImapException(ExtProbeFailure.IMAP_DISABLED, greeting)
         }
 
+        // 非 993 端口（如 143）必须先 STARTTLS 再登录，绝不能把账号密码发在明文连接上
+        if (!server.secure) {
+            try {
+                command("STARTTLS")
+            } catch (e: ExtImapException) {
+                throw ExtImapException(ExtProbeFailure.TLS_FAILED, "服务器不支持 STARTTLS：${e.message}")
+            }
+            val raw = socket ?: throw ExtImapException(ExtProbeFailure.UNKNOWN, "连接未建立")
+            val ssl = try {
+                ExtTls.wrap(raw, server.host, server.port, READ_TIMEOUT_MS)
+            } catch (e: Throwable) {
+                throw mapReadError(e)
+            }
+            socket = ssl
+            input = ssl.getInputStream()
+            output = ssl.getOutputStream()
+        }
+
         val caps = try {
             command("CAPABILITY")
         } catch (e: ExtImapException) {
@@ -91,6 +109,22 @@ class ExtImapClient(
         val lines = command("UID FETCH $from:* (UID)")
         return lines.mapNotNull { line ->
             Regex("UID (\\d+)", RegexOption.IGNORE_CASE).find(line)?.groupValues?.get(1)?.toLongOrNull()
+        }.distinct().sorted()
+    }
+
+    /**
+     * 按时间窗口列 UID（换机补历史用）：服务端归档可能缺更早的邮件，
+     * 用 `UID SEARCH SINCE` 只补最近 [days] 天、且本地还没有的那些。
+     */
+    fun listUidsSince(days: Int): List<Long> {
+        val cal = java.util.Calendar.getInstance()
+        cal.add(java.util.Calendar.DAY_OF_MONTH, -(days.coerceAtLeast(0)))
+        val date = SimpleDateFormat("dd-MMM-yyyy", Locale.US).format(cal.time)
+        val lines = command("UID SEARCH SINCE $date")
+        return lines.mapNotNull { line ->
+            Regex("\\* SEARCH(.*)", RegexOption.IGNORE_CASE).find(line)?.groupValues?.get(1)
+        }.flatMap { rest ->
+            rest.trim().split(' ').mapNotNull { it.toLongOrNull() }
         }.distinct().sorted()
     }
 
@@ -308,11 +342,7 @@ class ExtImapClient(
             raw.connect(InetSocketAddress(server.host, server.port), CONNECT_TIMEOUT_MS)
             raw.soTimeout = READ_TIMEOUT_MS
             if (server.secure) {
-                val ssl = (SSLSocketFactory.getDefault() as SSLSocketFactory)
-                    .createSocket(raw, server.host, server.port, true) as SSLSocket
-                ssl.soTimeout = READ_TIMEOUT_MS
-                ssl.startHandshake()
-                ssl
+                ExtTls.wrap(raw, server.host, server.port, READ_TIMEOUT_MS)
             } else {
                 raw
             }

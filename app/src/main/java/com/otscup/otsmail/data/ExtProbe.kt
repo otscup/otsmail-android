@@ -13,8 +13,6 @@ import java.net.Socket
 import java.net.SocketTimeoutException
 import java.net.UnknownHostException
 import javax.net.ssl.SSLException
-import javax.net.ssl.SSLSocket
-import javax.net.ssl.SSLSocketFactory
 
 /**
  * 绑定前连通性验证：真的连一次 IMAP(993) 做 LOGIN，再连一次 SMTP 做 AUTH。
@@ -40,6 +38,9 @@ data class ExtProbeResult(
     val failure: ExtProbeFailure? = null,
     val detail: String = "",
     val hint: String = "",
+    /** 实际验证通过的服务器：SMTP 465 失败后可能回退到 587，绑定要用实际端口 */
+    val imapUsed: ExtServer? = null,
+    val smtpUsed: ExtServer? = null,
 ) {
     val ok: Boolean get() = imapOk && smtpOk
 }
@@ -81,19 +82,47 @@ object ExtProbe {
             )
         }
 
-        val smtp = try {
-            smtpAuth(smtpServer, address, secret)
+        val smtp = smtpAuthWithFallback(smtpServer, address, secret)
+        ExtProbeResult(
+            imapOk = true,
+            smtpOk = smtp.first.ok,
+            imapIdle = imap.idle,
+            failure = smtp.first.failure,
+            detail = smtp.first.detail,
+            hint = hintOf(smtp.first.failure),
+            imapUsed = imapServer,
+            smtpUsed = smtp.second,
+        )
+    }
+
+    /**
+     * 465 隐式 TLS 先试；握手被断开/超时时回退到 587 STARTTLS。
+     * 依据：Gmail、Outlook 等同时提供 465 与 587，部分网络只放行其中一个；
+     * 认证失败（密码错）不做回退，避免把「授权码错误」误报成加密方式问题。
+     */
+    private fun smtpAuthWithFallback(
+        server: ExtServer,
+        address: String,
+        secret: String,
+    ): Pair<Step, ExtServer> {
+        val first = try {
+            smtpAuth(server, address, secret)
         } catch (t: Throwable) {
             Step(false, failure = classifyThrowable(t), detail = t.messageOrType())
         }
-        ExtProbeResult(
-            imapOk = true,
-            smtpOk = smtp.ok,
-            imapIdle = imap.idle,
-            failure = smtp.failure,
-            detail = smtp.detail,
-            hint = hintOf(smtp.failure),
-        )
+        val canFallback = server.secure && server.port == 465 &&
+            (first.failure == ExtProbeFailure.TLS_FAILED ||
+                first.failure == ExtProbeFailure.TIMEOUT ||
+                first.failure == ExtProbeFailure.HOST_UNREACHABLE)
+        if (!canFallback) return first to server
+
+        val alt = ExtServer(server.host, 587, false)
+        val second = try {
+            smtpAuth(alt, address, secret)
+        } catch (t: Throwable) {
+            Step(false, failure = classifyThrowable(t), detail = t.messageOrType())
+        }
+        return if (second.ok) second to alt else first to server
     }
 
     /** 错误分类直接决定界面文案，必须能区分「连不上 / 认证失败 / 未开 IMAP」。 */
@@ -103,7 +132,9 @@ object ExtProbe {
         ExtProbeFailure.TIMEOUT ->
             "连接超时：网络较慢或端口被拦截，换网络后再试。"
         ExtProbeFailure.TLS_FAILED ->
-            "TLS 握手失败：服务器的加密方式与规则表不一致，可改「其他邮箱」手动填写端口。"
+            "TLS 握手失败（不是密码问题）：加密握手阶段被服务器或网络断开。" +
+                "多为网络/代理拦截了该端口（993 隐式 TLS、587 STARTTLS），先换网络再试；" +
+                "Gmail 还必须使用应用专用密码，不能填 Google 账号密码。"
         ExtProbeFailure.AUTH_FAILED ->
             "认证失败：授权码 / 应用密码不对，或该邮箱不允许第三方客户端登录。"
         ExtProbeFailure.IMAP_DISABLED ->
@@ -128,24 +159,36 @@ object ExtProbe {
         raw.connect(InetSocketAddress(host, port), TIMEOUT_MS)
         raw.soTimeout = TIMEOUT_MS
         if (!secure) return raw
-        val ssl = (SSLSocketFactory.getDefault() as SSLSocketFactory)
-            .createSocket(raw, host, port, true) as SSLSocket
-        ssl.soTimeout = TIMEOUT_MS
-        ssl.useClientMode = true
-        ssl.startHandshake()
-        return ssl
+        return ExtTls.wrap(raw, host, port, TIMEOUT_MS)
     }
 
     // ---------------- IMAP ----------------
 
     private fun imapLogin(server: ExtServer, address: String, secret: String): Step {
-        open(server.host, server.port, server.secure).use { socket ->
-            val r = BufferedReader(InputStreamReader(socket.getInputStream(), Charsets.UTF_8))
-            val w = BufferedWriter(OutputStreamWriter(socket.getOutputStream(), Charsets.UTF_8))
+        var socket = open(server.host, server.port, server.secure)
+        try {
+            var r = BufferedReader(InputStreamReader(socket.getInputStream(), Charsets.UTF_8))
+            var w = BufferedWriter(OutputStreamWriter(socket.getOutputStream(), Charsets.UTF_8))
 
             val greeting = r.readLine() ?: return Step(false, failure = ExtProbeFailure.UNKNOWN, detail = "服务器没有返回问候语")
             if (greeting.startsWith("* BYE", ignoreCase = true)) {
                 return Step(false, failure = ExtProbeFailure.IMAP_DISABLED, detail = greeting.take(160))
+            }
+
+            // 非 993 端口（如 143）：先 STARTTLS，凭据不能发在明文连接上
+            if (!server.secure) {
+                send(w, "a0", "STARTTLS")
+                val tls = readUntil(r, "a0")
+                if (!tls.lineSequence().any { it.startsWith("a0 OK", ignoreCase = true) }) {
+                    return Step(false, failure = ExtProbeFailure.TLS_FAILED, detail = tls.trim().take(220))
+                }
+                socket = try {
+                    ExtTls.wrap(socket, server.host, server.port, TIMEOUT_MS)
+                } catch (t: Throwable) {
+                    return Step(false, failure = classifyThrowable(t), detail = t.messageOrType())
+                }
+                r = BufferedReader(InputStreamReader(socket.getInputStream(), Charsets.UTF_8))
+                w = BufferedWriter(OutputStreamWriter(socket.getOutputStream(), Charsets.UTF_8))
             }
 
             var caps = greeting
@@ -171,6 +214,8 @@ object ExtProbe {
                 return Step(false, failure = classifyImap(login), detail = login.trim().take(220))
             }
             return Step(true, idle = caps.uppercase().contains("IDLE"), detail = "IMAP 登录成功")
+        } finally {
+            runCatching { socket.close() }
         }
     }
 
@@ -214,12 +259,7 @@ object ExtProbe {
                 if (tlsCode != 220) {
                     return Step(false, failure = ExtProbeFailure.TLS_FAILED, detail = tlsText.trim().take(160))
                 }
-                val ssl = (SSLSocketFactory.getDefault() as SSLSocketFactory)
-                    .createSocket(socket, server.host, server.port, true) as SSLSocket
-                ssl.soTimeout = TIMEOUT_MS
-                ssl.useClientMode = true
-                ssl.startHandshake()
-                socket = ssl
+                socket = ExtTls.wrap(socket, server.host, server.port, TIMEOUT_MS)
                 r = BufferedReader(InputStreamReader(socket.getInputStream(), Charsets.UTF_8))
                 w = BufferedWriter(OutputStreamWriter(socket.getOutputStream(), Charsets.UTF_8))
                 sendSmtp(w, "EHLO OTSMail")

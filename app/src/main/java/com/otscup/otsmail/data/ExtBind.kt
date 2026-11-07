@@ -33,10 +33,26 @@ data class ExtBindState(
     val doneText: String = "",
 )
 
+/**
+ * 向导草稿（进程级）：返回上一层、再去「外部邮箱」页面时不丢地址和已填授权码。
+ * 授权码只在这个内存对象里，不落盘：绑定成功立即清空 secret，进程被杀也会一起消失。
+ */
+object ExtBindDraft {
+    var state by mutableStateOf(ExtBindState())
+        internal set
+
+    fun clear() {
+        state = ExtBindState()
+    }
+}
+
 class ExtBinder {
 
-    var state by mutableStateOf(ExtBindState())
-        private set
+    var state: ExtBindState
+        get() = ExtBindDraft.state
+        private set(value) {
+            ExtBindDraft.state = value
+        }
 
     val addressValid: Boolean
         get() = Regex("^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$").matches(state.address.trim())
@@ -157,6 +173,9 @@ class ExtBinder {
         }
 
         state = state.copy(busy = false, probe = result, step = ExtBindStep.SAVING)
+        // 用实际验证通过的端口：465 被网络拦截时会回退到 587 STARTTLS，绑定必须存回退后的端口
+        val usedImap = result.imapUsed ?: imapServer
+        val usedSmtp = result.smtpUsed ?: smtpServer
         return try {
             val saved = Api.bindExtAccount(
                 address = state.address.trim(),
@@ -166,13 +185,15 @@ class ExtBinder {
                 imapOk = result.imapOk,
                 smtpOk = result.smtpOk,
                 imapIdle = result.imapIdle,
-                imapHost = imapServer.host,
-                imapPort = imapServer.port,
-                smtpHost = smtpServer.host,
-                smtpPort = smtpServer.port,
+                imapHost = usedImap.host,
+                imapPort = usedImap.port,
+                smtpHost = usedSmtp.host,
+                smtpPort = usedSmtp.port,
             )
             state = state.copy(
                 step = ExtBindStep.DONE,
+                // 绑定成功后授权码留在内存里已无用处：立刻清掉，只保留地址
+                secret = "",
                 doneText = "${state.address.trim()} 已绑定，${saved.optString("provider")} 账号已加入收件箱列表。",
             )
             result

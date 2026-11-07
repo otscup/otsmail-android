@@ -96,7 +96,14 @@ fun ExtBindScreen(
     LaunchedEffect(Unit) { reload() }
 
     Column(Modifier.fillMaxSize().background(c.bgGrouped)) {
-        OTNavBar(title = "外部邮箱", onLeading = onBack)
+        OTNavBar(
+            title = "外部邮箱",
+            // 只有 ADDRESS/CREDENTIAL 的草稿值得保留；DONE 已无输入，离开时清掉，下次进来从空表单开始
+            onLeading = {
+                if (binder.state.step == ExtBindStep.DONE) binder.reset()
+                onBack()
+            },
+        )
 
         Column(
             Modifier.weight(1f).verticalScroll(rememberScrollState()).padding(bottom = 24.dp),
