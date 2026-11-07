@@ -107,4 +107,46 @@ class EmailHtmlSanitizerTest {
         // 协议相对地址按 https 补全，不能留给中性 origin 解析成 otsmail.invalid
         assertTrue(out.contains("https://cdn.x/b.png"))
     }
+
+    @Test
+    fun `固定像素宽度的表格被改成自适应`() {
+        val out = sanitizeEmailHtml(
+            "<div style=\"max-width:600px\">" +
+                "<table width=\"600\" style=\"width:600px;\"><tr>" +
+                "<td style=\"vertical-align:top;width:600px;\">正文</td></tr></table></div>",
+        )
+        // 注意：外层 div 的 max-width:600px 会被保留（渲染时由 shell CSS 压成 100%），
+        // 这里只断言没有独立的 width:600px 固定宽度
+        assertFalse(Regex("(?i)(?<![-\\w])width:600px").containsMatchIn(out))
+        assertTrue(out.contains("max-width:100%"))
+        assertTrue(out.contains("width=\"100%\""))
+        // 正文内容本身不能被清洗掉
+        assertTrue(out.contains("正文"))
+    }
+
+    @Test
+    fun `图片与百分比列宽保持原样`() {
+        val out = sanitizeEmailHtml(
+            "<img width=\"600\" src=\"https://e.x/hero.png\">" +
+                "<table width=\"100%\"><tr><td width=\"33%\">a</td><td width=\"33%\">b</td><td>c</td></tr></table>",
+        )
+        // 大图保留固定宽度，避免在大屏上被 width=100% 拉伸
+        assertTrue(out.contains("width=\"600\""))
+        assertTrue(out.contains("https://e.x/hero.png"))
+        // 百分比列宽不动，否则表头会被挤成竖排
+        assertTrue(out.contains("width=\"33%\""))
+    }
+
+    @Test
+    fun `小尺寸宽度与 pre 长行不被误改`() {
+        val out = sanitizeEmailHtml(
+            "<img width=\"24\" style=\"width:24px\" src=\"https://e.x/i.png\">" +
+                "<div style=\"width:120px\">x</div>" +
+                "<pre>very-long-line-without-breaks-aaaaaaaaaaaaaaaaaaaaaaaaaaaa</pre>",
+        )
+        assertTrue(out.contains("width=\"24\""))
+        assertTrue(out.contains("width:24px"))
+        assertTrue(out.contains("width:120px"))
+        assertTrue(out.contains("<pre>"))
+    }
 }

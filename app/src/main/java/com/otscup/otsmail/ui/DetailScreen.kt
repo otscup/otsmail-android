@@ -20,6 +20,9 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -90,8 +93,10 @@ import com.otscup.otsmail.data.Api
 import com.otscup.otsmail.data.AttachmentTooLarge
 import com.otscup.otsmail.data.AttachmentUnavailable
 import com.otscup.otsmail.data.Attachments
+import com.otscup.otsmail.data.ExtImapActions
 import com.otscup.otsmail.data.ExtLocalMail
 import com.otscup.otsmail.data.ExtMailStore
+import com.otscup.otsmail.data.ExtSyncError
 import com.otscup.otsmail.data.MailAtt
 import com.otscup.otsmail.data.MailCache
 import com.otscup.otsmail.data.MailDetail
@@ -153,10 +158,16 @@ internal fun bodyShell(
     marker: String,
     imgFlag: String,
 ) = """<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<style>*{max-width:100%!important;box-sizing:border-box}html,body{width:100%;overflow-x:hidden;-webkit-text-size-adjust:100%;height:auto!important;min-height:0!important}
+<style>*{max-width:100%!important;box-sizing:border-box;min-width:0!important}html,body{width:100%;overflow-x:hidden;-webkit-text-size-adjust:100%;height:auto!important;min-height:0!important}
 body{margin:0;padding:0;background:transparent;color:$fg;
 font:15px/20px -apple-system,"Noto Sans SC",sans-serif;letter-spacing:-0.24px;word-break:break-word}
 p{margin:0 0 12px}img,video{max-width:100%;height:auto}a{color:$link}
+/* 邮件模板（MJML/营销邮件）普遍把 table/td 写死成 600px，表格单元格不吃 max-width，
+   只靠 * 规则压不住；具体像素宽度在 [normalizeFixedWidths] 里清洗成百分比/自适应，
+   这里只做兜底：表格与单元格都不允许越过视口。百分比列宽（width="33%"）保持不变。 */
+table,td,th{max-width:100%!important;min-width:0!important;box-sizing:border-box}
+/* 纯文本兜底：<pre> 的长行在窄屏同样需要折行，不能让整页横向溢出 */
+pre{white-space:pre-wrap!important;overflow-wrap:anywhere}
 blockquote{margin:8px 0;padding-left:10px;border-left:3px solid $quote;color:$sys}
 </style></head><body data-ots=$marker data-img=$imgFlag>$html</body></html>"""
 
@@ -351,7 +362,7 @@ private fun replaceFailedImages(html: String, failed: Set<String>, baseUrl: Stri
             }
         }
         val hit = candidates.firstNotNullOfOrNull { raw -> resolveImageUrl(baseUrl, raw)?.takeIf { it in failed } }
-        if (hit != null) imageFailurePlaceholder(hit) else tagHtml
+        if (hit != null) imageFailurePlaceholder(hit, tagHtml) else tagHtml
     }
 }
 
@@ -364,11 +375,48 @@ private fun resolveImageUrl(baseUrl: String, raw: String): String? {
     return runCatching { URL(URL(baseUrl), raw.replace("&amp;", "&")).toString() }.getOrNull()
 }
 
-private fun imageFailurePlaceholder(url: String): String {
+/** 声明尺寸不超过这个边长（px）的图算「小图」：用紧凑占位，不铺卡片 */
+private const val SMALL_IMAGE_EDGE = 96
+
+private val IMG_WIDTH_ATTR = Regex("(?i)\\bwidth\\s*=\\s*[\"']?(\\d+)")
+private val IMG_HEIGHT_ATTR = Regex("(?i)\\bheight\\s*=\\s*[\"']?(\\d+)")
+private val IMG_STYLE_SIZE = Regex("(?i)\\b(?:width|height)\\s*:\\s*(\\d+)\\.?\\d*px")
+
+/** 从 <img> 标签里读声明尺寸（width/height 属性或 style）；读不到返回 null */
+private fun declaredImageEdge(tagHtml: String): Int? {
+    val attr = listOf(IMG_WIDTH_ATTR, IMG_HEIGHT_ATTR)
+        .mapNotNull { it.find(tagHtml)?.groupValues?.getOrNull(1)?.toIntOrNull() }
+    val style = IMG_STYLE_SIZE.findAll(tagHtml)
+        .mapNotNull { it.groupValues.getOrNull(1)?.toIntOrNull() }
+        .toList()
+    // 用最长边判断：50×50、SVG logo 这类走紧凑占位；600×20 的分隔条仍按大图卡片
+    return (attr + style).maxOrNull()
+}
+
+/**
+ * 失败占位：大图用卡片；小图（50×50 图标 / SVG logo）只给一个居中的「×」。
+ * 小图不能铺卡片：图片位置可能只有几十 px 宽，卡片里的中文会被挤成一字一行。
+ * 卡片本身也强制单行省略，尺寸读不到时同样不会竖排；文字提示由正文底部
+ * 「N 张图片加载失败」那一行承担。
+ */
+private fun imageFailurePlaceholder(url: String, tagHtml: String): String {
     val href = url.replace("&", "&amp;").replace("\"", "&quot;").replace("<", "%3C").replace(">", "%3E")
-    return """<div style="margin:10px 0;padding:16px 12px;border:1px solid #D1D1D6;border-radius:10px;""" +
-        """background:#F2F2F7;text-align:center;color:#636366;font:14px/20px -apple-system,sans-serif">""" +
-        """图片加载失败<br><a href="$href" style="color:#007AFF;text-decoration:none;font-weight:600">在浏览器打开</a></div>"""
+    val edge = declaredImageEdge(tagHtml)
+    if (edge != null && edge <= SMALL_IMAGE_EDGE) {
+        // 占位框贴着原图尺寸（18–40px），既不撑破图标槽位，也不会把中文挤成竖排
+        val box = edge.coerceIn(18, 40)
+        val font = maxOf(9, (box * 0.45).toInt())
+        return """<span title="图片加载失败" style="display:inline-flex;align-items:center;""" +
+            """justify-content:center;width:${box}px;height:${box}px;max-width:100%;vertical-align:middle;""" +
+            """border:1px solid #D1D1D6;border-radius:${box / 5}px;background:#F2F2F7;overflow:hidden;""" +
+            """font:600 ${font}px/1 -apple-system,sans-serif;color:#8E8E93">""" +
+            """<a href="$href" style="color:#8E8E93;text-decoration:none;white-space:nowrap">&#215;</a></span>"""
+    }
+    return """<div style="margin:10px 0;padding:14px 12px;border:1px solid #D1D1D6;border-radius:10px;""" +
+        """background:#F2F2F7;text-align:center;color:#636366;font:14px/20px -apple-system,sans-serif;""" +
+        """white-space:nowrap;overflow:hidden;text-overflow:ellipsis">""" +
+        """图片加载失败 <a href="$href" style="color:#007AFF;text-decoration:none;font-weight:600">""" +
+        """在浏览器打开</a></div>"""
 }
 
 
@@ -497,11 +545,15 @@ fun DetailScreen(
                 mail = m
                 OpenPerf.mark("network")
                 MailCache.saveDetail(m)
-                runCatching { Api.markRead(m.emailId) }.onSuccess {
-                    // 已读同步回缓存与列表行，返回列表时未读点立刻消失
-                    MailCache.markRead(m.emailId)
-                    mail = m.copy(unread = false)
-                    MailSync.changed()
+                // 只有原本未读才回写已读：已读邮件再发一次 markRead 是纯多余请求，
+                // 且 MailSync.changed() 会连带整页列表 + 两套计数共约 6 个请求（路线图 P6）
+                if (m.unread) {
+                    runCatching { Api.markRead(m.emailId) }.onSuccess {
+                        // 已读同步回缓存与列表行，返回列表时未读点立刻消失
+                        MailCache.markRead(m.emailId)
+                        mail = m.copy(unread = false)
+                        MailSync.changed()
+                    }
                 }
             }
             .onFailure {
@@ -1733,8 +1785,35 @@ internal fun sanitizeEmailHtml(raw: String, baseUrl: String = ""): String {
         .replace(Regex("(?i)\\son[a-z]+\\s*=\\s*(\"[^\"]*\"|'[^']*'|[^\\s>]+)"), "")
         .replace(Regex("(?i)javascript:"), "#")
         .replace(Regex("(?i)vbscript:"), "#")
-    val safe = neutralizeTrackingPixels(cleaned)
+    val normalized = normalizeFixedWidths(cleaned)
+    val safe = neutralizeTrackingPixels(normalized)
     return if (baseUrl.isBlank()) safe else absolutizeHtmlUrls(safe, baseUrl)
+}
+
+/**
+ * 把营销邮件里写死的像素宽度改成能自适应的写法，避免 600px 版面被窄屏裁掉右侧。
+ *
+ * 只处理 **≥ [FIXED_WIDTH_MIN] 的像素值**：图标/间距这类小宽度（width="1"、width:24px）保持原样；
+ * 百分比宽度（width="50%"、width="33%"）不匹配正则，也不会被改。
+ * - `style="width:600px"` → `max-width:100%`（去掉固定宽度，交给表格自动布局）
+ * - `width="600"` → `width="100%"`（对单列表格等价于铺满，多列里的像素列宽本就少见）
+ */
+private const val FIXED_WIDTH_MIN = 360
+
+private val CSS_PX_WIDTH = Regex("(?i)(?<![-\\w])width\\s*:\\s*(\\d{2,4})\\s*px")
+private val ATTR_PX_WIDTH = Regex("(?i)\\bwidth\\s*=\\s*[\"']?\\s*(\\d{2,4})")
+private val TABLE_LIKE_TAG = Regex("(?is)<(table|td|th)\\b[^>]*>")
+
+internal fun normalizeFixedWidths(html: String): String {
+    val cssFixed = CSS_PX_WIDTH.replace(html) { m ->
+        if (m.groupValues[1].toInt() >= FIXED_WIDTH_MIN) "max-width:100%" else m.value
+    }
+    // 只改表格/单元格的属性宽度：<img width="600"> 保持 600，避免在大屏上被拉成 100% 放大
+    return TABLE_LIKE_TAG.replace(cssFixed) { tag ->
+        ATTR_PX_WIDTH.replace(tag.value) { m ->
+            if (m.groupValues[1].toInt() >= FIXED_WIDTH_MIN) "width=\"100%\"" else m.value
+        }
+    }
 }
 
 private val IMG_SRCSET = Regex("(?i)srcset\\s*=\\s*[\"']([^\"']+)[\"']")
@@ -2268,35 +2347,84 @@ private fun SiteMailBody(
  * 正文清洗与图片代取沿用普通详情的 [sanitizeEmailHtml] + [InlineImages]，不另开渲染路径。
  */
 @Composable
-internal fun ExtMailDetailScreen(localId: Long, onBack: () -> Unit) {
+internal fun ExtMailDetailScreen(
+    localId: Long,
+    sent: Boolean = false,
+    onBack: () -> Unit,
+    onReply: (ExtLocalMail, ReplyAction, String, Long) -> Unit = { _, _, _, _ -> },
+    onToast: (String) -> Unit = {},
+) {
     val c = OT.colors
     val t = OT.type
     var mail by remember(localId) { mutableStateOf<ExtLocalMail?>(null) }
-    LaunchedEffect(localId) {
-        mail = withContext(Dispatchers.IO) { runCatching { ExtMailStore.byLocalId(localId) }.getOrNull() }
+    var accountAddress by remember(localId) { mutableStateOf("") }
+    var accountId by remember(localId) { mutableStateOf(0L) }
+    LaunchedEffect(localId, sent) {
+        val loaded = withContext(Dispatchers.IO) {
+            runCatching {
+                if (sent) ExtMailStore.sentByLocalId(localId) else ExtMailStore.byLocalId(localId)
+            }.getOrNull()
+        }
+        mail = loaded
+        if (loaded != null) {
+            val arr = runCatching { Api.extAccounts() }.getOrNull()
+            if (arr != null) {
+                for (i in 0 until arr.length()) {
+                    val o = arr.optJSONObject(i) ?: continue
+                    if (o.optLong("ext_id", 0L) == loaded.extId) {
+                        accountAddress = o.optString("address")
+                        accountId = o.optLong("account_id", 0L)
+                        break
+                    }
+                }
+            }
+        }
     }
     Column(Modifier.fillMaxSize().background(c.bgGrouped).statusBarsPadding().navigationBarsPadding()) {
-        OTNavBar(title = "第三方邮件", onLeading = onBack)
+        OTNavBar(title = if (sent) "已发送（本地副本）" else "第三方邮件", onLeading = onBack)
         val m = mail
         if (m == null) {
             Box(Modifier.fillMaxSize(), Alignment.Center) {
                 Text(
-                    "这封邮件已不在本地，回到列表同步后再打开",
+                    if (sent) "这封已发送邮件不在本地记录里" else "这封邮件已不在本地，回到列表同步后再打开",
                     style = t.body,
                     color = c.label2,
                     modifier = Modifier.padding(24.dp),
                 )
             }
         } else {
-            ExtMailBody(m)
+            ExtMailBody(
+                m = m,
+                sent = sent,
+                accountAddress = accountAddress,
+                accountId = accountId,
+                onDeleted = onBack,
+                onReply = onReply,
+                onToast = onToast,
+            )
         }
     }
 }
 
 @Composable
-private fun ExtMailBody(m: ExtLocalMail) {
+private fun ExtMailBody(
+    m: ExtLocalMail,
+    sent: Boolean = false,
+    accountAddress: String = "",
+    accountId: Long = 0L,
+    onDeleted: () -> Unit = {},
+    onReply: (ExtLocalMail, ReplyAction, String, Long) -> Unit = { _, _, _, _ -> },
+    onToast: (String) -> Unit = {},
+) {
     val c = OT.colors
     val t = OT.type
+    val ctx = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var busy by remember(m.localId) { mutableStateOf("") }
+    var seenNow by remember(m.localId) { mutableStateOf(m.seen) }
+    var starredNow by remember(m.localId) { mutableStateOf(m.starred) }
+    var downloadBusy by remember(m.localId) { mutableIntStateOf(-1) }
+    var confirmDelete by remember(m.localId) { mutableStateOf(false) }
 
     val atts = remember(m.attachmentsJson) {
         runCatching {
@@ -2314,6 +2442,17 @@ private fun ExtMailBody(m: ExtLocalMail) {
                 }
             }
         }.getOrDefault(emptyList())
+    }
+
+    fun action(scopeName: String, body: suspend () -> String) {
+        if (busy.isNotEmpty()) return
+        busy = scopeName
+        scope.launch {
+            runCatching { body() }
+                .onSuccess { onToast(it) }
+                .onFailure { onToast(ExtSyncError.reason(it)) }
+            busy = ""
+        }
     }
 
     val rawHtml = remember(m.bodyHtml, m.bodyText) {
@@ -2365,7 +2504,7 @@ private fun ExtMailBody(m: ExtLocalMail) {
                 )
             }
             Spacer(Modifier.height(10.dp))
-            // 只读提示：用第三方邮箱专属文案，不沿用「全站只读」那套
+            // 说明这封信的数据边界：收到的信能对上游做已读/星标/删除；本地已发送副本不能
             Row(
                 Modifier
                     .fillMaxWidth()
@@ -2382,7 +2521,11 @@ private fun ExtMailBody(m: ExtLocalMail) {
                 )
                 Spacer(Modifier.width(8.dp))
                 Text(
-                    "第三方邮箱，本轮暂不支持写操作",
+                    if (sent) {
+                        "已发送 · 本机保存的副本，不会同步到其他设备；回信/转发会使用 ${accountAddress.ifBlank { "这个外部邮箱" }}"
+                    } else {
+                        "第三方邮箱 · 已读 / 星标 / 删除直接作用在 ${accountAddress.ifBlank { "对方服务器" }} 上"
+                    },
                     style = t.caption1,
                     color = c.label2,
                     modifier = Modifier.weight(1f),
@@ -2390,9 +2533,30 @@ private fun ExtMailBody(m: ExtLocalMail) {
             }
             if (atts.isNotEmpty()) {
                 Spacer(Modifier.height(8.dp))
-                atts.forEach { (name, _, size) ->
+                atts.forEachIndexed { index, (name, _, size) ->
                     Row(
-                        Modifier.fillMaxWidth().padding(vertical = 2.dp),
+                        Modifier
+                            .fillMaxWidth()
+                            .then(
+                                if (sent) Modifier
+                                else Modifier.clip(RoundedCornerShape(OT.dimens.rSm.dp))
+                                    .clickable(enabled = downloadBusy < 0) {
+                                        downloadBusy = index
+                                        scope.launch {
+                                            runCatching {
+                                                ExtImapActions.downloadAttachment(
+                                                    ctx, m.extId, m.uid, index, name,
+                                                )
+                                            }
+                                                .onSuccess { f ->
+                                                    onToast("已保存到 ${f.parentFile?.name ?: "下载"}/${f.name}")
+                                                }
+                                                .onFailure { onToast(ExtSyncError.reason(it)) }
+                                            downloadBusy = -1
+                                        }
+                                    }
+                                    .padding(vertical = 4.dp),
+                            ),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         Icon(Icons.Outlined.AttachFile, null, tint = c.label2, modifier = Modifier.size(14.dp))
@@ -2405,10 +2569,15 @@ private fun ExtMailBody(m: ExtLocalMail) {
                             overflow = TextOverflow.Ellipsis,
                             modifier = Modifier.weight(1f),
                         )
-                        Text(bytesLabel(size), style = t.caption2, color = c.label2)
+                        when {
+                            sent -> Text("副本不含附件内容", style = t.caption2, color = c.label2)
+                            downloadBusy == index -> CircularProgressIndicator(
+                                Modifier.size(12.dp), strokeWidth = 1.5.dp, color = c.label2,
+                            )
+                            else -> Text(bytesLabel(size) + " · 点按下载", style = t.caption2, color = c.blue)
+                        }
                     }
                 }
-                Text("附件暂不支持下载（已保存在服务端归档）", style = t.caption2, color = c.label2)
             }
             Spacer(Modifier.height(10.dp))
         }
@@ -2510,6 +2679,113 @@ private fun ExtMailBody(m: ExtLocalMail) {
                 style = t.caption2,
                 color = c.label2,
                 modifier = Modifier.padding(horizontal = 20.dp, vertical = 4.dp),
+            )
+        }
+        if (!sent) {
+            // 写操作底栏：全部直连 IMAP，失败时给出具体原因，不假装成功
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 12.dp, vertical = 8.dp)
+                    .horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                ExtActionChip("回复") { onReply(m, ReplyAction.REPLY, accountAddress, accountId) }
+                ExtActionChip("回复全部") { onReply(m, ReplyAction.REPLY_ALL, accountAddress, accountId) }
+                ExtActionChip("转发") { onReply(m, ReplyAction.FORWARD, accountAddress, accountId) }
+                ExtActionChip(if (starredNow) "取消星标" else "星标", busy = busy == "star") {
+                    action("star") {
+                        ExtImapActions.setStarred(m.extId, m.localId, m.uid, !starredNow)
+                        starredNow = !starredNow
+                        if (starredNow) "已在服务器加星标" else "已取消星标"
+                    }
+                }
+                ExtActionChip(if (seenNow) "标记未读" else "标记已读", busy = busy == "seen") {
+                    action("seen") {
+                        ExtImapActions.setSeen(m.extId, m.localId, m.uid, !seenNow)
+                        seenNow = !seenNow
+                        if (seenNow) "已标记为已读" else "已标记为未读"
+                    }
+                }
+                if (busy == "delete") {
+                    CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp, color = c.label2)
+                } else {
+                    ExtActionChip("删除", tint = c.red) { confirmDelete = true }
+                }
+            }
+        }
+    }
+
+    if (confirmDelete) {
+        Dialog(onDismissRequest = { confirmDelete = false }) {
+            Column(
+                Modifier.clip(RoundedCornerShape(OT.dimens.rLg.dp)).background(c.bgGrouped)
+                    .padding(20.dp),
+            ) {
+                Text("删除这封邮件？", style = t.title3, color = c.label)
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    "邮件会从收件箱移动到服务器回收站（Trash），可在邮箱网页版恢复。",
+                    style = t.body,
+                    color = c.label2,
+                )
+                Spacer(Modifier.height(16.dp))
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                    Text(
+                        "取消",
+                        style = t.body.copy(fontWeight = FontWeight.Medium),
+                        color = c.label2,
+                        modifier = Modifier.clip(RoundedCornerShape(8.dp))
+                            .clickable { confirmDelete = false }
+                            .padding(horizontal = 12.dp, vertical = 8.dp),
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        "删除",
+                        style = t.body.copy(fontWeight = FontWeight.Medium),
+                        color = c.red,
+                        modifier = Modifier.clip(RoundedCornerShape(8.dp))
+                            .clickable {
+                                confirmDelete = false
+                                action("delete") {
+                                    val r = ExtImapActions.deleteToTrash(m.extId, m.localId, m.uid)
+                                    onDeleted()
+                                    "已移动到回收站（${r.trashName}）"
+                                }
+                            }
+                            .padding(horizontal = 12.dp, vertical = 8.dp),
+                    )
+                }
+            }
+        }
+    }
+}
+
+/** 外部邮件详情底栏的小胶囊按钮；busy 时替换成转圈，避免连点。 */
+@Composable
+private fun ExtActionChip(
+    label: String,
+    tint: Color? = null,
+    busy: Boolean = false,
+    onClick: () -> Unit,
+) {
+    val c = OT.colors
+    Box(
+        Modifier
+            .clip(RoundedCornerShape(999.dp))
+            .background(c.bgInput)
+            .clickable(enabled = !busy) { onClick() }
+            .padding(horizontal = 12.dp, vertical = 8.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        if (busy) {
+            CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 1.5.dp, color = c.label2)
+        } else {
+            Text(
+                label,
+                style = OT.type.footnote.copy(fontWeight = FontWeight.Medium),
+                color = tint ?: c.label,
             )
         }
     }
