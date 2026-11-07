@@ -193,6 +193,8 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+          # 扫码功能还没真机验证通过，先发预发布；验证通过后改成 "false" 即恢复正式发布
+          PRERELEASE: "true"
         run: |
           ASSET="otsmail-${{ steps.ver.outputs.value }}-release.apk"
           MAPPING="mapping-v${{ steps.ver.outputs.value }}.txt"
@@ -202,7 +204,9 @@ jobs:
             echo ""
             echo "该版本的 R8 混淆映射不随 Release 公开，仅归档在本次 Actions artifact（保留 90 天，文件名 \`$MAPPING\`）。"
           } >> release-notes.md
-          gh release create "$GITHUB_REF_NAME" "$ASSET" \
+          EXTRA=()
+          if [ "${PRERELEASE:-false}" = "true" ]; then EXTRA+=(--prerelease); fi
+          gh release create "$GITHUB_REF_NAME" "$ASSET" "${EXTRA[@]}" \
             --title "OTSMail Android ${{ steps.ver.outputs.value }}" \
             --notes-file release-notes.md
 
