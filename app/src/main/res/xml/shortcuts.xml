@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<shortcuts xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- 长按图标进入扫码：显式落到 MainActivity，再按 otsmail://qr 处理 -->
+    <shortcut
+        android:enabled="true"
+        android:icon="@drawable/ot_qr"
+        android:shortcutId="scan_qr"
+        android:shortcutLongLabel="@string/shortcut_scan_qr"
+        android:shortcutShortLabel="@string/shortcut_scan_qr">
+        <intent
+            android:action="android.intent.action.VIEW"
+            android:data="otsmail://qr"
+            android:targetClass="com.otscup.otsmail.MainActivity"
+            android:targetPackage="com.otscup.otsmail" />
+    </shortcut>
+</shortcuts>

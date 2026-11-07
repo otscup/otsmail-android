@@ -2,6 +2,12 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- 扫码登录：运行时申请，只用于识别网页端登录二维码 -->
+    <uses-permission android:name="android.permission.CAMERA" />
+    <!-- 没有相机的设备（部分平板/模拟器）也要能安装，扫码入口内部再提示 -->
+    <uses-feature
+        android:name="android.hardware.camera"
+        android:required="false" />
     <!-- Android 13+ 弹不弹通知取决于这个运行时权限 -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <!-- 新邮件通知渠道默认开启震动；不给 VIBRATE 系统会静默忽略震动 -->
@@ -40,6 +46,11 @@
         android:label="@string/app_name"
         android:supportsRtl="true"
         android:theme="@style/Theme.OtsMail">
+        <!-- 长按图标「扫一扫」：静态快捷方式，落到 MainActivity 的 otsmail://qr 深链 -->
+        <meta-data
+            android:name="android.app.shortcuts"
+            android:resource="@xml/shortcuts" />
+
         <activity
             android:name=".MainActivity"
             android:exported="true"
@@ -58,6 +69,15 @@
                     android:scheme="otsmail"
                     android:host="oauth"
                     android:pathPrefix="/callback" />
+            </intent-filter>
+            <!-- 扫码登录入口：长按图标快捷方式 / 外部唤起 -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data
+                    android:scheme="otsmail"
+                    android:host="qr" />
             </intent-filter>
         </activity>
 

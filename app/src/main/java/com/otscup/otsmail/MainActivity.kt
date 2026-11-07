@@ -9,6 +9,7 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import com.otscup.otsmail.data.OAuthCallbackBus
 import com.otscup.otsmail.data.OAuthTiming
+import com.otscup.otsmail.data.QrScanBus
 import com.otscup.otsmail.push.PushDedupe
 import com.otscup.otsmail.push.PushNotifications
 import com.otscup.otsmail.push.PushRouter
@@ -22,6 +23,8 @@ class MainActivity : ComponentActivity() {
         PushRouter.open(intent)
         // 冷启动由 Custom Tabs 回调拉起：otsmail://oauth/callback?code&state
         handleOAuthIntent(intent)
+        // 长按图标「扫一扫」/外部唤起：otsmail://qr
+        handleQrIntent(intent)
         enableEdgeToEdge()
         setContent { OtsApp() }
         maybeRunPushDedupeSelfTest(intent)
@@ -33,6 +36,7 @@ class MainActivity : ComponentActivity() {
         // App 在运行中点通知：singleTop 会走到这里
         PushRouter.open(intent)
         handleOAuthIntent(intent)
+        handleQrIntent(intent)
         maybeRunPushDedupeSelfTest(intent)
     }
 
@@ -43,6 +47,12 @@ class MainActivity : ComponentActivity() {
             OAuthTiming.mark(this, "intent-received")
             OAuthCallbackBus.post(data.toString())
         }
+    }
+
+    /** 扫码入口：otsmail://qr（静态快捷方式或外部唤起）；未登录由 OtsApp 先引导登录。 */
+    private fun handleQrIntent(intent: Intent?) {
+        val data = intent?.data ?: return
+        if (data.scheme == "otsmail" && data.host == "qr") QrScanBus.post()
     }
 
     /**

@@ -36,6 +36,7 @@ import com.otscup.otsmail.data.MailAddress
 import com.otscup.otsmail.data.MailDetail
 import com.otscup.otsmail.data.OAuthTiming
 import com.otscup.otsmail.data.PushManager
+import com.otscup.otsmail.data.QrScanBus
 import com.otscup.otsmail.data.Session
 import com.otscup.otsmail.push.ExtIdleManager
 import com.otscup.otsmail.push.PushRouter
@@ -82,6 +83,8 @@ private sealed interface Route {
     data object AllMail : Route
     data object Drafts : Route
     data object ScheduledSends : Route
+    /** 扫码确认网页端登录（App 必须已登录；不会拿到 token） */
+    data object QrScan : Route
     data object Users : Route
     data object Roles : Route
     data object RegKeys : Route
@@ -136,6 +139,13 @@ fun OtsApp() {
     }
     fun goBack() {
         route = backStack.removeLastOrNull() ?: Route.Inbox
+    }
+    // 扫码入口（长按图标 / otsmail://qr）：未登录先留在登录页，登录成功后由 onLoggedIn 接着跳扫码
+    LaunchedEffect(QrScanBus.pending) {
+        if (!QrScanBus.pending || session.token.isEmpty()) return@LaunchedEffect
+        QrScanBus.consume()
+        backStack.clear()
+        route = Route.QrScan
     }
     val snackbar = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
@@ -248,7 +258,14 @@ fun OtsApp() {
                         // 登录前点的通知（此时还没登录态），登录成功后补跳详情
                         val pending = PushRouter.consume()
                         val pendingExt = PushRouter.consumeExt()
+                        // 未登录时长按图标进的扫码：登录成功后继续
+                        val pendingQr = QrScanBus.consume()
                         route = when {
+                            pendingQr -> {
+                                backStack.clear()
+                                Route.QrScan
+                            }
+
                             pending != null -> {
                                 backStack.clear()
                                 Route.Detail(pending)
@@ -468,7 +485,12 @@ fun OtsApp() {
                         onOpenSystemSettings = { go(Route.SystemSettings) },
                         onOpenExtAccounts = { go(Route.ExtBind) },
                         onOpenScheduled = { go(Route.ScheduledSends) },
+                        onOpenQrScan = { go(Route.QrScan) },
                     )
+                }
+
+                Route.QrScan -> SlidePage(onDismiss = { goBack() }) {
+                    QrScanScreen(session = session, onBack = { goBack() })
                 }
 
                 Route.ExtBind -> SlidePage(onDismiss = { goBack() }) {
