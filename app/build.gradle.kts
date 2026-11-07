@@ -45,24 +45,41 @@ android {
 
     /**
      * 版本号规则（确定性、可校验）：
-     * - versionName 由 tag 派生（CI 传 -PversionName=vX.Y.Z 去掉 v），本地默认 0.2.5；
-     * - versionCode = major*10000 + minor*100 + patch，例如 0.2.5 -> 205，0.3.0 -> 300。
-     *   只升不降：major/minor/patch 任一位递增后都比旧值大。
+     * - 正式号只在推送 GitHub 打 tag 时递增（CI 传 -PversionName=vX.Y.Z，去掉 v）；
+     * - 本地包不占正式号：一律 `<下一个正式版本>-dev.<序号>`，序号每次本地 assemble 自增；
+     *   序号存在根目录 .dev-version（已 gitignore），IDE 同步/单测不触发自增；
+     * - versionCode = major*10000 + minor*100 + patch，例如 0.2.6 -> 206，0.3.0 -> 300。
+     *   dev 包与对应正式版共用同一个 versionCode，-r 覆盖安装不会触发降级。
      * release.yml 会用 aapt 断言包内版本与 tag 一致，versionCode 与上式一致。
      */
     fun versionCodeOf(name: String): Int {
-        val parts = name.split(".")
+        val parts = name.substringBefore('-').split(".")
         val major = parts.getOrNull(0)?.toIntOrNull() ?: 0
         val minor = parts.getOrNull(1)?.toIntOrNull() ?: 0
         val patch = parts.getOrNull(2)?.toIntOrNull() ?: 0
         return major * 10000 + minor * 100 + patch
     }
 
-    val tagVersionName = (project.findProperty("versionName") as String?)
+    // 最后一个正式 tag 是 v0.2.5；0.2.4 的断档不补发。下一个正式版是 0.3.0，发新 tag 后这里改成再下一个。
+    val nextReleaseName = "0.3.0"
+
+    val releaseVersionName = (project.findProperty("versionName") as String?)
         ?.removePrefix("v")
         ?.trim()
         ?.takeIf { it.isNotEmpty() }
-        ?: "0.2.5"
+
+    val devSeqFile = rootProject.file(".dev-version")
+    val localVersionName = run {
+        val forced = (project.findProperty("devSeq") as String?)?.toIntOrNull()
+        val last = devSeqFile.takeIf { it.exists() }?.readText()?.trim()?.toIntOrNull() ?: 0
+        // 只有真正本地打包才自增：IDE 同步、跑单测不消耗序号
+        val assembling = gradle.startParameter.taskNames.any { it.contains("assemble", ignoreCase = true) }
+        val seq = forced ?: if (assembling) last + 1 else last.coerceAtLeast(1)
+        if (assembling && forced == null) devSeqFile.writeText(seq.toString())
+        "$nextReleaseName-dev.$seq"
+    }
+
+    val tagVersionName = releaseVersionName ?: localVersionName
     val tagVersionCode = (project.findProperty("versionCode") as String?)?.toIntOrNull()
         ?: versionCodeOf(tagVersionName)
 
@@ -98,7 +115,13 @@ android {
             if (demoBuild) applicationIdSuffix = ".demo"
         }
         release {
-            isMinifyEnabled = false
+            // R8 + 资源压缩：material-icons-extended 里未引用的图标类会被整类裁掉
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro",
+            )
             if (signingReady) {
                 signingConfig = signingConfigs.getByName("release")
             }
@@ -117,6 +140,15 @@ android {
     buildFeatures {
         compose = true
         buildConfig = true
+    }
+
+    lint {
+        // CI 只跑 lintDebug，用来拦新引入的 error；存量问题固定在基线里，不靠关闭检查变绿。
+        // 基线内已知项（3 个 error）：
+        // 1) ExtIdleService.notify(MissingPermission)：Android 13+ 无通知权限时只是被系统压制，不会抛异常；
+        // 2/3) RecipientSuggest 的 android.icu.text.Transliterator（NewApi，API 29+）：调用处已有 runCatching，
+        //    低版本取不到图标/拼音首字母时返回空串，不影响补全结果。
+        baseline = file("lint-baseline.xml")
     }
 }
 
