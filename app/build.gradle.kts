@@ -163,6 +163,12 @@ dependencies {
     implementation("androidx.activity:activity-compose:1.9.3")
     // Custom Tabs：OIDC 授权页放到 Chrome，WebAuthn（通行密钥）才可能被调起
     implementation("androidx.browser:browser:1.8.0")
+    // 扫码登录：CameraX 只做预览/取帧，识别用 ZXing core（纯 Java，不接 GMS/ML Kit）
+    implementation("androidx.camera:camera-core:1.3.4")
+    implementation("androidx.camera:camera-camera2:1.3.4")
+    implementation("androidx.camera:camera-lifecycle:1.3.4")
+    implementation("androidx.camera:camera-view:1.3.4")
+    implementation("com.google.zxing:core:3.5.3")
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.7")
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.7")
     // FCM：版本交给 BOM 管理
@@ -171,4 +177,6 @@ dependencies {
     debugImplementation("androidx.compose.ui:ui-tooling")
     // 只跑不依赖 Android 运行时的纯函数（服务器地址解析、HTML 清洗）
     testImplementation("junit:junit:4.13.2")
+    // android.jar 里的 org.json 只是桩，单测运行时换成真实实现（只进测试 classpath，不进 APK）
+    testImplementation("org.json:json:20240303")
 }

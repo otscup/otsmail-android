@@ -223,6 +223,14 @@ object Api {
         return data.optString("token").ifEmpty { throw ApiException(401, "服务器没有返回 token") }
     }
 
+    /**
+     * POST /my/qr/confirm：用当前登录会话确认网页端扫码登录。
+     * 失败码：400 二维码无效/已确认，410 已过期，401 登录失效（由 AuthState 统一提示）。
+     */
+    suspend fun qrConfirm(id: String) {
+        obj("POST", "/my/qr/confirm", JSONObject().put("id", id))
+    }
+
     /** POST /register：code 为注册码（服务端 regKey=0 必填、=2 可选），token 为人机验证 token。 */
     suspend fun register(email: String, password: String, code: String, turnstileToken: String = "") {
         val body = JSONObject().put("email", email).put("password", password)
