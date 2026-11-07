@@ -97,7 +97,6 @@ fun SettingsScreen(
     onOpenSystemSettings: () -> Unit = {},
     onOpenExtAccounts: () -> Unit = {},
     onOpenScheduled: () -> Unit = {},
-    onOpenQrScan: () -> Unit = {},
 ) {
     val c = OT.colors
     val t = OT.type
@@ -348,13 +347,6 @@ fun SettingsScreen(
                     title = "定时发送",
                     value = "查看待发送",
                     onClick = onOpenScheduled,
-                    showChevron = true,
-                )
-                OTDivider(inset = 16)
-                SettingRow(
-                    title = "扫一扫",
-                    value = "确认网页登录",
-                    onClick = onOpenQrScan,
                     showChevron = true,
                 )
                 OTDivider(inset = 16)

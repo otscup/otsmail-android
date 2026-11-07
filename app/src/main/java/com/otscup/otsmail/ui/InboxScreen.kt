@@ -267,6 +267,8 @@ fun InboxScreen(
     onOpenSettings: () -> Unit,
     onOpenContacts: () -> Unit,
     onOpenAi: () -> Unit,
+    /** 抽屉头像行右侧的扫码入口：确认网页端登录 */
+    onOpenQrScan: () -> Unit = {},
     /** 抽屉里的「草稿箱」：本地草稿不进服务端列表，交给 App 打开 DraftsScreen */
     onOpenDrafts: () -> Unit = {},
     /** 行内右滑 → 回复：由 App 负责拿原文并进写信页 */
@@ -923,6 +925,21 @@ fun InboxScreen(
                                 Column(Modifier.weight(1f)) {
                                     Text("全部帐户", style = t.subhead.copy(fontWeight = FontWeight.SemiBold), color = c.label)
                                     Text(session.email, style = t.caption1, color = c.label2, maxLines = 1)
+                                }
+                                // 扫码确认网页端登录：放在头像这一行右侧，和「个人设置」分开
+                                Box(
+                                    Modifier.size(40.dp).clip(CircleShape).tapArea {
+                                        close()
+                                        onOpenQrScan()
+                                    },
+                                    contentAlignment = Alignment.Center,
+                                ) {
+                                    Icon(
+                                        painterResource(R.drawable.ot_qr),
+                                        contentDescription = "扫一扫",
+                                        tint = c.label2,
+                                        modifier = Modifier.size(22.dp),
+                                    )
                                 }
                             }
                             Column(Modifier.padding(horizontal = 8.dp)) {

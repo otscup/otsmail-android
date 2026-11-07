@@ -299,6 +299,7 @@ fun OtsApp() {
                     onOpenSettings = { go(Route.Settings) },
                     onOpenContacts = { go(Route.Contacts) },
                     onOpenAi = { go(Route.Ai) },
+                    onOpenQrScan = { go(Route.QrScan) },
                     onOpenDrafts = { go(Route.Drafts) },
                     onOpenExtDetail = { localId, sent -> go(Route.ExtDetail(localId, sent)) },
                     onComposeExt = { extId, accountId, address ->
@@ -485,7 +486,6 @@ fun OtsApp() {
                         onOpenSystemSettings = { go(Route.SystemSettings) },
                         onOpenExtAccounts = { go(Route.ExtBind) },
                         onOpenScheduled = { go(Route.ScheduledSends) },
-                        onOpenQrScan = { go(Route.QrScan) },
                     )
                 }
 
