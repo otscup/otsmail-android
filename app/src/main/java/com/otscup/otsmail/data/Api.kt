@@ -20,6 +20,8 @@ fun friendlyError(e: Throwable): String {
     return when {
         // 401 统一由 AuthState + 顶部提示处理：这里返回空串，各页面就不会再各弹一条「登录已失效」
         e is ApiException && e.httpCode == 401 -> ""
+        // 第三方邮箱发信：SMTP 客户端已经把原因翻成中文（认证失败/超时/服务器拒收等），原样展示
+        e is ExtSmtpException -> e.message.orEmpty().ifEmpty { "发信失败" }
         e is java.net.UnknownHostException || m.contains("Unable to resolve host", true) ||
             m.contains("No address associated", true) -> "无法解析服务器地址，请检查网络或服务器地址"
         m.contains("Network is unreachable", true) || m.contains("No route to host", true) ->
@@ -155,12 +157,14 @@ object Api {
         auth: Boolean = true,
         headers: Map<String, String> = emptyMap(),
         readTimeoutMs: Int = 20_000,
+        /** 覆盖全局 base：退出登录/换服务器时全局地址已经变了，旧请求仍要打旧服务器 */
+        baseUrl: String? = null,
     ): JSONObject =
         withContext(Dispatchers.IO) {
             // 演示构建（-Pdemo=true，独立 applicationId）：全部请求由本地虚构数据应答，
             // 不连服务器、不碰真实账户。正式包 BuildConfig.DEMO=false，这里不会命中。
             if (BuildConfig.DEMO) return@withContext Demo.respond(method, path, body)
-            val conn = (URL(base.trimEnd('/') + path).openConnection() as HttpURLConnection).apply {
+            val conn = (URL((baseUrl ?: base).trimEnd('/') + path).openConnection() as HttpURLConnection).apply {
                 requestMethod = method
                 connectTimeout = 15_000
                 readTimeout = readTimeoutMs
@@ -298,6 +302,23 @@ object Api {
             PushScaffold.REGISTER_PATH + "?token=" + URLEncoder.encode(token, "UTF-8"),
             null,
             auth = false,
+            headers = mapOf("Authorization" to authToken),
+        )
+    }
+
+    /**
+     * 退出登录：DELETE /logout。
+     * 地址与令牌都由调用方显式传入（退出时会立刻清本地登录态，全局 base/token 随后就不可靠了）；
+     * auth=false 是为了不触发 401 的「登录已过期」提示——退出本来就是主动结束会话。
+     */
+    suspend fun logout(baseUrl: String, authToken: String) {
+        if (baseUrl.isEmpty() || authToken.isEmpty()) return
+        raw(
+            "DELETE",
+            "/logout",
+            null,
+            auth = false,
+            baseUrl = baseUrl,
             headers = mapOf("Authorization" to authToken),
         )
     }

@@ -60,7 +60,7 @@ object MailCache {
      * 400 的理由：约 20 页 ≈ 正常用户半个月的收件量，再往上翻还能从服务端取；
      * 24MB ≈ 400 行 × 约 60KB 的头部 JSON，留一倍余量给多账号多分类快照。
      */
-    const val OPENED_KEEP = 14L * 24 * 60 * 60 * 1000
+    const val OPENED_KEEP = 7L * 24 * 60 * 60 * 1000
     private const val UNOPENED_KEEP = 60L * 60 * 1000
     const val RETAIN_ROWS_PER_LIST = 400
     private const val LIST_BUDGET_BYTES = 24L * 1024 * 1024
@@ -636,7 +636,7 @@ object MailCache {
     /**
      * 清理顺序（长期缓存的容量约束）：
      * 1) 没打开过的旧正文（超过 1 小时）；
-     * 2) 打开过但超过 14 天（[OPENED_KEEP]）的正文；
+     * 2) 打开过但超过 7 天（[OPENED_KEEP]）的正文；
      * 3) 仍超字节上限时，先删没打开过的旧正文，再删打开过里最旧的（每次 20 条，留安全上限防死循环）。
      */
     private fun trimDetails(w: SQLiteDatabase, now: Long) {

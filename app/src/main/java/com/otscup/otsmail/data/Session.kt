@@ -8,11 +8,20 @@ import android.util.Base64
 import android.util.Log
 import com.otscup.otsmail.push.PushDedupe
 import com.otscup.otsmail.push.PushSettings
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import java.security.KeyStore
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
+
+private const val TAG = "Session"
+
+/** 退出登录专用的后台作用域：请求失败只记日志，不向界面抛错，也不阻塞本地清理。 */
+private val logoutScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
 /** 只用 SharedPreferences，不引 DataStore：三个字段，没有必要为它加依赖。 */
 class Session(context: Context) {
@@ -86,7 +95,18 @@ class Session(context: Context) {
     }
 
     fun clear() {
-        // 先注销推送设备：内部会捕获当前的 Api.token（下面就把 token 清掉了）
+        // 先通知服务端结束会话：地址与令牌必须在清本地登录态之前捕获，
+        // 且整个请求异步执行——离线/慢网不能把退出流程卡住，失败也不提示。
+        val logoutBase = base
+        val logoutToken = token
+        if (logoutBase.isNotEmpty() && logoutToken.isNotEmpty()) {
+            logoutScope.launch {
+                runCatching { Api.logout(logoutBase, logoutToken) }
+                    .onSuccess { Log.i(TAG, "已通知服务端退出登录") }
+                    .onFailure { Log.i(TAG, "服务端退出登录失败（本地清理照常完成）：${it.javaClass.simpleName}") }
+            }
+        }
+        // 再注销推送设备：内部会捕获当前的 Api.token（下面就把 token 清掉了）
         PushManager.unregisterAsync(appContext)
         // 登录态 + 个人资料 + 登录域名 + 草稿 + OAuth 半成品全部清掉：
         // 换号/换服务器时不能把上一个账号的签名、头像、草稿、state/verifier 带过去。
