@@ -1,23 +1,39 @@
 package com.otscup.otsmail.ui
 
 import android.Manifest
+import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.hardware.camera2.CaptureRequest
+import android.media.AudioManager
+import android.media.ToneGenerator
 import android.net.Uri
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.os.VibrationEffect
+import android.os.Vibrator
+import android.os.VibratorManager
 import android.provider.Settings
+import android.util.Log
 import android.util.Size
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.camera.camera2.interop.Camera2Interop
+import androidx.camera.camera2.interop.ExperimentalCamera2Interop
+import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
+import androidx.camera.core.FocusMeteringAction
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageProxy
 import androidx.camera.core.Preview
+import androidx.camera.core.resolutionselector.ResolutionSelector
+import androidx.camera.core.resolutionselector.ResolutionStrategy
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -47,6 +63,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -55,23 +72,22 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.LocalLifecycleOwner
-import com.google.zxing.BarcodeFormat
-import com.google.zxing.BinaryBitmap
-import com.google.zxing.DecodeHintType
-import com.google.zxing.LuminanceSource
-import com.google.zxing.MultiFormatReader
-import com.google.zxing.PlanarYUVLuminanceSource
-import com.google.zxing.common.HybridBinarizer
+import com.otscup.otsmail.BuildConfig
 import com.otscup.otsmail.data.Api
 import com.otscup.otsmail.data.ApiException
+import com.otscup.otsmail.data.QrDecoder
 import com.otscup.otsmail.data.QrPayload
 import com.otscup.otsmail.data.Session
 import com.otscup.otsmail.data.friendlyError
 import com.otscup.otsmail.ui.theme.OT
 import kotlinx.coroutines.launch
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicReference
+
+private const val TAG = "QrScan"
 
 private sealed interface QrOutcome {
     data object Success : QrOutcome
@@ -164,7 +180,11 @@ fun QrScanScreen(session: Session, onBack: () -> Unit) {
             if (outcome == null) {
                 if (cameraActive) {
                     CameraPreview(
-                        onTicket = { id -> scannedId = id },
+                        onTicket = { id ->
+                            // 命中只触发一次（分析线程已置 stopped），提示音 + 短震动
+                            playScanFeedback(context)
+                            scannedId = id
+                        },
                         onInvalid = { reason -> scanHint = reason },
                     )
                 }
@@ -344,6 +364,7 @@ private fun QrMessagePanel(
  * CameraX 预览 + ZXing 解码：单线程分析、300ms 节流、命中二维码后立即停止。
  * 只回调文本，票据格式校验放在 UI 层，避免把解析异常带进相机线程。
  */
+@androidx.annotation.OptIn(ExperimentalCamera2Interop::class)
 @Composable
 private fun CameraPreview(onTicket: (String) -> Unit, onInvalid: (String) -> Unit) {
     val context = LocalContext.current
@@ -357,43 +378,100 @@ private fun CameraPreview(onTicket: (String) -> Unit, onInvalid: (String) -> Uni
     val executor = remember { Executors.newSingleThreadExecutor() }
     val stopped = remember { AtomicBoolean(false) }
     val lastDecodeAt = remember { AtomicLong(0L) }
+    val frameCount = remember { AtomicLong(0L) }
+    val lastInvalid = remember { AtomicReference<String?>(null) }
     val main = remember { Handler(Looper.getMainLooper()) }
     var provider by remember { mutableStateOf<ProcessCameraProvider?>(null) }
+    var camera by remember { mutableStateOf<Camera?>(null) }
+
+    // CameraX 不会自己持续追焦：每 2.5 秒对画面中心做一次 AF，点屏幕时再聚焦到点击位置
+    val focusTick = remember {
+        object : Runnable {
+            override fun run() {
+                camera?.let { cam ->
+                    runCatching {
+                        if (previewView.width > 0 && previewView.height > 0) {
+                            val center = previewView.meteringPointFactory.createPoint(
+                                previewView.width / 2f,
+                                previewView.height / 2f,
+                            )
+                            cam.cameraControl.startFocusAndMetering(
+                                FocusMeteringAction.Builder(center, FocusMeteringAction.FLAG_AF)
+                                    .setAutoCancelDuration(3, TimeUnit.SECONDS)
+                                    .build(),
+                            )
+                        }
+                    }
+                }
+                main.postDelayed(this, 2500L)
+            }
+        }
+    }
 
     DisposableEffect(Unit) {
         val future = ProcessCameraProvider.getInstance(context)
         future.addListener({
             val cameraProvider = runCatching { future.get() }.getOrNull() ?: return@addListener
             provider = cameraProvider
-            val preview = Preview.Builder().build().also {
+            val previewBuilder = Preview.Builder().also {
+                Camera2Interop.Extender(it).setCaptureRequestOption(
+                    CaptureRequest.CONTROL_AF_MODE,
+                    CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE,
+                )
+            }
+            val preview = previewBuilder.build().also {
                 it.setSurfaceProvider(previewView.surfaceProvider)
             }
-            val analysis = ImageAnalysis.Builder()
+            val analysisBuilder = ImageAnalysis.Builder()
                 .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-                .setTargetResolution(Size(1280, 720))
-                .build()
+                // 1280x720 足够识别，分辨率越大每帧旋转+二值化越慢（S10 上曾选到 3024x3024）
+                .setResolutionSelector(
+                    ResolutionSelector.Builder()
+                        .setResolutionStrategy(
+                            ResolutionStrategy(
+                                Size(1280, 720),
+                                ResolutionStrategy.FALLBACK_RULE_CLOSEST_LOWER_THEN_HIGHER,
+                            ),
+                        )
+                        .build(),
+                )
+            // 分析流也用连续对焦，否则预览清楚、送给解码的帧还是糊的
+            Camera2Interop.Extender(analysisBuilder).setCaptureRequestOption(
+                CaptureRequest.CONTROL_AF_MODE,
+                CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE,
+            )
+            val analysis = analysisBuilder.build()
             analysis.setAnalyzer(executor) { proxy ->
                 try {
                     if (stopped.get()) return@setAnalyzer
                     val now = System.currentTimeMillis()
                     if (now - lastDecodeAt.get() < 300L) return@setAnalyzer
                     lastDecodeAt.set(now)
-                    val text = decodeQr(proxy) ?: return@setAnalyzer
+                    val frame = frameCount.incrementAndGet()
+                    val text = decodeQr(proxy)
+                    logFrame(proxy, frame, text)
+                    if (text == null) return@setAnalyzer
                     when (val r = QrPayload.parse(text)) {
                         is QrPayload.Result.Ok -> {
                             stopped.set(true)
                             main.post { onTicket(r.id) }
                         }
 
-                        is QrPayload.Result.Invalid -> main.post { onInvalid(r.reason) }
+                        is QrPayload.Result.Invalid -> {
+                            // 同一张无效码每帧都会命中，只在内容变化时提示，避免反复弹
+                            if (lastInvalid.getAndSet(text) != text) main.post { onInvalid(r.reason) }
+                        }
                     }
-                } catch (_: Throwable) {
-                    // 单帧失败直接丢弃，下一帧继续
+                } catch (e: Throwable) {
+                    // 以前这里静默吞掉所有异常，旋转不支持的异常就是这样把扫码变成「毫无反应」的
+                    if (BuildConfig.DEBUG || Log.isLoggable(TAG, Log.DEBUG)) {
+                        Log.w(TAG, "分析帧异常 ${e.javaClass.simpleName}: ${e.message}")
+                    }
                 } finally {
                     proxy.close()
                 }
             }
-            runCatching {
+            val bound = runCatching {
                 cameraProvider.unbindAll()
                 cameraProvider.bindToLifecycle(
                     lifecycleOwner,
@@ -401,17 +479,63 @@ private fun CameraPreview(onTicket: (String) -> Unit, onInvalid: (String) -> Uni
                     preview,
                     analysis,
                 )
+            }.getOrNull()
+            camera = bound
+            if (bound != null) {
+                main.removeCallbacks(focusTick)
+                main.post(focusTick)
             }
         }, ContextCompat.getMainExecutor(context))
 
         onDispose {
             stopped.set(true)
+            main.removeCallbacks(focusTick)
             runCatching { provider?.unbindAll() }
             executor.shutdown()
         }
     }
 
-    AndroidView(factory = { previewView }, modifier = Modifier.fillMaxSize())
+    AndroidView(
+        factory = { previewView },
+        modifier = Modifier
+            .fillMaxSize()
+            // 点屏幕对焦：坐标换算成相机预览的 metering 坐标
+            .pointerInput(Unit) {
+                detectTapGestures { offset ->
+                    camera?.let { cam ->
+                        runCatching {
+                            val point = previewView.meteringPointFactory
+                                .createPoint(offset.x, offset.y)
+                            cam.cameraControl.startFocusAndMetering(
+                                FocusMeteringAction.Builder(point, FocusMeteringAction.FLAG_AF)
+                                    .setAutoCancelDuration(3, TimeUnit.SECONDS)
+                                    .build(),
+                            )
+                        }
+                    }
+                }
+            },
+    )
+}
+
+/** 命中二维码时的一次性反馈：短提示音 + 短震动（VIBRATE 权限已在 Manifest 声明）。 */
+private fun playScanFeedback(context: Context) {
+    runCatching {
+        val vibrator = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            context.getSystemService(VibratorManager::class.java)?.defaultVibrator
+        } else {
+            @Suppress("DEPRECATION")
+            context.getSystemService(Vibrator::class.java)
+        }
+        vibrator?.vibrate(
+            VibrationEffect.createOneShot(60L, VibrationEffect.DEFAULT_AMPLITUDE),
+        )
+    }
+    runCatching {
+        val tone = ToneGenerator(AudioManager.STREAM_NOTIFICATION, 90)
+        tone.startTone(ToneGenerator.TONE_PROP_BEEP, 150)
+        Handler(Looper.getMainLooper()).postDelayed({ runCatching { tone.release() } }, 400L)
+    }
 }
 
 private fun decodeQr(image: ImageProxy): String? {
@@ -422,39 +546,31 @@ private fun decodeQr(image: ImageProxy): String? {
     val len = minOf(plane.buffer.remaining(), data.size)
     if (len <= 0) return null
     plane.buffer.get(data, 0, len)
-
-    var source: LuminanceSource = PlanarYUVLuminanceSource(
+    // 旋转必须自己做：ZXing 的 PlanarYUVLuminanceSource 不支持 rotateCounterClockwise()
+    return QrDecoder.decodeYuv(
         data,
-        plane.rowStride,
-        image.height,
-        0,
-        0,
         image.width,
         image.height,
-        false,
+        plane.rowStride,
+        image.imageInfo.rotationDegrees,
     )
-    source = when (image.imageInfo.rotationDegrees) {
-        90 -> source.rotateCounterClockwise()
-        180 -> source.rotateCounterClockwise().rotateCounterClockwise()
-        270 -> source.rotateCounterClockwise()
-            .rotateCounterClockwise()
-            .rotateCounterClockwise()
+}
 
-        else -> source
-    }
+/** 调试日志节流用：每秒最多一条，跨页面重建也继续复用。 */
+private val lastLogAt = AtomicLong(0L)
 
-    val reader = MultiFormatReader()
-    reader.setHints(
-        mapOf(
-            DecodeHintType.POSSIBLE_FORMATS to listOf(BarcodeFormat.QR_CODE),
-            DecodeHintType.TRY_HARDER to true,
-        ),
+/** 调试日志：每秒最多一条，能看出「帧有没有到 / 尺寸与 stride / 旋转 / 解码结果」哪一层断了。 */
+private fun logFrame(image: ImageProxy, frame: Long, text: String?) {
+    if (!Log.isLoggable(TAG, Log.DEBUG)) return
+    val now = System.currentTimeMillis()
+    if (now - lastLogAt.get() < 1000L) return
+    lastLogAt.set(now)
+    val plane = image.planes.firstOrNull()
+    Log.d(
+        TAG,
+        "frame#$frame ${image.width}x${image.height}" +
+            " rowStride=${plane?.rowStride} pixelStride=${plane?.pixelStride}" +
+            " rot=${image.imageInfo.rotationDegrees}" +
+            " -> " + if (text == null) "decode=null" else "decode=ok(len=${text.length})",
     )
-    return try {
-        reader.decodeWithState(BinaryBitmap(HybridBinarizer(source))).text
-    } catch (_: Throwable) {
-        null
-    } finally {
-        reader.reset()
-    }
 }
