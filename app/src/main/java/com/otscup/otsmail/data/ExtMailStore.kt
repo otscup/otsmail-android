@@ -186,6 +186,23 @@ object ExtMailStore {
         }
     }
 
+    /** 本地是否已有这个 UID（补历史时用来跳过重复下载，避免整封重新拉一遍） */
+    fun hasUid(extId: Long, uid: Long): Boolean {
+        if (uid <= 0) return false
+        db().rawQuery(
+            "SELECT 1 FROM ext_mail WHERE ext_id = ? AND uid = ? LIMIT 1",
+            arrayOf(extId.toString(), uid.toString()),
+        ).use { c -> return c.moveToFirst() }
+    }
+
+    /** 本地这一批邮件里最大的 UID：换机补完归档后用它续接 IMAP 增量 */
+    fun maxUid(extId: Long): Long {
+        db().rawQuery(
+            "SELECT MAX(uid) FROM ext_mail WHERE ext_id = ?",
+            arrayOf(extId.toString()),
+        ).use { c -> return if (c.moveToFirst()) c.getLong(0) else 0L }
+    }
+
     /**
      * 收件箱合并展示用：按时间倒序取窗口。
      *

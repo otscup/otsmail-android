@@ -486,6 +486,18 @@ object Api {
     suspend fun archiveExtMail(body: JSONObject): JSONObject =
         obj("POST", "/ext/mail/archive", body, readTimeoutMs = 60_000)
 
+    /** GET /ext/mail/list：读回服务端已归档的邮件（换机补历史，只读，不改游标）。 */
+    suspend fun extMailList(
+        extId: Long,
+        limit: Int = 50,
+        beforeDate: Long = 0,
+        beforeMailId: Long = 0,
+    ): JSONObject = obj(
+        "GET",
+        "/ext/mail/list?extId=$extId&limit=$limit&beforeDate=$beforeDate&beforeMailId=$beforeMailId",
+        readTimeoutMs = 60_000,
+    )
+
     /** POST /ext/mail/sync-error：把这一轮失败原因写回服务端游标表，方便换机后看诊断。 */
     suspend fun extSyncError(extId: Long, message: String, uidValidity: Long) {
         raw(

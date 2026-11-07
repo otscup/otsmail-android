@@ -9,6 +9,9 @@ import com.otscup.otsmail.BuildConfig
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -22,10 +25,25 @@ data class ExtSyncReport(
     val accounts: Int = 0,
     val fetched: Int = 0,
     val archived: Int = 0,
+    /** 换机补历史时从服务端归档读回本地的封数 */
+    val restored: Int = 0,
     val failed: Int = 0,
     val errors: List<String> = emptyList(),
     /** 本轮真正新插入本地的邮件：IDLE/推送触发时用来弹通知（普通同步忽略） */
     val newMails: List<ExtLocalMail> = emptyList(),
+)
+
+enum class ExtSyncPhase { IDLE, RUNNING, DONE, FAILED }
+
+/**
+ * 同步状态：界面靠它显示「正在同步 / 已拉取 N 封 / 没有新邮件 / 失败原因」，
+ * 不再出现「点了同步什么都没发生」。
+ */
+data class ExtSyncStatus(
+    val phase: ExtSyncPhase = ExtSyncPhase.IDLE,
+    val message: String = "",
+    val fetched: Int = 0,
+    val at: Long = 0L,
 )
 
 /**
@@ -38,6 +56,17 @@ data class ExtSyncReport(
 object ExtSync {
 
     const val DEFAULT_LIMIT = 40
+
+    /** 换机补历史：每页 50 封、最多 6 页（300 封），更早的缺口交给 IMAP 时间窗口 */
+    private const val RESTORE_PAGE = 50
+    private const val RESTORE_MAX_PAGES = 6
+
+    /**
+     * 时间窗口回补天数：取 7 天。
+     * 依据：当前账户月均几十封，7 天约 10–20 封，窗口内下载量与「不漏新邮件」之间最平衡；
+     * 更久的历史已经在服务端归档里，靠读回归档补，不靠 IMAP 重下。
+     */
+    private const val FILL_DAYS = 7
 
     private const val TAG = "ExtSync"
 
@@ -59,6 +88,13 @@ object ExtSync {
     var rev by mutableIntStateOf(0)
         private set
 
+    private val _status = MutableStateFlow(ExtSyncStatus())
+    val status: StateFlow<ExtSyncStatus> = _status.asStateFlow()
+
+    private fun emit(phase: ExtSyncPhase, message: String, fetched: Int = 0) {
+        _status.value = ExtSyncStatus(phase, message, fetched, System.currentTimeMillis())
+    }
+
     /** 本地库被写操作改过（已读/星标/删除/发送成功）时通知列表重读；不触发网络同步。 */
     fun changed() {
         rev++
@@ -67,6 +103,7 @@ object ExtSync {
     private data class AccountResult(
         val fetched: Int,
         val archived: Int,
+        val restored: Int = 0,
         val newMails: List<ExtLocalMail> = emptyList(),
     )
 
@@ -120,15 +157,20 @@ object ExtSync {
             val accounts = try {
                 Api.extAccounts()
             } catch (e: Throwable) {
-                return@withContext ExtSyncReport(failed = 1, errors = listOf("读取账户失败：" + ExtSyncError.reason(e)))
+                val reason = "读取账户失败：" + ExtSyncError.reason(e)
+                emit(ExtSyncPhase.FAILED, reason)
+                return@withContext ExtSyncReport(failed = 1, errors = listOf(reason))
             }
 
             var total = 0
             var fetched = 0
             var archived = 0
+            var restored = 0
             var failed = 0
             val errors = mutableListOf<String>()
             val newMails = mutableListOf<ExtLocalMail>()
+
+            emit(ExtSyncPhase.RUNNING, "正在同步第三方邮箱…")
 
             for (i in 0 until accounts.length()) {
                 val o = accounts.optJSONObject(i) ?: continue
@@ -136,11 +178,14 @@ object ExtSync {
                 if (extId <= 0) continue
                 if (onlyExtId > 0 && extId != onlyExtId) continue
                 total++
+                val address = o.optString("address")
 
                 try {
+                    emit(ExtSyncPhase.RUNNING, "正在同步 $address…")
                     val result = syncAccount(o, extId, limit, prefs)
                     fetched += result.fetched
                     archived += result.archived
+                    restored += result.restored
                     newMails += result.newMails
                 } catch (e: Throwable) {
                     // 单账户失败不影响其他账户；这一轮连登录/列 UID 都没过，属于完全失败
@@ -153,10 +198,29 @@ object ExtSync {
                 }
             }
 
+            // 明确收尾：拉到几封 / 补回几封 / 没有新邮件 / 哪里失败，界面不再「点了没反应」
+            if (total == 0) {
+                emit(ExtSyncPhase.DONE, "没有可同步的第三方邮箱", 0)
+            } else if (failed > 0 && fetched == 0 && restored == 0) {
+                emit(ExtSyncPhase.FAILED, errors.firstOrNull() ?: "同步失败", 0)
+            } else {
+                val parts = mutableListOf<String>()
+                if (restored > 0) parts += "从服务端补回 $restored 封历史"
+                if (fetched > 0) parts += "新拉取 $fetched 封"
+                if (parts.isEmpty()) parts += "没有新邮件"
+                if (failed > 0) parts += "$failed 个邮箱失败：" + errors.first()
+                emit(
+                    if (failed > 0 && fetched == 0 && restored == 0) ExtSyncPhase.FAILED else ExtSyncPhase.DONE,
+                    parts.joinToString("，"),
+                    fetched,
+                )
+            }
+
             ExtSyncReport(
                 accounts = total,
                 fetched = fetched,
                 archived = archived,
+                restored = restored,
                 failed = failed,
                 errors = errors,
                 newMails = newMails,
@@ -170,6 +234,33 @@ object ExtSync {
         prefs: android.content.SharedPreferences,
     ): AccountResult {
         val address = account.optString("address")
+
+        /*
+         * 换机补历史：本机既没有游标、也没有任何邮件时，说明是新设备/重装。
+         * 此时先读回服务端已归档的 ext_mail（不重新连 IMAP 下载正文），
+         * 再用本地最大 UID 续接增量；跳过「按服务端共享游标从 last_uid+1 起拉」这条会漏掉全部旧邮件的路径。
+         */
+        val localBefore = ExtMailStore.cursor(extId)
+        val restored = if ((localBefore == null || localBefore.lastUid <= 0) && ExtMailStore.count(extId) == 0) {
+            emit(ExtSyncPhase.RUNNING, "正在从服务端补回 $address 的历史邮件…")
+            try {
+                restoreArchive(extId)
+            } catch (e: Throwable) {
+                Log.w(TAG, "账户 #$extId 读回服务端归档失败：${ExtSyncError.reason(e)}", e)
+                RestoreResult(0, 0)
+            }
+        } else {
+            RestoreResult(0, 0)
+        }
+        if (restored.imported > 0) {
+            ExtMailStore.saveCursor(
+                extId, address,
+                restored.uidValidity,
+                ExtMailStore.maxUid(extId),
+                0,
+            )
+            Log.i(TAG, "账户 #$extId 从服务端归档补回 ${restored.imported} 封，本地游标续接到 ${ExtMailStore.maxUid(extId)}")
+        }
 
         // 口令只在这一轮内存里存在，连接关掉即被回收；不打印、不落盘
         val cred = Api.extCredential(extId)
@@ -187,7 +278,7 @@ object ExtSync {
             needsId = provider?.imap?.needsId == true,
         )
 
-        // 本机游标优先；本机没有（换机）时才用服务端归档时回写的游标
+        // 本机游标优先；补完历史后游标已经续接到本地最大 UID。只有本机完全没有数据时才参考服务端游标
         val local = ExtMailStore.cursor(extId)
         var uidValidity = local?.uidValidity ?: account.optLong("uid_validity", 0L)
         var lastUid = local?.lastUid ?: account.optLong("last_uid", 0L)
@@ -220,8 +311,19 @@ object ExtSync {
                 maxOf(1L, box.uidNext - limit)
             }
             // IMAP 的 `n:*` 在 n 大于最大 UID 时会返回最后一封，没有新邮件就直接跳过，免得每轮重拉一封
-            val uids = if (box.uidNext > 0 && start >= box.uidNext) emptyList() else imap.listUids(start)
-            Log.i(TAG, "同步开始 ext=$extId start=$start uidNext=${box.uidNext} 待处理=${uids.size}")
+            val incremental = if (box.uidNext > 0 && start >= box.uidNext) emptyList() else imap.listUids(start)
+            /*
+             * 补历史之后的缺口：服务端归档只是「这台设备登录过之后拉到的那些」，
+             * 归档条数达到上限、或归档里缺了更早的邮件时，按时间窗口回补最近 FILL_DAYS 天。
+             * 只补本地没有的 UID，避免把已归档的正文再下载一遍。
+             */
+            val fill = if (restored.imported > 0 && !fullScan) {
+                imap.listUidsSince(FILL_DAYS).filter { !ExtMailStore.hasUid(extId, it) }
+            } else {
+                emptyList()
+            }
+            val uids = (incremental + fill).distinct().sorted()
+            Log.i(TAG, "同步开始 ext=$extId start=$start uidNext=${box.uidNext} 增量=${incremental.size} 窗口补=${fill.size}")
 
             for (uid in uids) {
                 if (processed + skipped >= limit) break
@@ -329,9 +431,82 @@ object ExtSync {
         // 游标回退的重扫可能把旧邮件当“新插入”，这里直接不给通知候选
         if (fullScan && newMails.isNotEmpty()) {
             Log.i(TAG, "历史重扫 ext=$extId 新增 ${newMails.size} 封，本轮不弹通知")
-            return AccountResult(processed, archived, emptyList())
+            return AccountResult(processed, archived, restored.imported, emptyList())
         }
-        return AccountResult(processed, archived, newMails)
+        return AccountResult(processed, archived, restored.imported, newMails)
+    }
+
+    /** 从服务端归档读回的封数与 UIDVALIDITY（换机补历史用） */
+    private data class RestoreResult(val imported: Int, val uidValidity: Long)
+
+    /**
+     * 分页读回服务端已归档的邮件并写入本地库。
+     *
+     * 上限 [RESTORE_MAX_PAGES] 页：新设备首屏不需要把几年的历史全搬下来，
+     * 更早的缺口由 IMAP 的 [FILL_DAYS] 天时间窗口兜底；再多的话下一轮同步会继续补。
+     * 全程只读归档，不连 IMAP，所以断网/邮箱服务器连不上时也能先把已有邮件显示出来。
+     */
+    private suspend fun restoreArchive(extId: Long): RestoreResult {
+        var imported = 0
+        var validity = 0L
+        var beforeDate = 0L
+        var beforeMailId = 0L
+        var page = 0
+        while (page < RESTORE_MAX_PAGES) {
+            val data = Api.extMailList(extId, RESTORE_PAGE, beforeDate, beforeMailId)
+            val arr = data.optJSONArray("list") ?: break
+            if (arr.length() == 0) break
+            for (i in 0 until arr.length()) {
+                val o = arr.optJSONObject(i) ?: continue
+                val uid = o.optLong("uid", 0L)
+                val uidValidity = o.optLong("uidValidity", 0L)
+                val messageId = o.optString("messageId").ifBlank {
+                    if (uid > 0) "uid:$uidValidity:$uid" else ""
+                }
+                if (messageId.isEmpty()) continue
+                val mail = ExtLocalMail(
+                    extId = extId,
+                    uid = uid,
+                    uidValidity = uidValidity,
+                    messageId = messageId,
+                    subject = o.optString("subject"),
+                    fromName = o.optString("fromName"),
+                    fromAddr = o.optString("fromAddr"),
+                    toName = o.optString("toName"),
+                    toAddr = o.optString("toAddr"),
+                    cc = o.optString("cc"),
+                    dateMs = o.optLong("date", 0L),
+                    seen = o.optBoolean("seen", false),
+                    snippet = o.optString("snippet"),
+                    bodyText = o.optString("text"),
+                    bodyHtml = o.optString("html"),
+                    attachmentsJson = archiveAttachments(o.optJSONArray("attachments")),
+                )
+                if (ExtMailStore.upsert(mail)) imported++
+                if (uidValidity > 0) validity = uidValidity
+                beforeDate = o.optLong("date", 0L)
+                beforeMailId = o.optLong("mailId", 0L)
+            }
+            page++
+            if (!data.optBoolean("hasMore", false)) break
+        }
+        return RestoreResult(imported, validity)
+    }
+
+    private fun archiveAttachments(arr: JSONArray?): String {
+        val out = JSONArray()
+        if (arr != null) {
+            for (i in 0 until arr.length()) {
+                val a = arr.optJSONObject(i) ?: continue
+                out.put(
+                    JSONObject()
+                        .put("filename", a.optString("filename"))
+                        .put("mime", a.optString("mime"))
+                        .put("size", a.optLong("size", 0L)),
+                )
+            }
+        }
+        return out.toString()
     }
 
     /**

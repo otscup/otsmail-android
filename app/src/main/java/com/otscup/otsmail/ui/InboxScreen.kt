@@ -62,6 +62,7 @@ import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.material3.pulltorefresh.PullToRefreshDefaults
 import androidx.compose.material3.pulltorefresh.rememberPullToRefreshState
 import androidx.compose.material3.rememberDrawerState
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
@@ -316,6 +317,18 @@ fun InboxScreen(
     /** 第三方列表的分页步进（本地 SQLite 查询，页大小见下方 load 逻辑） */
     var extPage by remember { mutableStateOf(1) }
     var extHasMore by remember { mutableStateOf(false) }
+
+    // 第三方邮箱同步状态：进行中/已拉取 N 封/没有新邮件/失败原因，避免「点了同步没反应」
+    val extSyncStatus by ExtSync.status.collectAsState()
+    var extStatusVisible by remember { mutableStateOf(false) }
+    LaunchedEffect(extSyncStatus.at, extSyncStatus.phase) {
+        extStatusVisible = extSyncStatus.message.isNotBlank() &&
+            extSyncStatus.phase != com.otscup.otsmail.data.ExtSyncPhase.IDLE
+        if (extStatusVisible && extSyncStatus.phase == com.otscup.otsmail.data.ExtSyncPhase.DONE) {
+            delay(8_000)
+            extStatusVisible = false
+        }
+    }
 
     /**
      * 第三方账户摘要：地址用于顶部筛选，lastError 用于非弹窗的失败提示。
@@ -1300,6 +1313,35 @@ fun InboxScreen(
                         ) {
                             Text("重试", style = t.caption1, color = c.blue)
                         }
+                    }
+                }
+                // 第三方同步状态：进行中显示转圈，结束显示「补回/新拉取 N 封、没有新邮件、失败原因」
+                if (extStatusVisible) {
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .padding(start = 16.dp, end = 16.dp, top = 8.dp)
+                            .clip(RoundedCornerShape(OT.dimens.rMd.dp))
+                            .background(c.bgInput)
+                            .padding(horizontal = 12.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        if (extSyncStatus.phase == com.otscup.otsmail.data.ExtSyncPhase.RUNNING) {
+                            CircularProgressIndicator(
+                                color = c.blue,
+                                strokeWidth = 2.dp,
+                                modifier = Modifier.size(14.dp),
+                            )
+                            Spacer(Modifier.width(8.dp))
+                        }
+                        Text(
+                            extSyncStatus.message,
+                            style = t.caption1,
+                            color = if (extSyncStatus.phase == com.otscup.otsmail.data.ExtSyncPhase.FAILED) c.red else c.label2,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f),
+                        )
                     }
                 }
                 CompositionLocalProvider(LocalOverscrollConfiguration provides null) {
