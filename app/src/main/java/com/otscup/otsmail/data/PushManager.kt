@@ -64,6 +64,28 @@ object PushManager {
 
     fun cachedToken(context: Context): String = prefs(context).getString(KEY_TOKEN, "").orEmpty()
 
+    /**
+     * 设备能力判定用：返回可用 FCM token（缓存优先），拿不到返回 null。
+     * 与 [syncToken] 不同，这里不发登记请求，只判断「这台设备能不能走 FCM」；
+     * 无 GMS / 国产 ROM 上 FirebaseMessaging.getInstance().token 会直接失败，返回 null。
+     */
+    suspend fun ensureToken(context: Context): String? {
+        if (!PushScaffold.ENABLED) return null
+        val app = context.applicationContext
+        cachedToken(app).takeIf { it.isNotEmpty() }?.let { return it }
+        return when (val r = fetchToken()) {
+            is TokenResult.Ok -> r.token.also {
+                prefs(app).edit().putString(KEY_TOKEN, it).apply()
+                Log.i(TAG, "FCM token 可用（尾号 ${it.takeLast(6)}）")
+            }
+
+            is TokenResult.Fail -> {
+                Log.i(TAG, "FCM token 不可用，外部邮箱改走 IMAP IDLE：${r.reason}")
+                null
+            }
+        }
+    }
+
     /** 登录后 / 进入收件箱时调用：token 拿到了就登记一次（同 token 同账号不重复 POST）。 */
     fun syncToken(context: Context) {
         if (!PushScaffold.ENABLED) return

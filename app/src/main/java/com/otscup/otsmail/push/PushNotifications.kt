@@ -1,5 +1,6 @@
 package com.otscup.otsmail.push
 
+import android.app.AppOpsManager
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -9,6 +10,8 @@ import android.content.Context
 import android.content.Intent
 import android.media.AudioAttributes
 import android.net.Uri
+import android.os.Build
+import android.os.Process
 import android.provider.Settings
 import android.util.Log
 import com.otscup.otsmail.MainActivity
@@ -36,7 +39,10 @@ object PushNotifications {
     private val LEGACY_CHANNELS = listOf("ot_mail_push_v2")
 
     private const val TAG = "OtsFcm"
+
     const val EXTRA_EMAIL_ID = "emailId"
+    /** 外部邮箱通知点击带的是本地库 local_id（otsmail_ext.db） */
+    const val EXTRA_EXT_LOCAL_ID = "extLocalId"
 
     /** 通知 action 的 Intent action / extras，Receiver 与这里共用。 */
     const val ACTION_READ = "com.otscup.otsmail.push.READ"
@@ -45,6 +51,53 @@ object PushNotifications {
     const val EXTRA_REPLY_TEXT = "replyText"
     const val EXTRA_SENDER = "sender"
     const val EXTRA_SUBJECT = "subject"
+
+    /**
+     * 通知能不能真的弹出来。两个条件都要查：
+     * 1) `NotificationManager.areNotificationsEnabled()`：用户在设置里的主开关；
+     * 2) app-op `POST_NOTIFICATION`：重装会把 app-op 重置为关闭，而部分 ROM（本机三星
+     *    Android 12 实测）上 `areNotificationsEnabled()` 仍返回 true，系统却直接 Reject，
+     *    表现就是「邮件入库但提醒不弹」。Android 12 及以下没有 POST_NOTIFICATIONS 运行时
+     *    权限，通知开关只由 app-op 决定，所以这一项必须查。
+     *
+     * 用 app-op 字符串 `android:post_notification`（公开 API 没有 OPSTR_POST_NOTIFICATION
+     * 常量，只能用它的字符串名；SDK 里 `checkOpNoThrow(int)` 不对普通应用开放）。
+     */
+    fun enabled(context: Context): Boolean {
+        val nmEnabled = context.getSystemService(NotificationManager::class.java)
+            ?.areNotificationsEnabled() ?: true
+        val ops = context.getSystemService(AppOpsManager::class.java) ?: return nmEnabled
+        // 查不到（op 名在当前系统不被识别）时返回 null，按系统 API 的结论走，避免误报
+        val mode = runCatching {
+            @Suppress("DEPRECATION")
+            ops.checkOpNoThrow("android:post_notification", Process.myUid(), context.packageName)
+        }.getOrNull()
+        Log.i(TAG, "通知权限检查：系统开关=$nmEnabled appOp=$mode")
+        if (mode == null) return nmEnabled
+        return nmEnabled && (mode == AppOpsManager.MODE_ALLOWED || mode == AppOpsManager.MODE_DEFAULT)
+    }
+
+    /** 跳到系统的本应用通知设置页；个别 ROM 没有该页面时退回应用详情页 */
+    fun openSystemSettings(context: Context) {
+        val ok = runCatching {
+            context.startActivity(
+                Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).apply {
+                    putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName)
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                },
+            )
+        }.isSuccess
+        if (!ok) {
+            runCatching {
+                context.startActivity(
+                    Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                        data = Uri.parse("package:${context.packageName}")
+                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    },
+                )
+            }
+        }
+    }
 
     /** 四条渠道要在发通知前建好；MainActivity 与 MessagingService 都会调（幂等）。 */
     fun ensureChannel(context: Context) {
@@ -146,12 +199,7 @@ object PushNotifications {
 
         // 「要不要发」在进入通知构建前就拦掉，列表/未读仍照常由 MailSync 刷新，
         // 不靠静音渠道假装关闭，避免角标与通知对不上。
-        val blocked = when {
-            !PushSettings.enabled(context) -> "总开关关闭"
-            PushSettings.isMuted(context, from) -> "发件人已静音"
-            PushSettings.inDnd(context) -> "免打扰时段"
-            else -> null
-        }
+        val blocked = blockedReason(context, from, ext = false)
         if (blocked != null) {
             Log.i(TAG, "通知被设置拦截 emailId=$emailId reason=$blocked")
             return
@@ -213,4 +261,77 @@ object PushNotifications {
 
         runCatching { nm.notify(notificationId(emailId), builder.build()) }
     }
+
+    /** 设置层面的拦截原因；null = 可以发。外部邮箱多一道自己的开关。 */
+    private fun blockedReason(context: Context, from: String, ext: Boolean): String? = when {
+        !PushSettings.enabled(context) -> "总开关关闭"
+        ext && !PushSettings.extEnabled(context) -> "外部邮箱通知关闭"
+        PushSettings.isMuted(context, from) -> "发件人已静音"
+        PushSettings.inDnd(context) -> "免打扰时段"
+        else -> null
+    }
+
+    /**
+     * 外部邮箱新邮件通知：复用 [showMail] 的渠道/分组/样式，但**不带任何 action**。
+     * 第三方邮件是只读的（客户端不往对方 IMAP 写标记/删除，也没有可用回复凭据），
+     * 「标记已读 / 删除 / 快速回复」放上去只会点了失败或假装成功。
+     * 用 tag 隔离通知槽位，避免 local_id 与 otsmail 的 emailId 撞号覆盖。
+     */
+    fun showExtMail(
+        context: Context,
+        localId: Long,
+        from: String,
+        name: String,
+        subject: String,
+        snippet: String,
+    ) {
+        if (localId <= 0L) return
+        ensureChannel(context)
+        val blocked = blockedReason(context, from, ext = true)
+        if (blocked != null) {
+            Log.i(TAG, "外部邮箱通知被设置拦截 localId=$localId reason=$blocked")
+            return
+        }
+        val nm = context.getSystemService(NotificationManager::class.java) ?: return
+
+        val who = name.trim().ifEmpty { from.trim() }.ifEmpty { "新邮件" }
+        val senderLine = if (from.isNotBlank() && who != from.trim()) "$who <${from.trim()}>" else who
+        val title = subject.trim().ifEmpty { "（无主题）" }
+        val body = snippet.trim().replace('\n', ' ')
+
+        val intent = Intent(context, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP
+            // data 让 PendingIntent 与 otsmail 邮件的点击互不覆盖
+            data = Uri.parse("otsmail://ext/$localId")
+            putExtra(EXTRA_EXT_LOCAL_ID, localId)
+        }
+        val pending = PendingIntent.getActivity(
+            context,
+            notificationId(localId),
+            intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+
+        val group = "ext:" + from.trim().lowercase().ifEmpty { "unknown" }
+        val builder = Notification.Builder(context, PushSettings.channelId(context))
+            .setSmallIcon(R.drawable.ic_notif_at)
+            .setColor(0xFF2F6FED.toInt())
+            .setContentTitle(senderLine)
+            .setContentText(title)
+            .setStyle(
+                Notification.BigTextStyle().bigText(
+                    if (body.isEmpty()) title else "$title\n$body",
+                ),
+            )
+            .setAutoCancel(true)
+            .setGroup(group)
+            .setCategory(Notification.CATEGORY_EMAIL)
+            .setShowWhen(true)
+            .setContentIntent(pending)
+
+        runCatching { nm.notify(EXT_TAG, notificationId(localId), builder.build()) }
+    }
+
+    /** 外部邮箱通知的 tag：槽位与 otsmail 邮件分开 */
+    private const val EXT_TAG = "extMail"
 }

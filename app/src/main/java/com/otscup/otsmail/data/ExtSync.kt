@@ -10,6 +10,8 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
@@ -22,6 +24,8 @@ data class ExtSyncReport(
     val archived: Int = 0,
     val failed: Int = 0,
     val errors: List<String> = emptyList(),
+    /** 本轮真正新插入本地的邮件：IDLE/推送触发时用来弹通知（普通同步忽略） */
+    val newMails: List<ExtLocalMail> = emptyList(),
 )
 
 /**
@@ -45,6 +49,9 @@ object ExtSync {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val running = AtomicBoolean(false)
 
+    /** 同一时刻只跑一轮：IDLE 多个账户同时被唤醒时串行执行，避免重复拉取同一批 UID */
+    private val syncMutex = Mutex()
+
     /**
      * 每完成一轮同步 +1。收件箱页把它放进 LaunchedEffect 的 key 里，
      * 后台静默同步结束后自动重读本地库，不用切页才看到新邮件。
@@ -52,7 +59,16 @@ object ExtSync {
     var rev by mutableIntStateOf(0)
         private set
 
-    private data class AccountResult(val fetched: Int, val archived: Int)
+    /** 本地库被写操作改过（已读/星标/删除/发送成功）时通知列表重读；不触发网络同步。 */
+    fun changed() {
+        rev++
+    }
+
+    private data class AccountResult(
+        val fetched: Int,
+        val archived: Int,
+        val newMails: List<ExtLocalMail> = emptyList(),
+    )
 
     /** 登录后调用：节流 + 不占 UI 线程，失败只写本地/服务端状态，不弹提示 */
     fun maybeSync(context: Context) {
@@ -80,19 +96,26 @@ object ExtSync {
         }
     }
 
-    suspend fun runOnce(context: Context, limit: Int = DEFAULT_LIMIT): ExtSyncReport =
+    suspend fun runOnce(
+        context: Context,
+        limit: Int = DEFAULT_LIMIT,
+        /** >0 时只同步这一个第三方账户（IDLE 唤醒时用，避免一封新邮件让所有账户重登 IMAP） */
+        onlyExtId: Long = 0L,
+    ): ExtSyncReport =
         withContext(Dispatchers.IO) {
             try {
-                runOnceInner(context, limit)
+                syncMutex.withLock { runOnceInner(context, limit, onlyExtId) }
             } finally {
                 // 无论成功失败都通知界面重读本地库：失败原因也要能立刻显示出来
                 rev++
             }
         }
 
-    private suspend fun runOnceInner(context: Context, limit: Int): ExtSyncReport =
+    private suspend fun runOnceInner(context: Context, limit: Int, onlyExtId: Long): ExtSyncReport =
         withContext(Dispatchers.IO) {
             ExtMailStore.init(context.applicationContext)
+            // 归档连续失败计数按账户落在这里：进程被杀后重试次数不重置，避免靠重启绕过上限
+            val prefs = context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
 
             val accounts = try {
                 Api.extAccounts()
@@ -105,17 +128,20 @@ object ExtSync {
             var archived = 0
             var failed = 0
             val errors = mutableListOf<String>()
+            val newMails = mutableListOf<ExtLocalMail>()
 
             for (i in 0 until accounts.length()) {
                 val o = accounts.optJSONObject(i) ?: continue
                 val extId = o.optLong("ext_id", 0L)
                 if (extId <= 0) continue
+                if (onlyExtId > 0 && extId != onlyExtId) continue
                 total++
 
                 try {
-                    val result = syncAccount(o, extId, limit)
+                    val result = syncAccount(o, extId, limit, prefs)
                     fetched += result.fetched
                     archived += result.archived
+                    newMails += result.newMails
                 } catch (e: Throwable) {
                     // 单账户失败不影响其他账户；这一轮连登录/列 UID 都没过，属于完全失败
                     val reason = "完全失败：" + ExtSyncError.reason(e)
@@ -127,10 +153,22 @@ object ExtSync {
                 }
             }
 
-            ExtSyncReport(accounts = total, fetched = fetched, archived = archived, failed = failed, errors = errors)
+            ExtSyncReport(
+                accounts = total,
+                fetched = fetched,
+                archived = archived,
+                failed = failed,
+                errors = errors,
+                newMails = newMails,
+            )
         }
 
-    private suspend fun syncAccount(account: JSONObject, extId: Long, limit: Int): AccountResult {
+    private suspend fun syncAccount(
+        account: JSONObject,
+        extId: Long,
+        limit: Int,
+        prefs: android.content.SharedPreferences,
+    ): AccountResult {
         val address = account.optString("address")
 
         // 口令只在这一轮内存里存在，连接关掉即被回收；不打印、不落盘
@@ -156,21 +194,31 @@ object ExtSync {
 
         var processed = 0
         var archived = 0
+        // 游标回退（UIDVALIDITY 变化 / 首次绑定）：这一轮是历史重扫，旧邮件不能当成新邮件弹通知
+        var fullScan = false
+        val newMails = mutableListOf<ExtLocalMail>()
         // 单封失败不终止整轮：记下跳过数与原因，游标推过这一封，避免同一封反复卡住
         var skipped = 0
         val skippedReasons = mutableListOf<String>()
+        // 归档失败：游标必须停在这一封，下一轮重试（达到连续失败上限才允许越过）
+        var archiveRetry = false
+        var archiveRetryReason = ""
 
         ExtImapClient(server, address, secret).use { imap ->
             val box = imap.login()
             if (uidValidity > 0 && box.uidValidity > 0 && box.uidValidity != uidValidity) {
                 // 邮箱被服务端重建过：旧 UID 全部作废，游标从头开始（下一封归档会把新 UIDVALIDITY 写回服务端）
                 lastUid = 0
+                fullScan = true
                 ExtMailStore.markError(extId, "邮箱 UIDVALIDITY 已变化，拉取游标重置为 0")
             }
             if (box.uidValidity > 0) uidValidity = box.uidValidity
 
             // 首次同步只取最近 limit 封，避免新绑定就把几千封历史全拉下来
-            val start = if (lastUid > 0) lastUid + 1 else maxOf(1L, box.uidNext - limit)
+            val start = if (lastUid > 0) lastUid + 1 else {
+                fullScan = true
+                maxOf(1L, box.uidNext - limit)
+            }
             // IMAP 的 `n:*` 在 n 大于最大 UID 时会返回最后一封，没有新邮件就直接跳过，免得每轮重拉一封
             val uids = if (box.uidNext > 0 && start >= box.uidNext) emptyList() else imap.listUids(start)
             Log.i(TAG, "同步开始 ext=$extId start=$start uidNext=${box.uidNext} 待处理=${uids.size}")
@@ -183,33 +231,68 @@ object ExtSync {
                     val messageId = parsed.messageId.ifBlank { "uid:$uidValidity:$uid" }
                     val attachmentsJson = attArray(parsed.attachments, withData = false).toString()
 
-                    val ok = archiveToServer(extId, uid, uidValidity, parsed, messageId, fetchedMail.seen)
+                    // 归档是「这封算同步完成」的前置条件：服务端没存下就不推进游标，
+                    // 否则本地与服务端同时缺这封，而上游 IMAP 已经被越过，谁也补不回来
+                    var archiveSkipped = false
+                    try {
+                        archiveToServer(extId, uid, uidValidity, parsed, messageId, fetchedMail.seen)
+                        clearArchiveFail(prefs, extId)
+                    } catch (e: Throwable) {
+                        // 连接断了（IMAP 侧）照旧结束整轮；其余归档错误按「保留游标重试」处理
+                        if (isConnectionBroken(e)) throw e
+                        val tries = bumpArchiveFail(prefs, extId, uid)
+                        val reason = ExtSyncError.reason(e)
+                        when (ExtArchiveRetryPolicy.decide(failed = true, attempts = tries)) {
+                            // 到上限：越过这一封，避免整条流水线被一封邮件永久卡死；
+                            // 错误状态里写明「已跳过」，上游服务器上原邮件仍在
+                            ExtArchiveAction.SKIP -> {
+                                clearArchiveFail(prefs, extId)
+                                archiveSkipped = true
+                                skipped++
+                                skippedReasons += "#$uid 归档连续失败 ${tries} 次已跳过（服务端未归档，上游仍保留）"
+                                Log.w(TAG, "UID $uid 连续归档失败 $tries 次，跳过：$reason", e)
+                            }
+                            // 未到上限：游标停在这封，下一轮重试
+                            else -> {
+                                archiveRetry = true
+                                archiveRetryReason = "归档失败（第 $tries/${ExtArchiveRetryPolicy.MAX_ATTEMPTS} 次），" +
+                                    "游标停在第 $uid 封，下一轮重试：$reason"
+                                Log.w(TAG, "UID $uid 归档失败，保留游标：$reason", e)
+                            }
+                        }
+                    }
+                    if (archiveRetry) break
+                    if (archiveSkipped) {
+                        lastUid = uid
+                        ExtMailStore.saveCursor(extId, address, uidValidity, lastUid, box.uidNext)
+                        continue
+                    }
 
-                    ExtMailStore.upsert(
-                        ExtLocalMail(
-                            extId = extId,
-                            uid = uid,
-                            uidValidity = uidValidity,
-                            messageId = messageId,
-                            subject = parsed.subject,
-                            fromName = parsed.fromName,
-                            fromAddr = parsed.fromAddr,
-                            toName = parsed.toName,
-                            toAddr = parsed.toAddr,
-                            cc = parsed.cc,
-                            dateMs = parsed.dateMs,
-                            seen = fetchedMail.seen,
-                            snippet = MimeParser.snippet(parsed.text, parsed.html),
-                            bodyText = parsed.text,
-                            bodyHtml = parsed.html,
-                            attachmentsJson = attachmentsJson,
-                        ),
+                    val localMail = ExtLocalMail(
+                        extId = extId,
+                        uid = uid,
+                        uidValidity = uidValidity,
+                        messageId = messageId,
+                        subject = parsed.subject,
+                        fromName = parsed.fromName,
+                        fromAddr = parsed.fromAddr,
+                        toName = parsed.toName,
+                        toAddr = parsed.toAddr,
+                        cc = parsed.cc,
+                        dateMs = parsed.dateMs,
+                        seen = fetchedMail.seen,
+                        snippet = MimeParser.snippet(parsed.text, parsed.html),
+                        bodyText = parsed.text,
+                        bodyHtml = parsed.html,
+                        attachmentsJson = attachmentsJson,
                     )
+                    val inserted = ExtMailStore.upsert(localMail)
+                    if (inserted) newMails += localMail.copy(localId = ExtMailStore.lastLocalId(extId, messageId))
 
                     lastUid = uid
                     ExtMailStore.saveCursor(extId, address, uidValidity, lastUid, box.uidNext)
                     processed++
-                    if (ok) archived++
+                    archived++
                 } catch (e: Throwable) {
                     // 连接断了后面每封都会同样失败：游标停在上一封，下一轮从那封续拉
                     if (isConnectionBroken(e)) throw e
@@ -227,6 +310,8 @@ object ExtSync {
             ExtMailStore.saveCursor(extId, address, uidValidity, lastUid, box.uidNext)
             // 结算这一轮：部分失败要说清同步了几封、跳过几封；全部失败才算整轮失败
             val status = when {
+                // 归档失败优先报：这一轮没有越过那封，游标停着等下一轮重试
+                archiveRetry -> archiveRetryReason
                 skipped == 0 -> ""
                 processed == 0 -> "完全失败：$skipped 封全部跳过，" + skippedReasons.first()
                 else -> "已同步 $processed 封，跳过 $skipped 封：" + skippedReasons.first()
@@ -241,7 +326,12 @@ object ExtSync {
             }
         }
 
-        return AccountResult(processed, archived)
+        // 游标回退的重扫可能把旧邮件当“新插入”，这里直接不给通知候选
+        if (fullScan && newMails.isNotEmpty()) {
+            Log.i(TAG, "历史重扫 ext=$extId 新增 ${newMails.size} 封，本轮不弹通知")
+            return AccountResult(processed, archived, emptyList())
+        }
+        return AccountResult(processed, archived, newMails)
     }
 
     /**
@@ -255,6 +345,18 @@ object ExtSync {
         }
         is java.io.IOException -> true
         else -> false
+    }
+
+    /** 归档连续失败计数：记 uid 与次数，换一封就从 1 重新计 */
+    private fun bumpArchiveFail(prefs: android.content.SharedPreferences, extId: Long, uid: Long): Int {
+        val key = "archive_fail_$extId"
+        val count = ExtArchiveRetryPolicy.nextAttempts(prefs.getString(key, ""), uid)
+        prefs.edit().putString(key, "$uid:$count").apply()
+        return count
+    }
+
+    private fun clearArchiveFail(prefs: android.content.SharedPreferences, extId: Long) {
+        prefs.edit().remove("archive_fail_$extId").apply()
     }
 
     /** 归档到服务端；返回服务端是否是新插入（重复归档也会返回成功） */
@@ -304,10 +406,36 @@ object ExtSync {
     }
 }
 
+/**
+ * 归档失败后游标该往哪走：成功推进；失败未达上限保留并重试；达上限才跳过并写明确错误。
+ * 抽成纯函数是为了能单测——这段判定错了会直接丢邮件或把账户永久卡死。
+ */
+internal enum class ExtArchiveAction { ADVANCE, RETRY, SKIP }
+
+internal object ExtArchiveRetryPolicy {
+
+    /** 同一封连续归档失败到这个次数才允许越过，避免一封坏邮件把整个账户卡死 */
+    const val MAX_ATTEMPTS = 5
+
+    /** 计数存的是 `uid:count`：同一封累加，换一封（或数据损坏）从 1 重新计 */
+    fun nextAttempts(stored: String?, uid: Long): Int {
+        val parts = stored.orEmpty().split(':')
+        val same = parts.size == 2 && parts[0].toLongOrNull() == uid
+        return if (same) (parts[1].toIntOrNull() ?: 0) + 1 else 1
+    }
+
+    fun decide(failed: Boolean, attempts: Int, maxAttempts: Int = MAX_ATTEMPTS): ExtArchiveAction = when {
+        !failed -> ExtArchiveAction.ADVANCE
+        attempts >= maxAttempts -> ExtArchiveAction.SKIP
+        else -> ExtArchiveAction.RETRY
+    }
+}
+
 /** 拉取失败文案：区分是连不上、认证失败、还是服务器没开 IMAP，方便用户自己修 */
 object ExtSyncError {
     fun reason(e: Throwable): String = when (e) {
         is ExtImapException -> textOf(e.kind) + "：" + (e.message.orEmpty().ifEmpty { "无详细信息" })
+        is ExtSmtpException -> "发信失败：" + (e.message.orEmpty().ifEmpty { "无详细信息" })
         is ApiException -> e.message
         else -> friendlyError(e).ifEmpty { e.message.orEmpty().ifEmpty { "未知错误" } }
     }

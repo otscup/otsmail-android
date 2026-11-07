@@ -6,8 +6,10 @@ import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.net.Uri
+import android.os.PowerManager
 import android.provider.Settings
 import android.util.Base64
+import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
@@ -58,6 +60,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import com.otscup.otsmail.push.PushNotifications
 import com.otscup.otsmail.push.PushSettings
 import com.otscup.otsmail.BuildConfig
 import com.otscup.otsmail.R
@@ -93,6 +96,7 @@ fun SettingsScreen(
     onToast: (String) -> Unit,
     onOpenSystemSettings: () -> Unit = {},
     onOpenExtAccounts: () -> Unit = {},
+    onOpenScheduled: () -> Unit = {},
 ) {
     val c = OT.colors
     val t = OT.type
@@ -312,7 +316,7 @@ fun SettingsScreen(
             OTGroupHeader("第三方账户")
             OTGroup(Modifier.padding(horizontal = OTSpace.s4)) {
                 SettingRow(
-                    title = "聚合邮箱",
+                    title = "外部邮箱",
                     value = "Gmail / Outlook / 163 / QQ",
                     showChevron = true,
                     onClick = onOpenExtAccounts,
@@ -336,6 +340,13 @@ fun SettingsScreen(
                     title = "系统设置",
                     value = "",
                     onClick = onOpenSystemSettings,
+                    showChevron = true,
+                )
+                OTDivider(inset = 16)
+                SettingRow(
+                    title = "定时发送",
+                    value = "查看待发送",
+                    onClick = onOpenScheduled,
                     showChevron = true,
                 )
                 OTDivider(inset = 16)
@@ -651,10 +662,15 @@ fun SystemSettingsScreen(
     // 通知状态：从系统设置返回时（ON_RESUME）重新读，避免显示过期状态
     val context = LocalContext.current
     var notifEnabled by remember { mutableStateOf(notificationsEnabled(context)) }
+    // 无 GMS 机型靠 IDLE 常驻连接收信：从系统设置返回时同样要重新读电池白名单状态
+    var batteryUnrestricted by remember { mutableStateOf(ignoringBatteryOptimizations(context)) }
     val lifecycleOwner = LocalLifecycleOwner.current
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_RESUME) notifEnabled = notificationsEnabled(context)
+            if (event == Lifecycle.Event.ON_RESUME) {
+                notifEnabled = notificationsEnabled(context)
+                batteryUnrestricted = ignoringBatteryOptimizations(context)
+            }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
@@ -662,6 +678,7 @@ fun SystemSettingsScreen(
 
     // 通知偏好：改完立刻写 prefs，下一条推送就按新设置走
     var pushEnabled by remember { mutableStateOf(PushSettings.enabled(context)) }
+    var pushExtEnabled by remember { mutableStateOf(PushSettings.extEnabled(context)) }
     var pushSound by remember { mutableStateOf(PushSettings.sound(context)) }
     var pushVibrate by remember { mutableStateOf(PushSettings.vibrate(context)) }
     var mutedSenders by remember { mutableStateOf(PushSettings.mutedSenders(context)) }
@@ -723,6 +740,15 @@ fun SystemSettingsScreen(
                 }
                 OTDivider(inset = 16)
                 OTSwitchRow(
+                    title = "外部邮箱通知",
+                    subtitle = "Gmail / Outlook / 163 等外部邮箱的新邮件；关闭后照常同步到列表，只是不弹通知",
+                    checked = pushExtEnabled,
+                ) { next ->
+                    pushExtEnabled = next
+                    PushSettings.setExtEnabled(context, next)
+                }
+                OTDivider(inset = 16)
+                OTSwitchRow(
                     title = "声音",
                     subtitle = "使用系统的默认通知音",
                     checked = pushSound,
@@ -762,21 +788,27 @@ fun SystemSettingsScreen(
                     title = "系统通知权限",
                     value = if (notifEnabled) "已启用" else "已关闭",
                     onClick = {
-                        runCatching {
-                            context.startActivity(
-                                Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).apply {
-                                    putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName)
-                                },
-                            )
-                        }
+                        PushNotifications.openSystemSettings(context)
                         notifEnabled = notificationsEnabled(context)
+                    },
+                    showChevron = true,
+                )
+                OTDivider(inset = 16)
+                SettingRow(
+                    title = "后台运行限制",
+                    value = if (batteryUnrestricted) "已允许" else "受系统限制",
+                    onClick = {
+                        requestIgnoreBatteryOptimization(context)
+                        batteryUnrestricted = ignoringBatteryOptimizations(context)
                     },
                     showChevron = true,
                 )
             }
             Text(
                 "声音/震动会切换对应的通知渠道（安卓 8 以后渠道属性由系统保存，App 不能改已建渠道）；" +
-                    "总开关与发件人静音会在发通知前拦掉，不影响列表与未读数。Android 13+ 首次登录后只问一次通知权限。",
+                    "总开关与发件人静音会在发通知前拦掉，不影响列表与未读数。Android 13+ 首次登录后只问一次通知权限。" +
+                    "没有 Google 服务的机型要靠常驻连接收外部邮件，建议把本应用加入电池优化白名单；" +
+                    "小米/华为/OPPO 等还需在系统「自启动/省电策略」里允许后台运行。",
                 style = t.footnote, color = c.label2,
                 modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp),
             )
@@ -1062,8 +1094,29 @@ fun SystemSettingsScreen(
 }
 
 /** 系统层面该 App 的通知是否打开（Android 13+ 还包含 POST_NOTIFICATIONS 的结果）。 */
-private fun notificationsEnabled(context: Context): Boolean =
-    context.getSystemService(NotificationManager::class.java)?.areNotificationsEnabled() ?: true
+private fun notificationsEnabled(context: Context): Boolean = PushNotifications.enabled(context)
+
+/** 系统是否已把本 App 加入「电池优化」白名单（无 GMS 机型上 IDLE 常驻连接依赖它）。 */
+private fun ignoringBatteryOptimizations(context: Context): Boolean {
+    val pm = context.getSystemService(PowerManager::class.java) ?: return false
+    return pm.isIgnoringBatteryOptimizations(context.packageName)
+}
+
+/**
+ * 申请忽略电池优化：优先弹系统确认框；部分厂商 ROM 没有这个弹窗，
+ * 回退到「电池优化」列表页让用户手动把本应用设为「不限制」。
+ * 两条入口都不存在时提示手动打开，不静默失败。
+ */
+private fun requestIgnoreBatteryOptimization(context: Context) {
+    val direct = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS)
+        .setData(Uri.parse("package:${context.packageName}"))
+    val list = Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)
+    val opened = runCatching { context.startActivity(direct) }.isSuccess ||
+        runCatching { context.startActivity(list) }.isSuccess
+    if (!opened) {
+        Toast.makeText(context, "请在系统设置里把本应用设为「不限制后台」", Toast.LENGTH_LONG).show()
+    }
+}
 
 /** 只做基本格式校验，不校验 DNS/可达性。 */
 private val EMAIL_LIKE = Regex("^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}$")
@@ -1081,7 +1134,7 @@ private fun pickTime(context: Context, initialMinutes: Int, onPicked: (Int) -> U
     ).show()
 }
 
-/** 设置页标准行：标题 + 右侧值（可选 chevron）。整页统一无行首图标。 */
+/** 设置页标准行：标题 + 右侧值（可选 chevron）。行首图标默认不显示，外部邮箱列表用 [leading] 放服务商标识。 */
 @Composable
 internal fun SettingRow(
     title: String,
@@ -1089,6 +1142,9 @@ internal fun SettingRow(
     onClick: (() -> Unit)? = null,
     showChevron: Boolean = false,
     valueColor: Color? = null,
+    leading: (@Composable () -> Unit)? = null,
+    /** 行尾额外内容（多个操作入口）；放在 value 之后、chevron 之前 */
+    trailing: (@Composable () -> Unit)? = null,
 ) {
     val c = OT.colors
     val t = OT.type
@@ -1098,9 +1154,17 @@ internal fun SettingRow(
         clickable.padding(horizontal = 16.dp, vertical = 6.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
+        if (leading != null) {
+            leading()
+            Spacer(Modifier.width(10.dp))
+        }
         Text(title, style = t.body, color = c.label, modifier = Modifier.weight(1f))
         if (value.isNotEmpty()) {
             Text(value, style = t.subhead, color = valueColor ?: c.label2, maxLines = 1)
+        }
+        if (trailing != null) {
+            Spacer(Modifier.width(8.dp))
+            trailing()
         }
         if (showChevron) {
             Spacer(Modifier.width(4.dp))

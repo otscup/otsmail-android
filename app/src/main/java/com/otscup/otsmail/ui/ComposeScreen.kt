@@ -40,6 +40,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.ChevronRight
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.Person
+import androidx.compose.material.icons.outlined.Schedule
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
@@ -86,11 +87,15 @@ import com.otscup.otsmail.data.AiConsent
 import com.otscup.otsmail.data.Api
 import com.otscup.otsmail.data.Draft
 import com.otscup.otsmail.data.Drafts
+import com.otscup.otsmail.data.ExtSend
 import com.otscup.otsmail.data.aiErrorText
 import com.otscup.otsmail.data.MailCache
-import com.otscup.otsmail.data.MailItem
+import com.otscup.otsmail.data.ScheduledMail
+import com.otscup.otsmail.data.ScheduledSendStore
+import com.otscup.otsmail.data.ScheduledSendTime
 import com.otscup.otsmail.data.Session
 import com.otscup.otsmail.data.friendlyError
+import com.otscup.otsmail.schedule.ScheduledSendScheduler
 import com.otscup.otsmail.ui.theme.OT
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -126,6 +131,12 @@ fun ComposeScreen(
     draftId: String? = null,
     /** 智能回复点选后带进来的正文；普通新建/回复为空 */
     initialBody: String = "",
+    /**
+     * >0 表示这封信用该第三方邮箱自己的 SMTP 直连发出，而不是交给 otsmail 后端代发。
+     * 此时发件人固定为 [extAddress]，不显示 otsmail 的账号切换、不追加 otsmail 签名。
+     */
+    extId: Long = 0L,
+    extAddress: String = "",
     onOpenDrafts: () -> Unit = {},
     /** 自动保存产出的草稿 id 同步给调用方：401 时路由会被重建，靠它把写信页原样接回来 */
     onDraftId: (String) -> Unit = {},
@@ -150,9 +161,9 @@ fun ComposeScreen(
     var toError by remember { mutableStateOf("") }
     var ccError by remember { mutableStateOf("") }
     var bccError by remember { mutableStateOf("") }
-    // 通讯录补全：/contact/list?q= 返回的候选，最多 6 条；索引供上下键选择。
-    // 另外抓最近 40 封收件人做「常用」排序（服务端 contact 表没有往来/频次字段）。
-    var toSuggest by remember { mutableStateOf(listOf<Triple<String, String, String>>()) }
+    // 收件人补全：候选只来自邮件历史（收件箱发件人 + 已发送收件人）与联系人簿，
+    // 首次输入时加载一次进内存，之后每次敲键只做内存过滤，不再按查询请求服务端。
+    var toSuggest by remember { mutableStateOf(listOf<RecipientCandidate>()) }
     var toSuggestIndex by remember { mutableStateOf(0) }
     var ccTags by remember { mutableStateOf(cc) }
     var bccTags by remember { mutableStateOf(listOf<String>()) }
@@ -179,6 +190,9 @@ fun ComposeScreen(
     var pendingSend by remember { mutableStateOf<PendingEmail?>(null) }
     var pendingLeft by remember { mutableIntStateOf(0) }
     var delivering by remember { mutableStateOf(false) }
+    // 已排入定时发送：与 sentOk 一样要阻止 onDispose/防抖把删掉的草稿又写回来
+    var scheduledOk by remember { mutableStateOf(false) }
+    var scheduleOpen by remember { mutableStateOf(false) }
     val sendJob = remember { mutableStateOf<Job?>(null) }
     // 右滑回复：缓存没命中时先开页，这里再补原文引用；拿不到就保持无引用，不阻塞发送
     LaunchedEffect(quoteEmailId) {
@@ -194,10 +208,15 @@ fun ComposeScreen(
     }
     val attachments = remember { mutableListOf<JSONObject>() }
     var picks by remember { mutableStateOf(emptyList<String>()) }
-    val signature = remember { Session(ctx).signature }
+    val isExt = extId > 0
+    // 第三方邮箱发信：签名是 otsmail 账号的，不能塞进别人的 SMTP 发件里
+    val signature = remember { if (isExt) "" else Session(ctx).signature }
+    // 草稿隔离键：第三方写信页用负的 extId 单独命名空间，
+    // 避免它混进 otsmail 草稿列表（从草稿箱点进来会丢掉 extId，变成后端代发）
+    val draftKey = if (isExt) -extId else accountId
 
     var fromId by remember { mutableStateOf(accountId) }
-    var fromEmail by remember { mutableStateOf("") }
+    var fromEmail by remember { mutableStateOf(if (isExt) extAddress else "") }
     var accounts by remember { mutableStateOf(listOf<Pair<Long, String>>()) }
     var pickingFrom by remember { mutableStateOf(false) }
     var showCc by remember { mutableStateOf(cc.isNotEmpty()) }
@@ -207,13 +226,16 @@ fun ComposeScreen(
 
     LaunchedEffect(Unit) {
         onDraftId(draftIdState)
-        runCatching { Api.accounts() }.getOrNull()?.let { list ->
-            accounts = list
-            fromEmail = list.firstOrNull { it.first == fromId }?.second ?: list.firstOrNull()?.second ?: ""
+        // 第三方邮箱写信：发件人固定是绑定地址，不拉 otsmail 账号列表（结果也不会给后端用）
+        if (!isExt) {
+            runCatching { Api.accounts() }.getOrNull()?.let { list ->
+                accounts = list
+                fromEmail = list.firstOrNull { it.first == fromId }?.second ?: list.firstOrNull()?.second ?: ""
+            }
         }
         if (draftId == null) {
             val latest = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-                Drafts.latest(ctx, accountId)
+                Drafts.latest(ctx, draftKey)
             }
             if (latest != null && !latest.isEmpty()) offer = latest
         }
@@ -283,7 +305,7 @@ fun ComposeScreen(
 
     /** 当前输入 → 草稿；空内容不落盘（顺手删掉旧草稿）。文件读写都在 IO 线程。 */
     suspend fun persist(force: Boolean = false): Boolean {
-        if (sentOk) return false
+        if (sentOk || scheduledOk) return false
         // 草稿还没加载完就别写：否则空内容会把正在恢复的草稿覆盖掉
         if (!draftLoaded) return false
         if (!touched && !force) return false
@@ -291,7 +313,7 @@ fun ComposeScreen(
         attachments.forEach { atts.put(it) }
         val draft = Draft(
             id = draftIdState,
-            accountId = accountId,
+            accountId = draftKey,
             fromId = fromId,
             toTags = toTags,
             toInput = toInput,
@@ -361,18 +383,40 @@ fun ComposeScreen(
     // 页面销毁后仍要把最后一笔草稿写完，所以不能用 rememberCoroutineScope（它会被取消）
     val persistScope = remember { CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate) }
 
-    /** 离开写信页时的补发：不再写界面状态，失败也保留草稿，重进能接回来。 */
-    suspend fun deliverQuietly(p: PendingEmail) {
-        runCatching {
+    /**
+     * 真正提交一封邮件：第三方账户走自己的 SMTP 直连（凭据只在客户端解密使用），
+     * 其它账户照旧交给 otsmail 后端 /email/send。
+     */
+    suspend fun submit(p: PendingEmail) {
+        if (p.extId > 0) {
+            ExtSend.send(
+                ctx,
+                extId = p.extId,
+                from = p.extAddress,
+                to = p.to,
+                cc = p.cc,
+                bcc = p.bcc,
+                subject = p.subject,
+                text = p.text,
+                html = p.html,
+                attachments = p.attachments,
+            )
+        } else {
             Api.send(
                 p.accountId, p.to, p.subject, p.text, p.html, p.attachments,
                 cc = p.cc,
                 bcc = p.bcc,
             )
-        }.onSuccess {
-            withContext(Dispatchers.IO) { Drafts.delete(ctx, p.draftId) }
-            MailSync.changed()
         }
+    }
+
+    /** 离开写信页时的补发：不再写界面状态，失败也保留草稿，重进能接回来。 */
+    suspend fun deliverQuietly(p: PendingEmail) {
+        runCatching { submit(p) }
+            .onSuccess {
+                withContext(Dispatchers.IO) { Drafts.delete(ctx, p.draftId) }
+                MailSync.changed()
+            }
     }
 
     // 切后台（onStop）立即落盘一次，不等 800ms 防抖
@@ -486,7 +530,7 @@ fun ComposeScreen(
 
     fun addSuggest(index: Int) {
         val item = toSuggest.getOrNull(index) ?: return
-        if (toTags.none { it.equals(item.second, true) }) toTags = toTags + item.second
+        if (toTags.none { it.equals(item.email, true) }) toTags = toTags + item.email
         toInput = ""
         toError = ""
         toSuggest = emptyList()
@@ -504,75 +548,22 @@ fun ComposeScreen(
         }
     }
 
-    // 收件人补全：1 个字符起查 /contact/list?q=（服务端按 name/email LIKE 匹配），250ms 防抖。
-    // contact 表没有最近往来/使用频次字段，额外从最近两页收件箱统计发件人频次做「常用」排序。
-    var frequentContacts by remember { mutableStateOf<Map<String, FrequentContact>>(emptyMap()) }
-    var frequentLoaded by remember { mutableStateOf(false) }
-    var frequentFrom by remember { mutableStateOf(-1L) }
-    // 通知/营销类地址不是「常联系人」，避免补全时排在真人前面
-    fun isAutomatedSender(email: String): Boolean {
-        val local = email.substringBefore("@")
-        return local.contains("noreply") || local.contains("no-reply") ||
-            local.startsWith("notification") || local.startsWith("notify") ||
-            local.startsWith("mailer") || local.startsWith("bounce") ||
-            local.startsWith("donotreply") || local.startsWith("do-not-reply") ||
-            local == "postmaster"
+    // 收件人补全：候选只来自邮件历史（收件箱发件人 + 已发送收件人），首次输入时加载一次，
+    // 之后敲键只在内存里过滤，不按每次输入请求服务端，也不接系统通讯录。
+    var recipientPool by remember { mutableStateOf<List<RecipientCandidate>>(emptyList()) }
+    var recipientPoolAccount by remember { mutableStateOf(-1L) }
+    LaunchedEffect(toInput.isNotEmpty(), fromId) {
+        if (toInput.isEmpty() || recipientPoolAccount == fromId) return@LaunchedEffect
+        val sourceAccount = if (fromId > 0) fromId else accountId
+        val pool = runCatching {
+            loadRecipientCandidates(ctx, sourceAccount, fromEmail)
+        }.getOrDefault(emptyList())
+        recipientPool = pool
+        recipientPoolAccount = fromId
     }
-    LaunchedEffect(toInput, toTags, fromId) {
-        val q = toInput.trim()
-        if (q.isEmpty()) {
-            toSuggest = emptyList()
-            toSuggestIndex = 0
-            return@LaunchedEffect
-        }
-        delay(250)
-        if (!frequentLoaded || frequentFrom != fromId) {
-            val sourceAccount = if (fromId > 0) fromId else accountId
-            val seen = LinkedHashMap<String, FrequentContact>()
-            for (page in 1..2) {
-                val (list, _) = runCatching { Api.emails(sourceAccount, page) }.getOrDefault(emptyList<MailItem>() to 0L)
-                if (list.isEmpty()) break
-                list.forEach { m ->
-                    val email = m.from.trim().lowercase()
-                    if (email.contains("@") && !isAutomatedSender(email)) {
-                        val prev = seen[email]
-                        seen[email] = FrequentContact(
-                            m.name.ifBlank { email.substringBefore("@") },
-                            email,
-                            (prev?.count ?: 0) + 1,
-                        )
-                    }
-                }
-            }
-            frequentContacts = seen
-            frequentFrom = fromId
-            frequentLoaded = true
-        }
-        val book = runCatching { Api.contacts(q) }.getOrDefault(emptyList())
-        val merged = LinkedHashMap<String, Triple<String, String, String>>()
-        book.forEach { if (it.second.contains("@")) merged.putIfAbsent(it.second.lowercase(), it) }
-        frequentContacts.values
-            .filter { it.email.contains(q, true) || it.name.contains(q, true) }
-            .forEach { merged.putIfAbsent(it.email, Triple(it.name, it.email, "")) }
-        val list = merged.values
-            .filter { c -> toTags.none { tag -> tag.equals(c.second, true) } }
-            .sortedWith(
-                compareBy(
-                    { c -> if ((frequentContacts[c.second.lowercase()]?.count ?: 0) > 0) 0 else 1 },
-                    { c -> -(frequentContacts[c.second.lowercase()]?.count ?: 0) },
-                    { c ->
-                        when {
-                            c.second.startsWith(q, true) -> 0
-                            c.first.startsWith(q, true) -> 1
-                            else -> 2
-                        }
-                    },
-                    { it.first.lowercase() },
-                    { it.second.lowercase() },
-                ),
-            )
-            .take(6)
-        toSuggest = list
+    LaunchedEffect(toInput, toTags, recipientPool) {
+        val q = RecipientSuggest.querySegment(toInput)
+        toSuggest = RecipientSuggest.rank(recipientPool, q, toTags)
         toSuggestIndex = 0
     }
 
@@ -674,13 +665,7 @@ fun ComposeScreen(
     /** 倒计时结束后的真实发送（带界面反馈）。 */
     suspend fun deliver(p: PendingEmail) {
         delivering = true
-        runCatching {
-            Api.send(
-                p.accountId, p.to, p.subject, p.text, p.html, p.attachments,
-                cc = p.cc,
-                bcc = p.bcc,
-            )
-        }
+        runCatching { submit(p) }
             .onSuccess {
                 sentOk = true
                 touched = true
@@ -724,6 +709,21 @@ fun ComposeScreen(
         }
     }
 
+    /**
+     * 直接发送：跳过剩余倒计时立即提交。
+     * 连点保护：进入 delivering 前先清掉倒计时，按钮随提示条一起消失；
+     * 失败仍走 deliver 的统一失败分支（落草稿 + 重试入口），不会因为跳过倒计时丢错误处理。
+     */
+    fun sendNow() {
+        val p = pendingSend ?: return
+        if (delivering) return
+        sendJob.value?.cancel()
+        sendJob.value = null
+        pendingLeft = 0
+        busy = true
+        persistScope.launch { deliver(p) }
+    }
+
     /** 撤销：取消倒计时，内容与附件原样留在写信页，草稿也还在。 */
     fun undoSend() {
         sendJob.value?.cancel()
@@ -734,38 +734,38 @@ fun ComposeScreen(
         Toast.makeText(ctx, "已撤销发送，内容仍在写信页", Toast.LENGTH_SHORT).show()
     }
 
-    fun send() {
-        if (busy) return
+    /**
+     * 发送/定时发送共用的校验与内容组装：地址格式、收件人非空、签名与 HTML 都只在这里做，
+     * 两条路径不会各写一遍导致行为不一致。校验失败返回 null，错误已写进对应 error 状态。
+     */
+    fun collectedSend(): PendingEmail? {
         // 输入框里还没按 Enter 的地址先校验：非法就明确报错，不合规地址不会被悄悄丢掉
         if (toInput.isNotBlank()) {
             if (!emailRe.matches(toInput.trim())) {
                 toError = "邮箱格式不正确：${toInput.trim()}"
-                return
+                return null
             }
             commitAddresses(toInput, toTags, { toTags = it }, { toInput = it }, { toError = it })
         }
         if (ccInput.isNotBlank()) {
             if (!emailRe.matches(ccInput.trim())) {
                 ccError = "邮箱格式不正确：${ccInput.trim()}"
-                return
+                return null
             }
             commitAddresses(ccInput, ccTags, { ccTags = it }, { ccInput = it }, { ccError = it })
         }
         if (bccInput.isNotBlank()) {
             if (!emailRe.matches(bccInput.trim())) {
                 bccError = "邮箱格式不正确：${bccInput.trim()}"
-                return
+                return null
             }
             commitAddresses(bccInput, bccTags, { bccTags = it }, { bccInput = it }, { bccError = it })
         }
         val recipients = toTags
         if (recipients.isEmpty()) {
             error = "请填写收件人"
-            return
+            return null
         }
-        busy = true
-        error = ""
-        sendFailed = false
         val sig = signature.trim()
         val plain = buildString {
             append(body.text)
@@ -777,22 +777,83 @@ fun ComposeScreen(
             (if (sig.isEmpty()) "" else "<p>${escapeHtml(sig).replace("\n", "<br>")}</p>") +
             quotedHtml +
             "</body></html>"
+        return PendingEmail(
+            accountId = fromId,
+            to = recipients,
+            cc = ccTags,
+            bcc = bccTags,
+            subject = subjectText,
+            text = plain,
+            html = html,
+            attachments = attachments.toList(),
+            draftId = draftIdState,
+            extId = extId,
+            extAddress = if (isExt) extAddress else "",
+        )
+    }
+
+    fun send() {
+        if (busy) return
+        val p = collectedSend() ?: return
+        busy = true
+        error = ""
+        sendFailed = false
         // 先落草稿再进撤销窗口：8 秒内进程被杀，重进还能从草稿接回来，不是静默丢失
         persistScope.launch {
             persist(force = true)
-            queueSend(
-                PendingEmail(
-                    accountId = fromId,
-                    to = recipients,
-                    cc = ccTags,
-                    bcc = bccTags,
-                    subject = subjectText,
-                    text = plain,
-                    html = html,
-                    attachments = attachments.toList(),
-                    draftId = draftIdState,
-                ),
+            queueSend(p)
+        }
+    }
+
+    /**
+     * 定时发送：先落草稿兜底，再写入加密的定时队列并排闹钟，最后删掉写信页草稿
+     * （内容已在定时队列里，取消定时时会再转回草稿）。
+     * 同一封（账号+收件人+主题+正文）重复定时只保留一条：upsert 复用旧 id 并更新闹钟。
+     */
+    fun scheduleSend(atMillis: Long) {
+        if (busy) return
+        val at = ScheduledSendTime.atLeastOneMinuteAhead(atMillis)
+        val p = collectedSend() ?: return
+        busy = true
+        error = ""
+        sendFailed = false
+        persistScope.launch {
+            persist(force = true)
+            val attachmentsJson = JSONArray().apply { p.attachments.forEach { put(it) } }.toString()
+            val mail = ScheduledMail(
+                id = UUID.randomUUID().toString(),
+                key = ScheduledSendTime.dedupeKey(p.accountId, p.to, p.subject, p.html),
+                accountId = p.accountId,
+                to = p.to,
+                cc = p.cc,
+                bcc = p.bcc,
+                subject = p.subject,
+                text = p.text,
+                html = p.html,
+                body = body.text,
+                quoted = quotedHtml,
+                attachmentsJson = attachmentsJson,
+                atMillis = at,
+                atLocal = ScheduledSendTime.localStamp(at),
+                draftId = p.draftId,
+                fromEmail = fromEmail,
             )
+            val saved = withContext(Dispatchers.IO) {
+                if (!ScheduledSendStore.upsert(ctx, mail)) return@withContext null
+                // upsert 可能复用旧条目的 id（同内容只改时间），以存储里的实际记录来排闹钟
+                ScheduledSendStore.list(ctx).firstOrNull { it.key == mail.key && it.pending }
+            }
+            busy = false
+            if (saved == null) {
+                // 单封 4MB 上限：超了明确告知，草稿仍在，可直接发送，不静默丢
+                error = "邮件太大，无法定时发送；内容已存草稿，请直接发送"
+                return@launch
+            }
+            ScheduledSendScheduler.schedule(ctx, saved)
+            scheduledOk = true
+            withContext(Dispatchers.IO) { Drafts.delete(ctx, p.draftId) }
+            Toast.makeText(ctx, "已定时：${ScheduledSendTime.display(saved.atMillis)}", Toast.LENGTH_SHORT).show()
+            onFinished(false)
         }
     }
 
@@ -823,14 +884,28 @@ fun ComposeScreen(
                 modifier = Modifier.weight(1f),
                 textAlign = TextAlign.Center,
             )
-            Box(
-                Modifier.width(44.dp).height(44.dp).tapArea {
-                    persistScope.launch { persist() }
-                    onOpenDrafts()
-                },
-                contentAlignment = Alignment.Center,
-            ) {
-                Text("草稿", style = t.footnote, color = c.blue)
+            // 第三方账户：定时发送与草稿箱都只支持 otsmail 账号，这里不摆出点了会失败的入口
+            if (!isExt) {
+                Box(
+                    Modifier.width(40.dp).height(44.dp).tapArea { if (!busy) scheduleOpen = true },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(
+                        Icons.Outlined.Schedule,
+                        contentDescription = "定时发送",
+                        tint = if (busy) c.label3 else c.blue,
+                        modifier = Modifier.size(20.dp),
+                    )
+                }
+                Box(
+                    Modifier.width(40.dp).height(44.dp).tapArea {
+                        persistScope.launch { persist() }
+                        onOpenDrafts()
+                    },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text("草稿", style = t.footnote, color = c.blue)
+                }
             }
             Box(
                 Modifier.width(56.dp).height(44.dp).clip(RoundedCornerShape(OT.dimens.rMd.dp)).tapArea { send() },
@@ -910,7 +985,24 @@ fun ComposeScreen(
 
         Column(Modifier.weight(1f).verticalScroll(rememberScrollState())) {
             // 发件人
-            if (accounts.isNotEmpty()) {
+            if (isExt) {
+                // 第三方邮箱只能用自己这一个地址发：只读展示，不给会切到 otsmail 账号的入口
+                Column(Modifier.fillMaxWidth().background(c.bgCard)) {
+                    Row(
+                        Modifier.fillMaxWidth().height(48.dp).padding(horizontal = 16.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text("发件人", style = t.body, color = c.label, modifier = Modifier.width(56.dp))
+                        Text(
+                            fromEmail, style = t.body, color = c.label2, maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f),
+                            textAlign = TextAlign.Start,
+                        )
+                    }
+                }
+                OTDivider(strong = true)
+            } else if (accounts.isNotEmpty()) {
                 Column(Modifier.fillMaxWidth().background(c.bgCard)) {
                     Row(
                         Modifier.fillMaxWidth().height(48.dp).tapArea { pickingFrom = !pickingFrom }.padding(horizontal = 16.dp),
@@ -1007,11 +1099,8 @@ fun ComposeScreen(
                             )
                             Spacer(Modifier.width(10.dp))
                             Column(Modifier.weight(1f)) {
-                                Text(item.first, style = t.subhead, color = c.label, maxLines = 1)
-                                Text(item.second, style = t.caption1, color = c.label2, maxLines = 1)
-                            }
-                            if (item.third.isNotBlank()) {
-                                Text(item.third, style = t.caption1, color = c.label3, maxLines = 1)
+                                Text(item.name, style = t.subhead, color = c.label, maxLines = 1)
+                                Text(item.email, style = t.caption1, color = c.label2, maxLines = 1)
                             }
                         }
                         if (i < toSuggest.lastIndex) OTDivider(inset = 16)
@@ -1197,8 +1286,8 @@ fun ComposeScreen(
             Spacer(Modifier.height(16.dp))
         }
 
-        // 可撤销发送条：8 秒倒计时期间可撤回，样式对齐列表的删除撤销条
-        if (pendingLeft > 0) {
+        // 可撤销发送条：倒计时期间可撤回或直接发送；点「直接发送」后换成进行中状态，直到发送结束
+        if (pendingLeft > 0 || delivering) {
             Row(
                 Modifier
                     .fillMaxWidth()
@@ -1210,24 +1299,40 @@ fun ComposeScreen(
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Text(
-                    "$pendingLeft 秒后发送",
+                    if (delivering) "正在发送…" else "$pendingLeft 秒后发送",
                     style = t.footnote,
                     color = c.onAccent,
                     modifier = Modifier.weight(1f),
                 )
-                Box(
-                    Modifier
-                        .height(48.dp)
-                        .clip(RoundedCornerShape(OT.dimens.rMd.dp))
-                        .tapArea { undoSend() }
-                        .padding(horizontal = 12.dp),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Text(
-                        "撤销",
-                        style = t.subhead.copy(fontWeight = FontWeight.SemiBold),
-                        color = c.onAccent,
-                    )
+                if (!delivering) {
+                    Box(
+                        Modifier
+                            .height(48.dp)
+                            .clip(RoundedCornerShape(OT.dimens.rMd.dp))
+                            .tapArea { undoSend() }
+                            .padding(horizontal = 12.dp),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Text(
+                            "撤销",
+                            style = t.subhead,
+                            color = c.onAccent,
+                        )
+                    }
+                    Box(
+                        Modifier
+                            .height(48.dp)
+                            .clip(RoundedCornerShape(OT.dimens.rMd.dp))
+                            .tapArea { sendNow() }
+                            .padding(horizontal = 12.dp),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Text(
+                            "直接发送",
+                            style = t.subhead.copy(fontWeight = FontWeight.SemiBold),
+                            color = c.onAccent,
+                        )
+                    }
                 }
             }
         }
@@ -1338,6 +1443,17 @@ fun ComposeScreen(
                 startPolish()
             },
             onCancel = { polishConsent = false },
+        )
+    }
+
+    // 定时发送：快捷时间（1 小时后 / 下班后 / 明早 8 点）+ 自定义日期时间
+    if (scheduleOpen) {
+        ScheduleTimeSheet(
+            onDismiss = { scheduleOpen = false },
+            onPick = { at ->
+                scheduleOpen = false
+                scheduleSend(at)
+            },
         )
     }
 }
@@ -1465,9 +1581,6 @@ private fun escapeHtml(s: String): String = s
     .replace("<", "&lt;")
     .replace(">", "&gt;")
 
-/** 从最近收件箱统计出的常用发件人（服务端 contact 表没有频次字段，只能本地算） */
-private data class FrequentContact(val name: String, val email: String, val count: Int)
-
 /**
  * 引用原文：去掉 <style>/<script>/注释/文档外壳，只留正文。
  *
@@ -1506,6 +1619,9 @@ private data class PendingEmail(
     val html: String,
     val attachments: List<JSONObject>,
     val draftId: String,
+    /** >0 = 用这个第三方邮箱自己的 SMTP 直连发信；此时 [extAddress] 固定为该地址 */
+    val extId: Long = 0L,
+    val extAddress: String = "",
 )
 
 /** 轻量格式：**粗体**、*斜体*、__下划线__、[文字](链接)、# 标题、- / 1. 列表、> 引用 */

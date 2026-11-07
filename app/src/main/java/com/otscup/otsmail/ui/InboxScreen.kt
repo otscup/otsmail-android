@@ -64,6 +64,7 @@ import androidx.compose.material3.pulltorefresh.rememberPullToRefreshState
 import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
@@ -90,7 +91,12 @@ import androidx.compose.ui.graphics.painter.Painter
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.otscup.otsmail.R
+import com.otscup.otsmail.push.ExtIdleManager
+import com.otscup.otsmail.push.PushNotifications
 import com.otscup.otsmail.data.Api
 import com.otscup.otsmail.data.ExtLocalMail
 import com.otscup.otsmail.data.ExtMailStore
@@ -181,7 +187,12 @@ internal object InboxUi {
 }
 
 /** 收件箱顶部筛选与失败提示用的第三方账户摘要（地址 + 最近一次同步失败原因）。 */
-private data class ExtAccountRow(val extId: Long, val address: String, val lastError: String)
+private data class ExtAccountRow(
+    val extId: Long,
+    val accountId: Long,
+    val address: String,
+    val lastError: String,
+)
 
 /** `JSONObject.optString` 会把 JSON 的 null 变成字符串 `"null"`，这里统一当空串处理。 */
 private fun org.json.JSONObject.textOrEmpty(key: String): String =
@@ -259,8 +270,10 @@ fun InboxScreen(
     onOpenDrafts: () -> Unit = {},
     /** 行内右滑 → 回复：由 App 负责拿原文并进写信页 */
     onSwipeReply: (MailItem) -> Unit = {},
-    /** 合并列表里点了第三方邮件：交给 App 打开只读详情 */
-    onOpenExtDetail: (Long) -> Unit = {},
+    /** 合并列表里点了第三方邮件：交给 App 打开详情；sent=true 表示点的是本地已发送副本 */
+    onOpenExtDetail: (Long, Boolean) -> Unit = { _, _ -> },
+    /** 在第三方账户筛选下点「写邮件」：用该账户自己的 SMTP 发信 */
+    onComposeExt: (extId: Long, accountId: Long, address: String) -> Unit = { _, _, _ -> },
 ) {
     val t = OT.type
     val c = OT.colors
@@ -322,7 +335,14 @@ fun InboxScreen(
                         if (extId <= 0) continue
                         val local = runCatching { ExtMailStore.cursor(extId)?.lastError }.getOrNull().orEmpty()
                         val remote = o.textOrEmpty("sync_error").ifBlank { o.textOrEmpty("last_error") }
-                        add(ExtAccountRow(extId, o.optString("address"), local.ifBlank { remote }))
+                        add(
+                            ExtAccountRow(
+                                extId = extId,
+                                accountId = o.optLong("account_id", 0L),
+                                address = o.optString("address"),
+                                lastError = local.ifBlank { remote },
+                            ),
+                        )
                     }
                 }
             }.getOrDefault(emptyList())
@@ -432,6 +452,13 @@ fun InboxScreen(
     // ---- 合并列表：服务端 email 表（照旧走 MailCache 分页）+ 本地第三方邮件（按窗口补齐）----
     val serverSnapshot = items.toList()
     val hasMoreServer = items.size < store.total
+    // 第三方邮件按信箱取源：收件箱/未读取本地已拉取，已发送取本地发送副本；
+    // 星标/垃圾箱/已删除这些服务端专属箱不再混入第三方邮件（写操作只做了收件箱那套）
+    val extSourceKind = when (current.key) {
+        "sent" -> "sent"
+        "receive", "unread" -> "inbox"
+        else -> "none"
+    }
     val extFilter = InboxUi.extFilter
     val isExtOnly = extFilter.startsWith("ext:")
     val filterExtIds = remember(extAccounts, extFilter) {
@@ -442,20 +469,15 @@ fun InboxScreen(
         }
     }
     val extAddressOf = remember(extAccounts) { extAccounts.associate { it.extId to it.address } }
-    // 关键词对第三方邮件做本地过滤；服务端那份仍是接口搜索，两边互不影响
-    val visibleExt = remember(extMails, keyword) {
-        val k = keyword.trim()
-        if (k.isEmpty()) extMails else extMails.filter { m ->
-            m.subject.contains(k, true) || m.fromName.contains(k, true) || m.fromAddr.contains(k, true) ||
-                m.snippet.contains(k, true) || m.bodyText.contains(k, true)
-        }
-    }
-    val rows = remember(serverSnapshot, visibleExt, isExtOnly, extFilter, hasMoreServer) {
+    // 第三方邮件的关键词匹配已在 ExtMailStore 的 SQL 里完成（含正文），这里不再逐封过滤；
+    // 服务端那份仍是接口搜索，两边互不影响
+    val rows = remember(serverSnapshot, extMails, isExtOnly, extFilter, hasMoreServer, extSourceKind) {
         InboxMerge.merge(
             server = if (isExtOnly) emptyList() else serverSnapshot,
-            ext = if (extFilter == "ots") emptyList() else visibleExt,
+            ext = if (extFilter == "ots") emptyList() else extMails,
             serverEpoch = { TimeFmt.epochMs(it.time) },
             serverHasMore = hasMoreServer,
+            extKeyPrefix = if (extSourceKind == "sent") "xs" else "x",
         )
     }
 
@@ -468,14 +490,16 @@ fun InboxScreen(
      *   尚未加载的服务端行抢先显示出来）；服务端加载完后 floor=0，放开本地库，按页增长。
      * - 只筛某个第三方账户时不需要时间下界，本地直接按 60 封一页滚。
      */
-    LaunchedEffect(filterExtIds, extPage, ExtSync.rev, hasMoreServer, items.size, keyword) {
-        if (filterExtIds.isEmpty()) {
+    LaunchedEffect(filterExtIds, extPage, ExtSync.rev, hasMoreServer, items.size, keyword, extSourceKind) {
+        if (filterExtIds.isEmpty() || extSourceKind == "none") {
             extMails = emptyList()
             extHasMore = false
             return@LaunchedEffect
         }
         if (com.otscup.otsmail.BuildConfig.DEMO) return@LaunchedEffect
-        val floor = if (hasMoreServer) {
+        val floor = if (extSourceKind == "sent") {
+            0L
+        } else if (hasMoreServer) {
             serverSnapshot.lastOrNull()?.let { TimeFmt.epochMs(it.time) } ?: 0L
         } else {
             0L
@@ -484,7 +508,11 @@ fun InboxScreen(
         extMails = withContext(Dispatchers.IO) {
             runCatching {
                 ExtMailStore.init(context)
-                ExtMailStore.feed(filterExtIds, floor, limit)
+                if (extSourceKind == "sent") {
+                    ExtMailStore.sentFeed(filterExtIds, floor, limit, keyword)
+                } else {
+                    ExtMailStore.feed(filterExtIds, floor, limit, keyword)
+                }
             }.getOrDefault(emptyList())
         }
         extHasMore = extMails.size >= limit
@@ -493,6 +521,16 @@ fun InboxScreen(
     // 下拉刷新：只有手指下拉才转圈；离线时给一句轻提示，不清缓存、不打断阅读
     var refreshing by remember { mutableStateOf(false) }
     var notice by remember { mutableStateOf("") }
+    // 系统通知权限：每次回到前台重新读（从系统设置开完通知回来，提示要立刻消失）
+    var notifEnabled by remember { mutableStateOf(PushNotifications.enabled(context)) }
+    val notifOwner = LocalLifecycleOwner.current
+    DisposableEffect(notifOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) notifEnabled = PushNotifications.enabled(context)
+        }
+        notifOwner.lifecycle.addObserver(observer)
+        onDispose { notifOwner.lifecycle.removeObserver(observer) }
+    }
     val ptrState = rememberPullToRefreshState()
     LaunchedEffect(notice) {
         if (notice.isNotEmpty()) {
@@ -683,8 +721,10 @@ fun InboxScreen(
         if (refreshing) return
         refreshing = true
         notice = ""
-        // 第三方邮箱：手动下拉 = 立即同步（不受 15 分钟节流限制），与列表刷新并行，不互相等
+        // 第三方邮箱：手动下拉 = 立即同步（不受 15 分钟节流限制），与列表刷新并行，不互相等；
+        // 顺带对齐一次 IDLE 服务账户（事件驱动，替代原来每分钟一次的接口轮询）
         if (!com.otscup.otsmail.BuildConfig.DEMO) {
+            ExtIdleManager.onAccountsChanged(context)
             scope.launch { runCatching { ExtSync.runOnce(context) } }
         }
         runCatching { refreshFirst(toTop = true) }
@@ -1193,6 +1233,39 @@ fun InboxScreen(
                 if (notice.isNotEmpty()) {
                     Text(notice, style = t.footnote, color = c.label2, modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 8.dp))
                 }
+                // 系统通知权限被关闭（重装会把 app-op 重置为关闭）：必须明确提示，不能只入库不弹
+                if (!notifEnabled && !selectMode) {
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .padding(start = 16.dp, end = 8.dp, top = 8.dp)
+                            .clip(RoundedCornerShape(OT.dimens.rMd.dp))
+                            .background(c.bgInput)
+                            .padding(start = 12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Icon(
+                            painterResource(R.drawable.ot_bell),
+                            contentDescription = null,
+                            tint = c.red,
+                            modifier = Modifier.size(16.dp),
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            "系统通知权限已关闭：新邮件照常同步，但提醒不会弹出",
+                            style = t.caption1,
+                            color = c.label,
+                            modifier = Modifier.weight(1f),
+                        )
+                        Box(
+                            Modifier.height(36.dp).tapArea { PushNotifications.openSystemSettings(context) }
+                                .padding(horizontal = 10.dp),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Text("去开启", style = t.caption1, color = c.blue)
+                        }
+                    }
+                }
                 // 第三方邮箱同步失败：行内提示 + 重试，不弹窗、不打断阅读
                 val failedExt = extAccounts.filter { it.lastError.isNotBlank() }
                 if (failedExt.isNotEmpty() && !selectMode) {
@@ -1321,22 +1394,33 @@ fun InboxScreen(
                                     val mail = row.server
                                     val ext = row.ext
                                     if (ext != null) {
-                                        // 第三方邮件：只读展示，星标/写操作本轮不支持
+                                        // 第三方邮件：收件箱那批可点开做已读/星标/删除；已发送是本机副本
+                                        val isSentRow = extSourceKind == "sent"
                                         Column(Modifier.fillMaxWidth().background(c.bgCard)) {
                                             if (index > 0) {
                                                 OTDivider(inset = 60, endInset = 16)
                                             }
                                             OTMailRow(
-                                                from = ext.fromName.ifEmpty {
-                                                    ext.fromAddr.ifEmpty { "（未知发件人）" }
+                                                from = if (isSentRow) {
+                                                    "发给 " + ext.toAddr.ifEmpty { "（无收件人）" }
+                                                } else {
+                                                    ext.fromName.ifEmpty {
+                                                        ext.fromAddr.ifEmpty { "（未知发件人）" }
+                                                    }
                                                 },
                                                 subject = ext.subject.ifEmpty { "（无主题）" },
                                                 snippet = ext.snippet,
                                                 time = TimeFmt.rowTime(row.timeText),
-                                                unread = !ext.seen,
-                                                starred = false,
-                                                onOpen = { onOpenExtDetail(ext.localId) },
-                                                onStar = { notice = "第三方邮箱，本轮暂不支持写操作" },
+                                                unread = !isSentRow && !ext.seen,
+                                                starred = !isSentRow && ext.starred,
+                                                onOpen = { onOpenExtDetail(ext.localId, isSentRow) },
+                                                onStar = {
+                                                    notice = if (isSentRow) {
+                                                        "已发送是本机副本，没有可同步的星标"
+                                                    } else {
+                                                        "星标请在这封邮件的详情页里操作"
+                                                    }
+                                                },
                                                 showAvatar = showAvatars,
                                                 accountColor = if (showAvatars) null
                                                 else accountColorFor(
@@ -1506,7 +1590,20 @@ fun InboxScreen(
                         .align(Alignment.BottomEnd)
                         .navigationBarsPadding()
                         .padding(end = 16.dp, bottom = 16.dp),
-                ) { OTFab(onCompose) }
+                ) {
+                    if (isExtOnly) {
+                        // 第三方账户筛选下写邮件：发件人就是该账户，走它自己的 SMTP
+                        val acc = extAccounts.firstOrNull {
+                            it.extId == extFilter.removePrefix("ext:").toLongOrNull()
+                        }
+                        OTFab {
+                            if (acc != null) onComposeExt(acc.extId, acc.accountId, acc.address)
+                            else notice = "这个第三方账户还在加载，稍后再试"
+                        }
+                    } else {
+                        OTFab(onCompose)
+                    }
+                }
             }
         }
     }

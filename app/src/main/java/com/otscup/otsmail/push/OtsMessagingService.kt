@@ -23,6 +23,9 @@ class OtsMessagingService : FirebaseMessagingService() {
 
     override fun onNewToken(token: String) {
         PushManager.onNewToken(this, token)
+        // token 变化只影响 otsmail 自己的推送；第三方邮件仍按 ExtIdleManager 的提醒方式走，
+        // 这里只是重新判定一次（默认保持 IMAP IDLE）
+        if (token.isNotEmpty()) ExtIdleManager.onFcmTokenAvailable(this)
     }
 
     override fun onMessageReceived(message: RemoteMessage) {

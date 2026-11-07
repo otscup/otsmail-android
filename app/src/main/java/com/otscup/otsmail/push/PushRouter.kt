@@ -14,14 +14,26 @@ object PushRouter {
     var pendingEmailId by mutableStateOf<Long?>(null)
         private set
 
+    /** 外部邮箱通知点击带来的 local_id（otsmail_ext.db） */
+    var pendingExtLocalId by mutableStateOf<Long?>(null)
+        private set
+
     fun open(intent: Intent?) {
         val id = intent?.getLongExtra(PushNotifications.EXTRA_EMAIL_ID, 0L) ?: 0L
         if (id > 0L) pendingEmailId = id
+        val ext = intent?.getLongExtra(PushNotifications.EXTRA_EXT_LOCAL_ID, 0L) ?: 0L
+        if (ext > 0L) pendingExtLocalId = ext
     }
 
     fun consume(): Long? {
         val id = pendingEmailId
         pendingEmailId = null
+        return id
+    }
+
+    fun consumeExt(): Long? {
+        val id = pendingExtLocalId
+        pendingExtLocalId = null
         return id
     }
 }

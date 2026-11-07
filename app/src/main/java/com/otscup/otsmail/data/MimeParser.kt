@@ -48,7 +48,7 @@ object MimeParser {
     private val ENCODED_WORD = Regex("=\\?([^?\\s]+)\\?([BbQq])\\?([^?]*)\\?=")
     private val ANGLE_ADDR = Regex("<([^>]+)>")
 
-    fun parse(raw: ByteArray, fallbackDateMs: Long = 0L): ParsedMail {
+    fun parse(raw: ByteArray, fallbackDateMs: Long = 0L, maxAttachmentBytes: Int = MAX_ATTACHMENT_BYTES): ParsedMail {
         if (raw.isEmpty()) {
             return ParsedMail(
                 subject = "", fromName = "", fromAddr = "", toName = "", toAddr = "", cc = "",
@@ -59,7 +59,7 @@ object MimeParser {
         val whole = String(raw, Charsets.ISO_8859_1)
         val (head, body) = splitHeadBody(whole)
         val headers = parseHeaders(head)
-        val out = Collector()
+        val out = Collector(maxAttachmentBytes)
         walk(headers, body, 0, out)
 
         val subject = decodeHeader(headers["subject"].orEmpty())
@@ -88,7 +88,7 @@ object MimeParser {
         return source.replace(Regex("\\s+"), " ").trim().take(max)
     }
 
-    private class Collector {
+    private class Collector(val maxAttachmentBytes: Int = MAX_ATTACHMENT_BYTES) {
         var text = ""
         var html = ""
         val attachments = mutableListOf<MimeAttachment>()
@@ -140,7 +140,7 @@ object MimeParser {
                     mimeType = mime.ifEmpty { "application/octet-stream" },
                     size = bytes.size,
                     contentId = headers["content-id"].orEmpty().trim(),
-                    data = bytes.takeIf { it.size <= MAX_ATTACHMENT_BYTES },
+                    data = bytes.takeIf { it.size <= out.maxAttachmentBytes },
                 )
             }
 

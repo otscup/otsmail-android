@@ -35,6 +35,8 @@ object InboxMerge {
         ext: List<ExtLocalMail>,
         serverEpoch: (MailItem) -> Long?,
         serverHasMore: Boolean,
+        /** `x` = 收件箱第三方邮件；`xs` = 本地已发送副本，避免两个表的 local_id 撞 key */
+        extKeyPrefix: String = "x",
     ): List<MergedMail> {
         val serverRows = ArrayList<MergedMail>(server.size)
         // 服务端列表本身已按时间倒序：从旧往新回填，解析失败的沿用「下一封（更旧那封）」的时间，
@@ -59,7 +61,7 @@ object InboxMerge {
             .asSequence()
             .filter { it.localId > 0 }
             .filter { floorMs <= 0 || it.dateMs >= floorMs }
-            .map { MergedMail("x:${it.extId}:${it.localId}", it.dateMs, it.dateMs.toString(), ext = it) }
+            .map { MergedMail("$extKeyPrefix:${it.extId}:${it.localId}", it.dateMs, it.dateMs.toString(), ext = it) }
             .toList()
 
         val all = ArrayList<MergedMail>(serverRows.size + extRows.size)

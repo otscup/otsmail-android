@@ -90,19 +90,38 @@ object Attachments {
                 val src = ensureFile(context, url)
                 val dir = context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS) ?: context.filesDir
                 dir.mkdirs()
-                val safe = filename
-                    .replace('\\', '/')
-                    .substringAfterLast('/')
-                    .replace(Regex("[\\u0000-\\u001f\\u007f]"), "")
-                    .trim()
-                    .trimStart('.')
-                    .take(120)
-                    .ifEmpty { "attachment" }
+                val safe = safeName(filename)
                 val dest = File(dir, safe)
                 src.copyTo(dest, overwrite = true)
                 dest
             }
         }
+
+    /**
+     * 保存本地已拿到的字节（第三方邮件附件是走 IMAP 客户端直接取的，没有 http url）。
+     * 与 [save] 用同一个下载目录与文件名清洗规则。
+     */
+    suspend fun saveBytes(context: Context, bytes: ByteArray, filename: String): File =
+        withContext(Dispatchers.IO) {
+            val dir = context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS) ?: context.filesDir
+            dir.mkdirs()
+            val dest = File(dir, safeName(filename))
+            bytes.copyToFile(dest)
+            dest
+        }
+
+    private fun ByteArray.copyToFile(dest: File) {
+        dest.outputStream().use { it.write(this) }
+    }
+
+    private fun safeName(filename: String): String = filename
+        .replace('\\', '/')
+        .substringAfterLast('/')
+        .replace(Regex("[\\u0000-\\u001f\\u007f]"), "")
+        .trim()
+        .trimStart('.')
+        .take(120)
+        .ifEmpty { "attachment" }
 
     private fun ensureFile(context: Context, url: String): File {
         val u = url.trim()

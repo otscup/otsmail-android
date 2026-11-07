@@ -13,6 +13,8 @@ object PushSettings {
 
     private const val SP = "otsmail_notif"
     private const val KEY_ENABLED = "enabled"
+    private const val KEY_EXT_ENABLED = "extEnabled"
+    private const val KEY_EXT_PUSH_MODE = "extPushMode"
     private const val KEY_SOUND = "sound"
     private const val KEY_VIBRATE = "vibrate"
     private const val KEY_MUTED = "mutedSenders"
@@ -30,6 +32,25 @@ object PushSettings {
 
     fun setEnabled(context: Context, value: Boolean) {
         sp(context).edit().putBoolean(KEY_ENABLED, value).apply()
+    }
+
+    /** 外部邮箱（第三方 IMAP）通知开关：与 otsmail 邮件的总开关分开，默认开启。 */
+    fun extEnabled(context: Context): Boolean = sp(context).getBoolean(KEY_EXT_ENABLED, true)
+
+    fun setExtEnabled(context: Context, value: Boolean) {
+        sp(context).edit().putBoolean(KEY_EXT_ENABLED, value).apply()
+    }
+
+    /** 外部邮箱新邮件到达方式：自动 / 强制长连接 / 强制设备推送。 */
+    const val EXT_PUSH_AUTO = "auto"
+    const val EXT_PUSH_IDLE = "idle"
+    const val EXT_PUSH_FCM = "fcm"
+
+    fun extPushMode(context: Context): String =
+        sp(context).getString(KEY_EXT_PUSH_MODE, EXT_PUSH_AUTO).orEmpty().ifEmpty { EXT_PUSH_AUTO }
+
+    fun setExtPushMode(context: Context, mode: String) {
+        sp(context).edit().putString(KEY_EXT_PUSH_MODE, mode).apply()
     }
 
     fun sound(context: Context): Boolean = sp(context).getBoolean(KEY_SOUND, true)
@@ -90,8 +111,13 @@ object PushSettings {
         sp(context).edit().putInt(KEY_DND_END, minutes.coerceIn(0, 24 * 60 - 1)).apply()
     }
 
-    /** 免打扰判定用设备本地时区；22:00–07:00 这种跨午夜区间按「>= 开始 或 < 结束」。 */
-    fun inDnd(context: Context): Boolean = inDnd(dndStart(context), dndEnd(context), nowMinutes())
+    /**
+     * 免打扰判定用设备本地时区；22:00–07:00 这种跨午夜区间按「>= 开始 或 < 结束」。
+     * 必须先看开关：设置页里「开启免打扰」是关闭状态时，默认时间段不能偷偷生效
+     * （否则夜里所有通知都会被拦，而界面上还显示「未开启」）。
+     */
+    fun inDnd(context: Context): Boolean =
+        dndEnabled(context) && inDnd(dndStart(context), dndEnd(context), nowMinutes())
 
     /** 起止相同视为未设置（不是 24 小时免打扰）。 */
     fun inDnd(start: Int, end: Int, now: Int): Boolean {

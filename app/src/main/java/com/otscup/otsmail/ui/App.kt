@@ -32,11 +32,14 @@ import com.otscup.otsmail.data.AuthState
 import com.otscup.otsmail.data.Demo
 import com.otscup.otsmail.data.ExtSync
 import com.otscup.otsmail.data.MailCache
+import com.otscup.otsmail.data.MailAddress
 import com.otscup.otsmail.data.MailDetail
 import com.otscup.otsmail.data.OAuthTiming
 import com.otscup.otsmail.data.PushManager
 import com.otscup.otsmail.data.Session
+import com.otscup.otsmail.push.ExtIdleManager
 import com.otscup.otsmail.push.PushRouter
+import com.otscup.otsmail.schedule.ScheduledSendScheduler
 import com.otscup.otsmail.ui.theme.OT
 import com.otscup.otsmail.ui.theme.OTTheme
 import kotlinx.coroutines.launch
@@ -48,8 +51,8 @@ private sealed interface Route {
     data class Detail(val id: Long) : Route
     /** 「全部邮件」里非本人邮件的只读详情（含 userId=0 的无人收件） */
     data class SiteDetail(val id: Long) : Route
-    /** 聚合收件：本地第三方邮件的只读详情（按 otsmail_ext.db 的 local_id 取） */
-    data class ExtDetail(val localId: Long) : Route
+    /** 聚合收件：本地第三方邮件的详情（按 otsmail_ext.db 的 local_id 取）；sent=true 读本地已发送副本 */
+    data class ExtDetail(val localId: Long, val sent: Boolean = false) : Route
     data class Compose(
         val to: String,
         val subject: String,
@@ -64,6 +67,10 @@ private sealed interface Route {
         val quoteEmailId: Long? = null,
         /** 智能回复点选后带进写信页的正文；其它入口为空 */
         val body: String = "",
+        /** >0 表示用这个第三方邮箱自己的 SMTP 发信，而不是 otsmail 后端代发 */
+        val extId: Long = 0L,
+        val extAccountId: Long = 0L,
+        val extAddress: String = "",
     ) : Route
     data object Settings : Route
     /** 聚合收件：第三方邮箱绑定向导（第一批只做绑定与连通性验证） */
@@ -74,6 +81,7 @@ private sealed interface Route {
     data object ServerSettings : Route
     data object AllMail : Route
     data object Drafts : Route
+    data object ScheduledSends : Route
     data object Users : Route
     data object Roles : Route
     data object RegKeys : Route
@@ -138,6 +146,12 @@ fun OtsApp() {
         enabled = route != Route.Inbox && route != Route.Login && route != Route.ServerSetup,
     ) { goBack() }
 
+    // 定时发送的闹钟在「强制停止」后会被系统清掉，进程没法收到广播；每次打开 App 重排一遍，
+    // 漏过的（比如关机期间到点）会立即补发，不会永远丢在本地。
+    LaunchedEffect(Unit) {
+        runCatching { ScheduledSendScheduler.rescheduleAll(context.applicationContext) }
+    }
+
     // 登录后空闲时预热 WebView 引擎：第一次建 WebView 约 0.9~1.4s，不预热就全算在开信耗时里
     LaunchedEffect(session.token.isNotEmpty()) {
         if (session.token.isEmpty()) return@LaunchedEffect
@@ -191,6 +205,25 @@ fun OtsApp() {
         route = Route.Detail(id)
     }
 
+    // 外部邮箱通知：local_id 直接开本地详情
+    LaunchedEffect(PushRouter.pendingExtLocalId) {
+        val localId = PushRouter.pendingExtLocalId ?: return@LaunchedEffect
+        if (session.token.isEmpty()) return@LaunchedEffect
+        PushRouter.consumeExt()
+        backStack.clear()
+        route = Route.ExtDetail(localId)
+    }
+
+    // 第三方邮件提醒：默认一律挂 IMAP IDLE（服务端尚未给外部邮箱下发 FCM，不能按设备能力
+    // 关掉 IDLE）。otsmail 自己的邮件仍走 FCM；判断与降级详见 ExtIdleManager，重复调用幂等。
+    LaunchedEffect(session.token.isNotEmpty()) {
+        if (session.token.isEmpty()) {
+            ExtIdleManager.stop(context)
+        } else {
+            ExtIdleManager.startIfNeeded(context)
+        }
+    }
+
     OTTheme {
         androidx.compose.foundation.layout.Box(Modifier.fillMaxSize().background(OT.colors.bgGrouped)) {
             when (val r = route) {
@@ -214,11 +247,19 @@ fun OtsApp() {
                         InboxUi.forceTick++
                         // 登录前点的通知（此时还没登录态），登录成功后补跳详情
                         val pending = PushRouter.consume()
-                        route = if (pending != null) {
-                            backStack.clear()
-                            Route.Detail(pending)
-                        } else {
-                            backStack.removeLastOrNull() ?: Route.Inbox
+                        val pendingExt = PushRouter.consumeExt()
+                        route = when {
+                            pending != null -> {
+                                backStack.clear()
+                                Route.Detail(pending)
+                            }
+
+                            pendingExt != null -> {
+                                backStack.clear()
+                                Route.ExtDetail(pendingExt)
+                            }
+
+                            else -> backStack.removeLastOrNull() ?: Route.Inbox
                         }
                     },
                 )
@@ -242,7 +283,19 @@ fun OtsApp() {
                     onOpenContacts = { go(Route.Contacts) },
                     onOpenAi = { go(Route.Ai) },
                     onOpenDrafts = { go(Route.Drafts) },
-                    onOpenExtDetail = { localId -> go(Route.ExtDetail(localId)) },
+                    onOpenExtDetail = { localId, sent -> go(Route.ExtDetail(localId, sent)) },
+                    onComposeExt = { extId, accountId, address ->
+                        go(
+                            Route.Compose(
+                                to = "",
+                                subject = "",
+                                quoted = "",
+                                extId = extId,
+                                extAccountId = accountId,
+                                extAddress = address,
+                            ),
+                        )
+                    },
                 )
 
                 Route.Contacts -> SlidePage(onDismiss = { goBack() }) {
@@ -266,6 +319,13 @@ fun OtsApp() {
                         accountId = session.accountId,
                         onBack = { goBack() },
                         onOpen = { draftId -> go(Route.Compose("", "", "", draftId = draftId)) },
+                    )
+                }
+
+                Route.ScheduledSends -> SlidePage(onDismiss = { goBack() }) {
+                    ScheduledSendScreen(
+                        onBack = { goBack() },
+                        onToast = toast,
                     )
                 }
 
@@ -302,9 +362,47 @@ fun OtsApp() {
                 }
 
                 is Route.ExtDetail -> SlidePage(onDismiss = { goBack() }) {
+                    val extRoute = route as Route.ExtDetail
                     ExtMailDetailScreen(
-                        localId = (route as Route.ExtDetail).localId,
+                        localId = extRoute.localId,
+                        sent = extRoute.sent,
                         onBack = { goBack() },
+                        onReply = { m, action, address, extAccId ->
+                            val author = m.fromName.ifEmpty { m.fromAddr }
+                            val quoted = buildQuoteHtml(author, m.bodyHtml.ifEmpty { m.bodyText })
+                            when (action) {
+                                ReplyAction.REPLY -> go(
+                                    Route.Compose(
+                                        m.fromAddr, reSubject(m.subject), quoted,
+                                        extId = m.extId, extAccountId = extAccId, extAddress = address,
+                                    ),
+                                )
+                                ReplyAction.REPLY_ALL -> {
+                                    // 回复全部：去掉自己和原发件人后剩下的 To/Cc 全部进抄送
+                                    val others = (MailAddress.list(m.toAddr) + MailAddress.list(m.cc))
+                                        .map { it.address }
+                                        .filter {
+                                            it.lowercase() != address.lowercase() &&
+                                                it.lowercase() != m.fromAddr.lowercase()
+                                        }
+                                        .distinct()
+                                    go(
+                                        Route.Compose(
+                                            m.fromAddr, reSubject(m.subject), quoted,
+                                            cc = others, mode = "replyAll",
+                                            extId = m.extId, extAccountId = extAccId, extAddress = address,
+                                        ),
+                                    )
+                                }
+                                ReplyAction.FORWARD -> go(
+                                    Route.Compose(
+                                        "", fwdSubject(m.subject), quoted, mode = "forward",
+                                        extId = m.extId, extAccountId = extAccId, extAddress = address,
+                                    ),
+                                )
+                            }
+                        },
+                        onToast = toast,
                     )
                 }
 
@@ -369,12 +467,25 @@ fun OtsApp() {
                         onToast = toast,
                         onOpenSystemSettings = { go(Route.SystemSettings) },
                         onOpenExtAccounts = { go(Route.ExtBind) },
+                        onOpenScheduled = { go(Route.ScheduledSends) },
                     )
                 }
 
                 Route.ExtBind -> SlidePage(onDismiss = { goBack() }) {
                     ExtBindScreen(
                         onBack = { goBack() },
+                        onCompose = { extId, accountId, address ->
+                            go(
+                                Route.Compose(
+                                    to = "",
+                                    subject = "",
+                                    quoted = "",
+                                    extId = extId,
+                                    extAccountId = accountId,
+                                    extAddress = address,
+                                ),
+                            )
+                        },
                         onToast = toast,
                     )
                 }
@@ -409,7 +520,7 @@ fun OtsApp() {
 
                 is Route.Compose -> SlidePage(onDismiss = { goBack() }) {
                     ComposeScreen(
-                        accountId = session.accountId,
+                        accountId = if (r.extId > 0) r.extAccountId else session.accountId,
                         to = r.to,
                         subject = r.subject,
                         quoted = r.quoted,
@@ -418,6 +529,8 @@ fun OtsApp() {
                         quoteEmailId = r.quoteEmailId,
                         draftId = r.draftId,
                         initialBody = r.body,
+                        extId = r.extId,
+                        extAddress = r.extAddress,
                         onOpenDrafts = {
                             // 去草稿箱前把当前草稿 id 补进路由：返回栈里存的就不再是空白写信页
                             val cur = route

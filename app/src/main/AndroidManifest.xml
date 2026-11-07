@@ -6,6 +6,13 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <!-- 新邮件通知渠道默认开启震动；不给 VIBRATE 系统会静默忽略震动 -->
     <uses-permission android:name="android.permission.VIBRATE" />
+    <!-- 外部邮箱 IMAP IDLE 前台服务：只在拿不到 FCM token 的设备上启动 -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <!-- 定时发送：重启后要把闹钟重新排上，否则设备一重启定时邮件就丢 -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <!-- 无 GMS 机型引导把本 App 加入「电池优化」白名单：否则系统会在后台冻结 IMAP IDLE -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
 
     <!-- Android 11+ 包可见性：不声明的话 CustomTabsClient 找不到任何浏览器，
          resolveActivity 也永远返回 null，第三方登录会被误判成"设备没有浏览器"而落到 WebView。 -->
@@ -63,10 +70,35 @@
             </intent-filter>
         </service>
 
+        <!-- 外部邮箱 IMAP IDLE：同进程前台服务，无 GMS 设备上保持连接/重连；
+             START_STICKY 让进程被杀后系统能重新拉起（配额见 ExtIdleService 注释） -->
+        <service
+            android:name=".push.ExtIdleService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync"
+            android:stopWithTask="false" />
+
         <!-- 通知栏快捷操作（标记已读/删除/快速回复）：只由本 App 的 PendingIntent 触发 -->
         <receiver
             android:name=".push.NotificationActionReceiver"
             android:exported="false" />
+
+        <!-- 定时发送到点触发：只接本 App 的 PendingIntent（exported=false） -->
+        <receiver
+            android:name=".schedule.ScheduledSendReceiver"
+            android:exported="false" />
+
+        <!-- 开机/装包/改时间/改时区后恢复定时任务；系统广播因此必须 exported=true -->
+        <receiver
+            android:name=".schedule.ScheduledSendRescheduleReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+                <action android:name="android.intent.action.TIME_SET" />
+                <action android:name="android.intent.action.TIMEZONE_CHANGED" />
+            </intent-filter>
+        </receiver>
 
         <!-- 服务端走 data 消息时才用得上这两个兜底（通知栏小图标/渠道）。
              渠道 id 必须指向 ensureChannel 里真正会创建、且不会被删除的那条，否则 FCM 找不到默认渠道 -->

@@ -19,11 +19,13 @@ import org.json.JSONObject
 object PushDedupe {
     private const val SP = "otsmail_push_dedupe"
     private const val KEY = "seen"
+    private const val KEY_EXT = "seenExt"
     private const val WINDOW_MS = 10 * 60 * 1000L
     private const val MAX = 200
     private const val TAG = "PushDedupe"
 
     private val mem = LinkedHashMap<Long, Long>() // emailId -> 首次展示时间
+    private val memExt = LinkedHashMap<String, Long>() // "extId|messageId" -> 首次展示时间
 
     /** @return true = 应该建通知；false = 同 emailId 已展示过且这次带 notification 块，跳过。 */
     @Synchronized
@@ -49,6 +51,33 @@ object PushDedupe {
         return show
     }
 
+    /**
+     * 外部邮箱去重：按 (extId, messageId) + 时间窗。
+     *
+     * 同一条邮件可能被两个通道各触发一次（IMAP IDLE 与服务端 FCM 触发），
+     * 也可能因断线重连、重复唤醒在 10 分钟内再次走到通知逻辑；
+     * 返回 true = 这次应该弹通知，false = 时间窗内已经弹过。
+     */
+    @Synchronized
+    fun decideExt(ctx: Context, extId: Long, messageId: String, windowMs: Long = WINDOW_MS): Boolean {
+        val id = messageId.trim()
+        if (extId <= 0L || id.isEmpty()) return true
+        val key = "$extId|$id"
+        val now = System.currentTimeMillis()
+        val seen = LinkedHashMap<String, Long>()
+        memExt.forEach { (k, v) -> if (now - v <= windowMs) seen[k] = v }
+        readExt(ctx).forEach { (k, v) -> if (now - v <= windowMs) seen[k] = v }
+        val dup = seen.containsKey(key)
+        if (!dup) seen[key] = now
+        val pruned = LinkedHashMap<String, Long>()
+        seen.entries.sortedBy { it.value }.takeLast(MAX).forEach { pruned[it.key] = it.value }
+        memExt.clear()
+        memExt.putAll(pruned)
+        writeExt(ctx, pruned)
+        Log.i(TAG, "extDedupe ext=$extId message=$id dup=$dup show=${!dup} window=${pruned.size}")
+        return !dup
+    }
+
     /** 自测：只打印结果，不改真实通知逻辑。 */
     fun selfTest(ctx: Context): String {
         // 用 10 位的时间戳做测试 id：正值（decide 只对 emailId>0 生效）且不会撞到真实 emailId
@@ -67,7 +96,8 @@ object PushDedupe {
     @Synchronized
     fun clear(ctx: Context) {
         mem.clear()
-        ctx.getSharedPreferences(SP, Context.MODE_PRIVATE).edit().remove(KEY).apply()
+        memExt.clear()
+        ctx.getSharedPreferences(SP, Context.MODE_PRIVATE).edit().remove(KEY).remove(KEY_EXT).apply()
     }
 
     private fun read(ctx: Context): Map<Long, Long> {
@@ -85,5 +115,23 @@ object PushDedupe {
         val arr = JSONArray()
         map.forEach { (id, at) -> arr.put(JSONObject().put("id", id).put("at", at)) }
         ctx.getSharedPreferences(SP, Context.MODE_PRIVATE).edit().putString(KEY, arr.toString()).apply()
+    }
+
+    private fun readExt(ctx: Context): Map<String, Long> {
+        val raw = ctx.getSharedPreferences(SP, Context.MODE_PRIVATE).getString(KEY_EXT, null) ?: return emptyMap()
+        val arr = runCatching { JSONArray(raw) }.getOrNull() ?: return emptyMap()
+        val out = LinkedHashMap<String, Long>()
+        for (i in 0 until arr.length()) {
+            val o = arr.optJSONObject(i) ?: continue
+            val k = o.optString("k")
+            if (k.isNotEmpty()) out[k] = o.optLong("at")
+        }
+        return out
+    }
+
+    private fun writeExt(ctx: Context, map: Map<String, Long>) {
+        val arr = JSONArray()
+        map.forEach { (k, at) -> arr.put(JSONObject().put("k", k).put("at", at)) }
+        ctx.getSharedPreferences(SP, Context.MODE_PRIVATE).edit().putString(KEY_EXT, arr.toString()).apply()
     }
 }

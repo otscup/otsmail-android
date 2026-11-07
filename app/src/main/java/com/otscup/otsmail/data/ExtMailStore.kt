@@ -19,6 +19,8 @@ data class ExtLocalMail(
     val cc: String,
     val dateMs: Long,
     val seen: Boolean,
+    /** IMAP \Flagged 在本地的镜像；详情页星标按钮以它为准 */
+    val starred: Boolean = false,
     val snippet: String,
     val bodyText: String,
     val bodyHtml: String,
@@ -34,6 +36,22 @@ data class ExtLocalCursor(
     val lastError: String,
 )
 
+/** 外部账户直连 SMTP 发送成功后落本地的「已发送」副本。 */
+data class ExtSentMail(
+    val localId: Long = 0,
+    val extId: Long,
+    val messageId: String,
+    val subject: String,
+    val fromAddr: String,
+    val toAddr: String,
+    val cc: String,
+    val dateMs: Long,
+    val snippet: String,
+    val bodyText: String,
+    val bodyHtml: String,
+    val attachmentsJson: String,
+)
+
 /**
  * 第三方邮件本地库（独立 DB 文件，不碰现有 MailCache 的 otsmail_cache.db）。
  *
@@ -43,7 +61,32 @@ data class ExtLocalCursor(
 object ExtMailStore {
 
     private const val DB_NAME = "otsmail_ext.db"
-    private const val DB_VERSION = 1
+
+    /** v2：ext_mail 增加 starred 列，并新增 ext_sent（外部账户直连 SMTP 的已发送本地副本） */
+    private const val DB_VERSION = 2
+
+    // 列表只取摘要列：body_text / body_html 不进列表查询，避免翻页时整窗正文进内存。
+    private val RECEIVED_SUMMARY_COLUMNS = arrayOf(
+        "local_id", "ext_id", "uid", "uid_validity", "message_id", "subject",
+        "from_name", "from_addr", "to_name", "to_addr", "cc", "date_ms",
+        "seen", "starred", "snippet", "att_json",
+    )
+    private val SENT_SUMMARY_COLUMNS = arrayOf(
+        "local_id", "ext_id", "message_id", "subject", "from_addr", "to_addr",
+        "cc", "date_ms", "snippet", "att_json",
+    )
+
+    // 关键词搜索在 SQL 里做（含正文匹配），列表不再为了本地过滤而读正文。
+    private const val RECEIVED_SEARCH_FIELDS = 5
+    private const val RECEIVED_SEARCH_WHERE =
+        "instr(lower(subject), lower(?)) > 0 OR instr(lower(from_name), lower(?)) > 0 OR " +
+            "instr(lower(from_addr), lower(?)) > 0 OR instr(lower(snippet), lower(?)) > 0 OR " +
+            "instr(lower(body_text), lower(?)) > 0"
+    private const val SENT_SEARCH_FIELDS = 5
+    private const val SENT_SEARCH_WHERE =
+        "instr(lower(subject), lower(?)) > 0 OR instr(lower(from_addr), lower(?)) > 0 OR " +
+            "instr(lower(to_addr), lower(?)) > 0 OR instr(lower(snippet), lower(?)) > 0 OR " +
+            "instr(lower(body_text), lower(?)) > 0"
 
     @Volatile
     private var helper: Helper? = null
@@ -115,6 +158,7 @@ object ExtMailStore {
             put("cc", mail.cc)
             put("date_ms", mail.dateMs)
             put("seen", if (mail.seen) 1 else 0)
+            put("starred", if (mail.starred) 1 else 0)
             put("snippet", mail.snippet)
             put("body_text", mail.bodyText)
             put("body_html", mail.bodyHtml)
@@ -124,6 +168,16 @@ object ExtMailStore {
         }
         val row = db().insertWithOnConflict("ext_mail", null, values, SQLiteDatabase.CONFLICT_IGNORE)
         return row != -1L
+    }
+
+    /** 刚插入的这封邮件的本地主键（通知点击要用 local_id 打开详情） */
+    fun lastLocalId(extId: Long, messageId: String): Long {
+        db().query(
+            "ext_mail", arrayOf("local_id"), "ext_id = ? AND message_id = ?",
+            arrayOf(extId.toString(), messageId), null, null, "local_id DESC", "1",
+        ).use { c ->
+            return if (c.moveToFirst()) c.getLong(0) else 0L
+        }
     }
 
     fun count(extId: Long): Int {
@@ -137,41 +191,34 @@ object ExtMailStore {
      *
      * [extIds] 为空表示不展示任何第三方邮件；[sinceMs] > 0 时只取这个时间点及更新的行
      * （与服务端已加载窗口对齐，避免把全库一次读进内存）；[limit] 兜底防止异常数据撑爆列表。
+     *
+     * 列表只投影摘要列，**不再把正文读进内存**；关键词搜索下沉到 SQL（正文也参与匹配），
+     * 正文仍由 [byLocalId] 在详情页按需取。
      */
-    fun feed(extIds: Collection<Long>, sinceMs: Long, limit: Int): List<ExtLocalMail> {
+    fun feed(
+        extIds: Collection<Long>,
+        sinceMs: Long,
+        limit: Int,
+        keyword: String = "",
+    ): List<ExtLocalMail> {
         if (extIds.isEmpty() || limit <= 0) return emptyList()
         val ids = extIds.joinToString(",") { it.toString() }
+        val args = ArrayList<String>()
         val where = buildString {
             append("ext_id IN (").append(ids).append(")")
             if (sinceMs > 0) append(" AND date_ms >= ").append(sinceMs)
+            val k = keyword.trim()
+            if (k.isNotEmpty()) {
+                append(" AND (").append(RECEIVED_SEARCH_WHERE).append(")")
+                repeat(RECEIVED_SEARCH_FIELDS) { args.add(k) }
+            }
         }
         val out = ArrayList<ExtLocalMail>()
         db().query(
-            "ext_mail", null, where, null, null, null, "date_ms DESC, local_id DESC", limit.toString(),
+            "ext_mail", RECEIVED_SUMMARY_COLUMNS, where, args.toTypedArray(),
+            null, null, "date_ms DESC, local_id DESC", limit.toString(),
         ).use { c ->
-            while (c.moveToNext()) {
-                out.add(
-                    ExtLocalMail(
-                        localId = c.getLong(c.getColumnIndexOrThrow("local_id")),
-                        extId = c.getLong(c.getColumnIndexOrThrow("ext_id")),
-                        uid = c.getLong(c.getColumnIndexOrThrow("uid")),
-                        uidValidity = c.getLong(c.getColumnIndexOrThrow("uid_validity")),
-                        messageId = c.getString(c.getColumnIndexOrThrow("message_id")),
-                        subject = c.getString(c.getColumnIndexOrThrow("subject")),
-                        fromName = c.getString(c.getColumnIndexOrThrow("from_name")),
-                        fromAddr = c.getString(c.getColumnIndexOrThrow("from_addr")),
-                        toName = c.getString(c.getColumnIndexOrThrow("to_name")),
-                        toAddr = c.getString(c.getColumnIndexOrThrow("to_addr")),
-                        cc = c.getString(c.getColumnIndexOrThrow("cc")),
-                        dateMs = c.getLong(c.getColumnIndexOrThrow("date_ms")),
-                        seen = c.getInt(c.getColumnIndexOrThrow("seen")) == 1,
-                        snippet = c.getString(c.getColumnIndexOrThrow("snippet")),
-                        bodyText = c.getString(c.getColumnIndexOrThrow("body_text")),
-                        bodyHtml = c.getString(c.getColumnIndexOrThrow("body_html")),
-                        attachmentsJson = c.getString(c.getColumnIndexOrThrow("att_json")),
-                    ),
-                )
-            }
+            while (c.moveToNext()) out.add(receivedSummaryRow(c))
         }
         return out
     }
@@ -196,6 +243,7 @@ object ExtMailStore {
                 cc = c.getString(c.getColumnIndexOrThrow("cc")),
                 dateMs = c.getLong(c.getColumnIndexOrThrow("date_ms")),
                 seen = c.getInt(c.getColumnIndexOrThrow("seen")) == 1,
+                starred = c.getInt(c.getColumnIndexOrThrow("starred")) == 1,
                 snippet = c.getString(c.getColumnIndexOrThrow("snippet")),
                 bodyText = c.getString(c.getColumnIndexOrThrow("body_text")),
                 bodyHtml = c.getString(c.getColumnIndexOrThrow("body_html")),
@@ -207,8 +255,148 @@ object ExtMailStore {
     /** 解绑后清本地（第二批不接 UI，留给界面批次调用） */
     fun deleteAccount(extId: Long) {
         db().delete("ext_mail", "ext_id = ?", arrayOf(extId.toString()))
+        db().delete("ext_sent", "ext_id = ?", arrayOf(extId.toString()))
         db().delete("ext_state", "ext_id = ?", arrayOf(extId.toString()))
     }
+
+    // ---- 上游写操作成功后的本地镜像 ----
+
+    fun setSeen(localId: Long, seen: Boolean) {
+        val v = ContentValues().apply { put("seen", if (seen) 1 else 0) }
+        db().update("ext_mail", v, "local_id = ?", arrayOf(localId.toString()))
+    }
+
+    fun setStarred(localId: Long, starred: Boolean) {
+        val v = ContentValues().apply { put("starred", if (starred) 1 else 0) }
+        db().update("ext_mail", v, "local_id = ?", arrayOf(localId.toString()))
+    }
+
+    /** 上游已移入 Trash / 已删除：本地同步移除，避免列表里点开一封服务器上不存在的信 */
+    fun deleteReceived(localId: Long) {
+        db().delete("ext_mail", "local_id = ?", arrayOf(localId.toString()))
+    }
+
+    // ---- 已发送（本地副本） ----
+
+    fun saveSent(mail: ExtSentMail): Long {
+        val values = ContentValues().apply {
+            put("ext_id", mail.extId)
+            put("message_id", mail.messageId)
+            put("subject", mail.subject)
+            put("from_addr", mail.fromAddr)
+            put("to_addr", mail.toAddr)
+            put("cc", mail.cc)
+            put("date_ms", mail.dateMs)
+            put("snippet", mail.snippet)
+            put("body_text", mail.bodyText)
+            put("body_html", mail.bodyHtml)
+            put("att_json", mail.attachmentsJson)
+            put("created_at", System.currentTimeMillis())
+        }
+        return db().insert("ext_sent", null, values)
+    }
+
+    /** 已发送列表同样只取摘要列；正文由 [sentByLocalId] 在详情页按需取。 */
+    fun sentFeed(
+        extIds: Collection<Long>,
+        sinceMs: Long,
+        limit: Int,
+        keyword: String = "",
+    ): List<ExtLocalMail> {
+        if (extIds.isEmpty() || limit <= 0) return emptyList()
+        val ids = extIds.joinToString(",") { it.toString() }
+        val args = ArrayList<String>()
+        val where = buildString {
+            append("ext_id IN (").append(ids).append(")")
+            if (sinceMs > 0) append(" AND date_ms >= ").append(sinceMs)
+            val k = keyword.trim()
+            if (k.isNotEmpty()) {
+                append(" AND (").append(SENT_SEARCH_WHERE).append(")")
+                repeat(SENT_SEARCH_FIELDS) { args.add(k) }
+            }
+        }
+        val out = ArrayList<ExtLocalMail>()
+        db().query(
+            "ext_sent", SENT_SUMMARY_COLUMNS, where, args.toTypedArray(),
+            null, null, "date_ms DESC, local_id DESC", limit.toString(),
+        ).use { c ->
+            while (c.moveToNext()) out.add(sentSummaryRow(c))
+        }
+        return out
+    }
+
+    fun sentByLocalId(localId: Long): ExtLocalMail? {
+        db().query("ext_sent", null, "local_id = ?", arrayOf(localId.toString()), null, null, null, "1")
+            .use { c -> return if (c.moveToNext()) sentRow(c) else null }
+    }
+
+    fun deleteSent(localId: Long) {
+        db().delete("ext_sent", "local_id = ?", arrayOf(localId.toString()))
+    }
+
+    /** 列表行：正文置空，详情页另行按需读取 */
+    private fun receivedSummaryRow(c: android.database.Cursor) = ExtLocalMail(
+        localId = c.getLong(c.getColumnIndexOrThrow("local_id")),
+        extId = c.getLong(c.getColumnIndexOrThrow("ext_id")),
+        uid = c.getLong(c.getColumnIndexOrThrow("uid")),
+        uidValidity = c.getLong(c.getColumnIndexOrThrow("uid_validity")),
+        messageId = c.getString(c.getColumnIndexOrThrow("message_id")),
+        subject = c.getString(c.getColumnIndexOrThrow("subject")),
+        fromName = c.getString(c.getColumnIndexOrThrow("from_name")),
+        fromAddr = c.getString(c.getColumnIndexOrThrow("from_addr")),
+        toName = c.getString(c.getColumnIndexOrThrow("to_name")),
+        toAddr = c.getString(c.getColumnIndexOrThrow("to_addr")),
+        cc = c.getString(c.getColumnIndexOrThrow("cc")),
+        dateMs = c.getLong(c.getColumnIndexOrThrow("date_ms")),
+        seen = c.getInt(c.getColumnIndexOrThrow("seen")) == 1,
+        starred = c.getInt(c.getColumnIndexOrThrow("starred")) == 1,
+        snippet = c.getString(c.getColumnIndexOrThrow("snippet")),
+        bodyText = "",
+        bodyHtml = "",
+        attachmentsJson = c.getString(c.getColumnIndexOrThrow("att_json")),
+    )
+
+    private fun sentSummaryRow(c: android.database.Cursor) = ExtLocalMail(
+        localId = c.getLong(c.getColumnIndexOrThrow("local_id")),
+        extId = c.getLong(c.getColumnIndexOrThrow("ext_id")),
+        uid = 0,
+        uidValidity = 0,
+        messageId = c.getString(c.getColumnIndexOrThrow("message_id")),
+        subject = c.getString(c.getColumnIndexOrThrow("subject")),
+        fromName = "",
+        fromAddr = c.getString(c.getColumnIndexOrThrow("from_addr")),
+        toName = "",
+        toAddr = c.getString(c.getColumnIndexOrThrow("to_addr")),
+        cc = c.getString(c.getColumnIndexOrThrow("cc")),
+        dateMs = c.getLong(c.getColumnIndexOrThrow("date_ms")),
+        seen = true,
+        starred = false,
+        snippet = c.getString(c.getColumnIndexOrThrow("snippet")),
+        bodyText = "",
+        bodyHtml = "",
+        attachmentsJson = c.getString(c.getColumnIndexOrThrow("att_json")),
+    )
+
+    private fun sentRow(c: android.database.Cursor) = ExtLocalMail(
+        localId = c.getLong(c.getColumnIndexOrThrow("local_id")),
+        extId = c.getLong(c.getColumnIndexOrThrow("ext_id")),
+        uid = 0,
+        uidValidity = 0,
+        messageId = c.getString(c.getColumnIndexOrThrow("message_id")),
+        subject = c.getString(c.getColumnIndexOrThrow("subject")),
+        fromName = "",
+        fromAddr = c.getString(c.getColumnIndexOrThrow("from_addr")),
+        toName = "",
+        toAddr = c.getString(c.getColumnIndexOrThrow("to_addr")),
+        cc = c.getString(c.getColumnIndexOrThrow("cc")),
+        dateMs = c.getLong(c.getColumnIndexOrThrow("date_ms")),
+        seen = true,
+        starred = false,
+        snippet = c.getString(c.getColumnIndexOrThrow("snippet")),
+        bodyText = c.getString(c.getColumnIndexOrThrow("body_text")),
+        bodyHtml = c.getString(c.getColumnIndexOrThrow("body_html")),
+        attachmentsJson = c.getString(c.getColumnIndexOrThrow("att_json")),
+    )
 
     private class Helper(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, DB_VERSION) {
         override fun onCreate(db: SQLiteDatabase) {
@@ -241,6 +429,7 @@ object ExtMailStore {
                     cc TEXT NOT NULL DEFAULT '',
                     date_ms INTEGER NOT NULL DEFAULT 0,
                     seen INTEGER NOT NULL DEFAULT 0,
+                    starred INTEGER NOT NULL DEFAULT 0,
                     snippet TEXT NOT NULL DEFAULT '',
                     body_text TEXT NOT NULL DEFAULT '',
                     body_html TEXT NOT NULL DEFAULT '',
@@ -253,10 +442,37 @@ object ExtMailStore {
             db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS idx_ext_mail_dedup ON ext_mail(ext_id, message_id)")
             db.execSQL("CREATE INDEX IF NOT EXISTS idx_ext_mail_list ON ext_mail(ext_id, date_ms DESC)")
             db.execSQL("CREATE INDEX IF NOT EXISTS idx_ext_mail_uid ON ext_mail(ext_id, uid)")
+            createSentTable(db)
         }
 
         override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
-            // v1 起步，暂不需要迁移
+            if (oldVersion < 2) {
+                db.execSQL("ALTER TABLE ext_mail ADD COLUMN starred INTEGER NOT NULL DEFAULT 0")
+                createSentTable(db)
+            }
+        }
+
+        private fun createSentTable(db: SQLiteDatabase) {
+            db.execSQL(
+                """
+                CREATE TABLE IF NOT EXISTS ext_sent (
+                    local_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    ext_id INTEGER NOT NULL,
+                    message_id TEXT NOT NULL DEFAULT '',
+                    subject TEXT NOT NULL DEFAULT '',
+                    from_addr TEXT NOT NULL DEFAULT '',
+                    to_addr TEXT NOT NULL DEFAULT '',
+                    cc TEXT NOT NULL DEFAULT '',
+                    date_ms INTEGER NOT NULL DEFAULT 0,
+                    snippet TEXT NOT NULL DEFAULT '',
+                    body_text TEXT NOT NULL DEFAULT '',
+                    body_html TEXT NOT NULL DEFAULT '',
+                    att_json TEXT NOT NULL DEFAULT '',
+                    created_at INTEGER NOT NULL DEFAULT 0
+                )
+                """.trimIndent(),
+            )
+            db.execSQL("CREATE INDEX IF NOT EXISTS idx_ext_sent_list ON ext_sent(ext_id, date_ms DESC)")
         }
     }
 }
