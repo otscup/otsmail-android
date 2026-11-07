@@ -127,6 +127,55 @@ jobs:
           sha256sum "mapping-v${{ steps.ver.outputs.value }}.txt"
           wc -l "mapping-v${{ steps.ver.outputs.value }}.txt"
 
+      # 发版正文的初稿由提交记录生成，但允许人工编辑：
+      # 若仓库里存在 docs/release-notes/<版本>.md，就以它为准（发版前提交这个文件即可覆盖初稿）；
+      # 否则按 feat/fix 前缀分组生成，并保留「已知问题 / 安装提示 / 未真机验证」三个必填段落。
+      - name: Build structured release notes
+        id: notes
+        shell: bash
+        run: |
+          V="${{ steps.ver.outputs.value }}"
+          NOTE_FILE="release-notes.md"
+          if [ -f "docs/release-notes/$V.md" ]; then
+            cp "docs/release-notes/$V.md" "$NOTE_FILE"
+            echo "使用人工编辑的 docs/release-notes/$V.md"
+          else
+            PREV=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || true)
+            if [ -n "$PREV" ]; then RANGE="$PREV..HEAD"; else RANGE=""; fi
+            git log $RANGE --no-merges --pretty=%s > "$RUNNER_TEMP/commits.txt"
+            {
+              echo "## 新增功能"
+              grep -E '^(feat|功能)' "$RUNNER_TEMP/commits.txt" | sed 's/^/- /' || true
+              echo ""
+              echo "## 修复"
+              grep -E '^(fix|bugfix|修复)' "$RUNNER_TEMP/commits.txt" | sed 's/^/- /' || true
+              echo ""
+              echo "## 其它变更"
+              grep -Ev '^(feat|fix|bugfix|功能|修复)' "$RUNNER_TEMP/commits.txt" | sed 's/^/- /' || true
+              echo ""
+              echo "## 已知问题"
+              echo "- 待补充：发版前请编辑本段，或提交 docs/release-notes/$V.md 覆盖初稿。"
+              echo ""
+              echo "## 安装提示"
+              echo "- 同签名可直接覆盖安装；覆盖后如通知、相机等权限被系统重置，请在设置里重新授予。"
+              echo "- 回退旧版需要先卸载，本地邮件缓存会清空。"
+              echo ""
+              echo "## 本版仍未经真机验证的项"
+              echo "- 待补充：发版前必须写明本版未在真机验证的功能。"
+            } > "$NOTE_FILE"
+            echo "根据提交记录生成初稿，可在 docs/release-notes/$V.md 中人工修订"
+          fi
+          test -s "$NOTE_FILE"
+          # 结构化正文是硬要求：五个段落缺一个就判红，避免又退回成一整段文字
+          for S in "## 新增功能" "## 修复" "## 已知问题" "## 安装提示" "## 本版仍未经真机验证的项"; do
+            if ! grep -qF "$S" "$NOTE_FILE"; then
+              echo "::error::发布说明缺少段落：$S"
+              exit 1
+            fi
+          done
+          echo "--- release-notes.md ---"
+          cat "$NOTE_FILE"
+
       - name: Upload artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
@@ -147,12 +196,15 @@ jobs:
         run: |
           ASSET="otsmail-${{ steps.ver.outputs.value }}-release.apk"
           MAPPING="mapping-v${{ steps.ver.outputs.value }}.txt"
-          NOTES=$(printf '%s\n\n%s' \
-            "正式签名包，可直接覆盖升级。SHA-256：\`$(sha256sum "$ASSET" | cut -d' ' -f1)\`" \
-            "该版本的混淆映射见附件 \`$MAPPING\`（SHA-256：\`$(sha256sum "$MAPPING" | cut -d' ' -f1)\`），用于还原 R8 混淆后的崩溃堆栈。")
+          {
+            echo ""
+            echo "正式签名包，可直接覆盖升级。SHA-256：\`$(sha256sum "$ASSET" | cut -d' ' -f1)\`"
+            echo ""
+            echo "该版本的混淆映射见附件 \`$MAPPING\`（SHA-256：\`$(sha256sum "$MAPPING" | cut -d' ' -f1)\`），用于还原 R8 混淆后的崩溃堆栈。"
+          } >> release-notes.md
           gh release create "$GITHUB_REF_NAME" "$ASSET" "$MAPPING" \
             --title "OTSMail Android ${{ steps.ver.outputs.value }}" \
-            --notes "$NOTES"
+            --notes-file release-notes.md
 
       # 发版后保留最近 3 个 Release（按版本号排序删更旧的），远端 tag 一律不动。
       # 删 Release 会连带删除它挂的 asset（含 mapping-vX.Y.Z.txt）；映射另有一份 90 天的 artifact。

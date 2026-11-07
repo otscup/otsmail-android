@@ -99,7 +99,7 @@ keyAlias=otsmail
 keyPassword=你的口令
 ```
 
-没有这个文件时 `assembleRelease` 仍会出包，但用的是 debug 签名，不能用于正式分发。
+没有这个文件时 `assembleRelease` 仍会跑完，但产出的是**未签名包**（`app-release-unsigned.apk`），装不上，只能用来确认构建通过。
 
 > **务必备份 keystore**。密钥丢了就无法给已安装用户推送覆盖升级，只能换包名重发。
 
@@ -204,6 +204,16 @@ app/src/main/java/com/otscup/otsmail/
 | minSdk | 26 |
 
 `assembleRelease` 若卡在 `lintVitalAnalyzeRelease`，可加 `-x lintVitalRelease` 跳过（本机在 Windows + 特定 AGP 组合下会长时间无进展）。
+
+## Fork 后自己构建
+
+按已核实的结论列要点，不展开成教程：
+
+1. **最短路径**：clone 仓库 → 装 JDK 17 与 Android SDK 35 → `./gradlew assembleDebug`。debug 构建不需要作者的任何密钥，也不需要 Firebase 配置；也可以直接用 fork 的 CI debug artifact（`.github/workflows/android.yml` 不读 secret）。首次启动填自己的后端地址。
+2. **release 构建**：本地没有签名材料时 `assembleRelease` 能跑完，但只产出未签名包，装不上；要出正式包就用自己的 keystore 配好 `keystore.properties`。CI 的 release 流水线需要 5 个 secret：`KEYSTORE_BASE64`、`KEYSTORE_PASSWORD`、`KEY_ALIAS`、`KEY_PASSWORD`、`GOOGLE_SERVICES_JSON_BASE64`，缺一个必红。
+3. **推送**：`google-services.json` 不在仓库里，fork 默认没有推送。要推送就建自己的 Firebase 项目；改 `applicationId` 时 json 里的 `package_name` 必须同步，服务端也要换对应项目的 FCM 凭据。**不要用别人的 FCM 配置**，否则你的设备 token 会注册到对方项目。
+4. **后端**：地址在运行时填写、不写死，可以指向任何自建 Worker。提醒：指向作者的后端会消耗作者的 Cloudflare 资源。
+5. **mapping**：自己发布正式包时务必保存 `app/build/outputs/mapping/release/mapping.txt`；仓库不存这个文件，丢了之后线上崩溃堆栈无法还原。
 
 ## 许可
 
