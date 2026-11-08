@@ -21,8 +21,6 @@ import android.webkit.WebViewClient
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.horizontalScroll
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -2452,7 +2450,11 @@ internal fun ExtMailDetailScreen(
             }
         }
     }
-    Column(Modifier.fillMaxSize().background(c.bgGrouped).statusBarsPadding().navigationBarsPadding()) {
+    // 底栏自带 navigationBarsPadding；已发送副本没有底栏，才需要自己补
+    Column(
+        Modifier.fillMaxSize().background(c.bgGrouped).statusBarsPadding()
+            .then(if (sent) Modifier.navigationBarsPadding() else Modifier),
+    ) {
         OTNavBar(title = if (sent) "已发送（本地副本）" else "第三方邮件", onLeading = onBack)
         val m = mail
         if (m == null) {
@@ -2491,12 +2493,14 @@ private fun ExtMailBody(
     val c = OT.colors
     val t = OT.type
     val ctx = LocalContext.current
+    val density = LocalDensity.current
     val scope = rememberCoroutineScope()
     var busy by remember(m.localId) { mutableStateOf("") }
     var seenNow by remember(m.localId) { mutableStateOf(m.seen) }
     var starredNow by remember(m.localId) { mutableStateOf(m.starred) }
     var downloadBusy by remember(m.localId) { mutableIntStateOf(-1) }
     var confirmDelete by remember(m.localId) { mutableStateOf(false) }
+    var moreOpen by remember(m.localId) { mutableStateOf(false) }
 
     val atts = remember(m.attachmentsJson) {
         runCatching {
@@ -2754,36 +2758,70 @@ private fun ExtMailBody(
             )
         }
         if (!sent) {
-            // 写操作底栏：全部直连 IMAP，失败时给出具体原因，不假装成功
-            Row(
-                Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 12.dp, vertical = 8.dp)
-                    .horizontalScroll(rememberScrollState()),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalAlignment = Alignment.CenterVertically,
+            // 与主账号详情共用同一套图标底栏：回复 / 回复全部 / 转发 / 删除 / 更多。
+            // 星标、已读/未读收进「更多」，与主账号详情的信息架构保持一致。
+            OTActionBar(
+                items = listOf(
+                    Triple("↩", "回复", { onReply(m, ReplyAction.REPLY, accountAddress, accountId) }),
+                    Triple("⇉", "回复全部", { onReply(m, ReplyAction.REPLY_ALL, accountAddress, accountId) }),
+                    Triple("↪", "转发", { onReply(m, ReplyAction.FORWARD, accountAddress, accountId) }),
+                    Triple("🗑", "删除", { if (busy.isEmpty()) confirmDelete = true }),
+                    Triple("⋯", "更多", { moreOpen = true }),
+                ),
+            )
+        }
+    }
+
+    // 「更多」浮层：只放第三方链路真能执行的 IMAP 操作；服务端能力置灰并说明原因
+    if (moreOpen) {
+        Popup(
+            alignment = Alignment.BottomEnd,
+            offset = IntOffset(
+                with(density) { (-12).dp.roundToPx() },
+                with(density) { (-74).dp.roundToPx() },
+            ),
+            onDismissRequest = { moreOpen = false },
+            properties = PopupProperties(focusable = true),
+        ) {
+            Surface(
+                shape = RoundedCornerShape(14.dp),
+                color = c.bgElevated,
+                shadowElevation = 10.dp,
             ) {
-                ExtActionChip("回复") { onReply(m, ReplyAction.REPLY, accountAddress, accountId) }
-                ExtActionChip("回复全部") { onReply(m, ReplyAction.REPLY_ALL, accountAddress, accountId) }
-                ExtActionChip("转发") { onReply(m, ReplyAction.FORWARD, accountAddress, accountId) }
-                ExtActionChip(if (starredNow) "取消星标" else "星标", busy = busy == "star") {
-                    action("star") {
-                        ExtImapActions.setStarred(m.extId, m.localId, m.uid, !starredNow)
-                        starredNow = !starredNow
-                        if (starredNow) "已在服务器加星标" else "已取消星标"
+                Column(Modifier.width(228.dp).padding(vertical = 6.dp)) {
+                    MoreItem(if (starredNow) "取消星标" else "添加星标") {
+                        moreOpen = false
+                        if (busy.isEmpty()) {
+                            action("star") {
+                                ExtImapActions.setStarred(m.extId, m.localId, m.uid, !starredNow)
+                                starredNow = !starredNow
+                                if (starredNow) "已在服务器加星标" else "已取消星标"
+                            }
+                        }
                     }
-                }
-                ExtActionChip(if (seenNow) "标记未读" else "标记已读", busy = busy == "seen") {
-                    action("seen") {
-                        ExtImapActions.setSeen(m.extId, m.localId, m.uid, !seenNow)
-                        seenNow = !seenNow
-                        if (seenNow) "已标记为已读" else "已标记为未读"
+                    MoreItem(if (seenNow) "标记为未读" else "标记为已读") {
+                        moreOpen = false
+                        if (busy.isEmpty()) {
+                            action("seen") {
+                                ExtImapActions.setSeen(m.extId, m.localId, m.uid, !seenNow)
+                                seenNow = !seenNow
+                                if (seenNow) "已标记为已读" else "已标记为未读"
+                            }
+                        }
                     }
-                }
-                if (busy == "delete") {
-                    CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp, color = c.label2)
-                } else {
-                    ExtActionChip("删除", tint = c.red) { confirmDelete = true }
+                    // 以下能力依赖 otsmail 服务端，第三方邮件不在服务端库里，明确置灰
+                    MoreItem("移动到分类", dimmed = true) {
+                        moreOpen = false
+                        onToast("第三方邮箱暂不支持 otsmail 分类移动，请在邮箱网页版操作")
+                    }
+                    MoreItem("翻译 / AI 摘要 / 智能回复", dimmed = true) {
+                        moreOpen = false
+                        onToast("这些能力依赖 otsmail 服务端，第三方邮件不在服务端，暂不可用")
+                    }
+                    MoreItem("标记为垃圾邮件", dimmed = true) {
+                        moreOpen = false
+                        onToast("第三方邮箱暂不支持垃圾邮件移动，请在邮箱网页版操作")
+                    }
                 }
             }
         }
@@ -2830,35 +2868,6 @@ private fun ExtMailBody(
                     )
                 }
             }
-        }
-    }
-}
-
-/** 外部邮件详情底栏的小胶囊按钮；busy 时替换成转圈，避免连点。 */
-@Composable
-private fun ExtActionChip(
-    label: String,
-    tint: Color? = null,
-    busy: Boolean = false,
-    onClick: () -> Unit,
-) {
-    val c = OT.colors
-    Box(
-        Modifier
-            .clip(RoundedCornerShape(999.dp))
-            .background(c.bgInput)
-            .clickable(enabled = !busy) { onClick() }
-            .padding(horizontal = 12.dp, vertical = 8.dp),
-        contentAlignment = Alignment.Center,
-    ) {
-        if (busy) {
-            CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 1.5.dp, color = c.label2)
-        } else {
-            Text(
-                label,
-                style = OT.type.footnote.copy(fontWeight = FontWeight.Medium),
-                color = tint ?: c.label,
-            )
         }
     }
 }
