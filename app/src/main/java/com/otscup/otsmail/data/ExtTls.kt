@@ -14,7 +14,8 @@ import javax.net.ssl.SSLSocketFactory
  *
  * 这里显式使用 `SSLContext("TLS")`（Android 5+ 默认即 TLS 1.2+），再按系统支持情况
  * 把可用协议限制到 TLS 1.2 及以上；`createSocket(raw, host, port, true)` 会带上 SNI。
- * 主机名校验不额外开启：企业邮箱常见自签/通用证书，证书链仍由系统信任库校验。
+ * 握手前显式开启 HTTPS 主机名校验：裸 `SSLSocket` 默认只验证书链、不验主机名，
+ * 否则通道里明文传输的 LOGIN / AUTH PLAIN 可能被中间人证书冒用截获。
  */
 object ExtTls {
 
@@ -39,6 +40,10 @@ object ExtTls {
         ssl.useClientMode = true
         val modern = ssl.supportedProtocols.filter { isModern(it) }
         if (modern.isNotEmpty()) ssl.enabledProtocols = modern.toTypedArray()
+        // 必须在 handshake 之前设置，握手时才会校验证书主机名与连接目标是否一致
+        val params = ssl.sslParameters
+        params.endpointIdentificationAlgorithm = "HTTPS"
+        ssl.sslParameters = params
         ssl.startHandshake()
         return ssl
     }

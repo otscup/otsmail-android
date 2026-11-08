@@ -148,7 +148,15 @@ object Attachments {
         if (url.startsWith("data:", true)) {
             val comma = url.indexOf(',')
             if (comma <= 0) throw AttachmentUnavailable()
-            val bytes = Base64.decode(url.substring(comma + 1), Base64.DEFAULT)
+            val payload = url.substring(comma + 1)
+            // 先按 Base64 文本长度估算解码后大小；超限直接拒绝，避免整份解码后才判大小导致峰值内存不受控
+            var padding = 0
+            while (padding < 2 && payload.length > padding && payload[payload.length - 1 - padding] == '=') {
+                padding++
+            }
+            val estimatedBytes = payload.length.toLong() / 4 * 3 - padding
+            if (estimatedBytes > MAX_BYTES) throw AttachmentTooLarge()
+            val bytes = Base64.decode(payload, Base64.DEFAULT)
             if (bytes.size > MAX_BYTES) throw AttachmentTooLarge()
             dest.outputStream().use { it.write(bytes) }
             return

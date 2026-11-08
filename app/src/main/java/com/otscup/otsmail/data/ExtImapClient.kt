@@ -168,7 +168,7 @@ class ExtImapClient(
                     internalDate = it.groupValues[1]
                 }
             }
-            val literalSize = Regex("\\{(\\d+)\\}$").find(line)?.groupValues?.get(1)?.toIntOrNull()
+            val literalSize = Regex("\\{(\\d+)\\}$").find(line)?.groupValues?.get(1)?.toLongOrNull()
             if (literalSize != null && literal == null) {
                 literal = readBytes(literalSize)
             }
@@ -264,7 +264,7 @@ class ExtImapClient(
         command("LIST \"\" \"*\"").mapNotNull { parseFolderLine(it) }
 
     /**
-     * 删除到服务器回收站：COPY 到 Trash → 标记 \Deleted → EXPUNGE。
+     * 删除到服务器回收站：COPY 到 Trash → 标记 \Deleted →（仅 UIDPLUS 时）UID EXPUNGE。
      * 找不到 Trash 时直接抛错，绝不退化成「永久删除」。
      * 返回实际使用的回收站名字，便于日志/界面说明。
      */
@@ -276,11 +276,10 @@ class ExtImapClient(
         }
         command("UID COPY $uid ${quote(trash)}")
         command("UID STORE $uid +FLAGS.SILENT (\\Deleted)")
-        // 有 UIDPLUS 就只清这一封；没有则 EXPUNGE 会清掉信箱里所有 \Deleted（通常只有这一封）
+        // 没有 UIDPLUS 时不能退化成无条件 EXPUNGE：那会清掉信箱里所有带 \Deleted 的邮件
+        // （可能包括用户在别的客户端标记待删的信）。这里只保留 \Deleted 标记，跳过 EXPUNGE。
         if (supports("UIDPLUS")) {
             command("UID EXPUNGE $uid")
-        } else {
-            command("EXPUNGE")
         }
         return trash
     }
@@ -411,17 +410,31 @@ class ExtImapClient(
             if (ch == '\n') break
             if (ch == '\r') continue
             sb.append(ch)
+            // 服务器响应的单行长度必须有上限，否则异常/恶意响应可以把内存吃满
+            if (sb.length > MAX_RESPONSE_LINE_CHARS) {
+                throw ExtImapException(
+                    ExtProbeFailure.UNKNOWN,
+                    "服务器响应行超过 $MAX_RESPONSE_LINE_CHARS 字符上限，已中止读取",
+                )
+            }
         }
         return sb.toString()
     }
 
-    private fun readBytes(size: Int): ByteArray {
+    private fun readBytes(size: Long): ByteArray {
+        // literal 长度来自服务器，必须先在分配内存前校验上限
+        if (size > MAX_LITERAL_BYTES) {
+            throw ExtImapException(
+                ExtProbeFailure.UNKNOWN,
+                "服务器声明邮件内容为 $size 字节，超过 $MAX_LITERAL_BYTES 字节上限，已中止读取",
+            )
+        }
         val input = input ?: throw ExtImapException(ExtProbeFailure.UNKNOWN, "连接未建立")
-        val buf = ByteArray(size)
+        val buf = ByteArray(size.toInt())
         var offset = 0
         while (offset < size) {
             val read = try {
-                input.read(buf, offset, size - offset)
+                input.read(buf, offset, size.toInt() - offset)
             } catch (e: Throwable) {
                 throw mapReadError(e)
             }
@@ -473,5 +486,11 @@ class ExtImapClient(
     private companion object {
         const val CONNECT_TIMEOUT_MS = 20_000
         const val READ_TIMEOUT_MS = 90_000
+
+        /** 单行协议响应的字符上限（正常响应远小于此值） */
+        const val MAX_RESPONSE_LINE_CHARS = 64 * 1024
+
+        /** 单封邮件 literal 的字节上限（含附件编码，正常邮件远小于此值） */
+        const val MAX_LITERAL_BYTES = 32L * 1024 * 1024
     }
 }
