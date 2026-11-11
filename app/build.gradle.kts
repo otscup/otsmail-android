@@ -60,8 +60,8 @@ android {
         return major * 10000 + minor * 100 + patch
     }
 
-    // 最后一个正式 tag 是 v0.3.3；下一个正式版是 0.3.4，发新 tag 后这里改成再下一个。
-    val nextReleaseName = "0.3.4"
+    // 最后一个正式 tag 是 v0.3.4；下一个正式版是 0.3.5，发新 tag 后这里改成再下一个。
+    val nextReleaseName = "0.3.5"
 
     val releaseVersionName = (project.findProperty("versionName") as String?)
         ?.removePrefix("v")
@@ -163,6 +163,9 @@ dependencies {
     implementation("androidx.activity:activity-compose:1.9.3")
     // Custom Tabs：OIDC 授权页放到 Chrome，WebAuthn（通行密钥）才可能被调起
     implementation("androidx.browser:browser:1.8.0")
+    // Passkey 免密身份验证：Android 官方凭据管理器（Credential Manager）
+    implementation("androidx.credentials:credentials:1.3.0")
+    implementation("androidx.credentials:credentials-play-services-auth:1.3.0")
     // 扫码登录：CameraX 只做预览/取帧，识别用 ZXing core（纯 Java，不接 GMS/ML Kit）
     implementation("androidx.camera:camera-core:1.3.4")
     implementation("androidx.camera:camera-camera2:1.3.4")
