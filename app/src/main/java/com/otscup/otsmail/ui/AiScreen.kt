@@ -33,6 +33,7 @@ import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -50,6 +51,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.input.pointer.pointerInput
@@ -65,8 +67,10 @@ import com.otscup.otsmail.ui.motion.rememberReduceMotion
 import com.otscup.otsmail.ui.theme.OT
 import kotlinx.coroutines.launch
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.outlined.Reply
 import androidx.compose.material.icons.outlined.ArrowUpward
 import androidx.compose.material.icons.outlined.Close
+import androidx.compose.material.icons.outlined.ContentCopy
 import androidx.compose.material3.Icon
 
 private data class Msg(
@@ -119,6 +123,8 @@ fun AiScreen(
     val msgs = remember { mutableStateListOf(Msg("ai", "你好，我可以在这台账户的所有邮件里找东西、改状态、起草回复。")) }
     var input by remember { mutableStateOf("") }
     var busy by remember { mutableStateOf(false) }
+    // 同一时刻只展开一条 AI 消息的操作图标；点消息切换，点别处/再点一次收起
+    var actionIndex by remember { mutableStateOf<Int?>(null) }
 
     // 出现「正在思考」气泡时把它滚进视野，用户才知道请求已经在跑
     androidx.compose.runtime.LaunchedEffect(busy) {
@@ -127,6 +133,7 @@ fun AiScreen(
 
     fun runAutoClassify() {
         if (busy) return
+        actionIndex = null
         busy = true
         msgs.add(Msg("me", "执行全箱 AI 智能分类整理"))
         scope.launch {
@@ -150,6 +157,7 @@ fun AiScreen(
         }
         val q = text.trim()
         if (q.isEmpty() || busy) return
+        actionIndex = null
         busy = true
         input = ""
         msgs.add(Msg("me", q))
@@ -213,8 +221,8 @@ fun AiScreen(
                     .clip(RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp))
                     .background(c.bgCard)
                     .navigationBarsPadding()
-                    // 面板空白处吞掉点击，避免穿透到遮罩把面板误关
-                    .pointerInput(Unit) { detectTapGestures { } },
+                    // 面板空白处吞掉点击（不关面板），同时收起已展开的操作图标
+                    .pointerInput(Unit) { detectTapGestures { actionIndex = null } },
             ) {
                 // 标题栏：写邮件入口 + 明确的关闭按钮
                 Row(
@@ -249,14 +257,26 @@ fun AiScreen(
 
                 LazyColumn(
                     state = listState,
-                    modifier = Modifier.weight(1f).fillMaxWidth().padding(horizontal = d.sp3.dp),
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxWidth()
+                        .padding(horizontal = d.sp3.dp)
+                        // 点列表空白处收起已展开的操作图标
+                        .pointerInput(Unit) { detectTapGestures { actionIndex = null } },
                     verticalArrangement = Arrangement.spacedBy(d.sp2.dp),
                 ) {
-                    items(msgs) { m ->
-                        Bubble(m, onReply = { closeThen { onReply(it) } })
+                    itemsIndexed(msgs) { idx, m ->
+                        Bubble(
+                            m,
+                            actionsOpen = actionIndex == idx,
+                            onToggle = { actionIndex = if (actionIndex == idx) null else idx },
+                            onReply = { closeThen { onReply(it) } },
+                        )
                     }
                     if (busy) {
-                        item(key = "thinking") { Bubble(Msg("ai", "正在思考…"), actionable = false) }
+                        item(key = "thinking") {
+                            Bubble(Msg("ai", "正在思考…"), actionsOpen = false, onToggle = {}, actionable = false)
+                        }
                     }
                     item { Spacer(Modifier.height(d.sp2.dp)) }
                 }
@@ -297,7 +317,10 @@ fun AiScreen(
                             onValueChange = { input = it },
                             textStyle = t.body.copy(color = c.label),
                             cursorBrush = SolidColor(c.blue),
-                            modifier = Modifier.fillMaxWidth(),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                // 点输入框属于「点别处」，收起消息操作图标
+                                .onFocusChanged { if (it.isFocused) actionIndex = null },
                             decorationBox = { inner ->
                                 if (input.isEmpty()) Text("让 AI 在所有邮件里找或做点什么", style = t.body, color = c.label3)
                                 inner()
@@ -318,7 +341,13 @@ fun AiScreen(
 }
 
 @Composable
-private fun Bubble(m: Msg, onReply: (String) -> Unit = {}, actionable: Boolean = true) {
+private fun Bubble(
+    m: Msg,
+    actionsOpen: Boolean = false,
+    onToggle: () -> Unit = {},
+    onReply: (String) -> Unit = {},
+    actionable: Boolean = true,
+) {
     val c = OT.colors
     val t = OT.type
     val context = LocalContext.current
@@ -338,32 +367,45 @@ private fun Bubble(m: Msg, onReply: (String) -> Unit = {}, actionable: Boolean =
                         bottomEnd = if (mine) 6.dp else 20.dp,
                     ),
                 )
-                .padding(horizontal = 14.dp, vertical = 10.dp),
+                .padding(horizontal = 14.dp, vertical = 10.dp)
+                // 只有点这条消息本身才展开操作图标；再点一次收起
+                .then(if (!mine && actionable) Modifier.tapArea { onToggle() } else Modifier),
         ) {
             Text(m.text, style = t.body, color = if (mine) Color.White else c.label)
         }
-        // 每条 AI 输出：复制原文 / 作为回信草稿带入写信页（不自动发送）
-        if (!mine && actionable) {
+        // 每条 AI 输出：图标化复制 / 回复，仅在点击该条消息后出现，点击区域 40dp
+        if (!mine && actionable && actionsOpen) {
             Row(
-                Modifier.padding(top = 4.dp),
-                horizontalArrangement = Arrangement.spacedBy(16.dp),
+                Modifier.padding(top = 2.dp),
+                horizontalArrangement = Arrangement.spacedBy(2.dp),
+                verticalAlignment = Alignment.CenterVertically,
             ) {
-                Text(
-                    "复制",
-                    style = t.caption1,
-                    color = c.blue,
-                    modifier = Modifier.tapArea {
+                Box(
+                    Modifier.size(40.dp).clip(CircleShape).tapArea {
                         val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
                         cm.setPrimaryClip(ClipData.newPlainText("AI 回复", m.text))
                         Toast.makeText(context, "已复制", Toast.LENGTH_SHORT).show()
                     },
-                )
-                Text(
-                    "回复",
-                    style = t.caption1,
-                    color = c.blue,
-                    modifier = Modifier.tapArea { onReply(m.text) },
-                )
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(
+                        Icons.Outlined.ContentCopy,
+                        contentDescription = "复制",
+                        tint = c.blue,
+                        modifier = Modifier.size(18.dp),
+                    )
+                }
+                Box(
+                    Modifier.size(40.dp).clip(CircleShape).tapArea { onReply(m.text) },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(
+                        Icons.AutoMirrored.Outlined.Reply,
+                        contentDescription = "回复",
+                        tint = c.blue,
+                        modifier = Modifier.size(18.dp),
+                    )
+                }
             }
         }
         // 动作回执：纯文字，成功绿、失败红（样张 .chat__acts）
