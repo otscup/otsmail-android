@@ -2774,8 +2774,14 @@ private fun ExtMailBody(
                 Text("这封邮件没有可显示的正文", style = t.body, color = c.label2)
             }
         } else {
+            // 与普通详情一致：正文区白底铺满屏宽、内容左右各 16dp。
+            // 之前是 20dp 内边距 + 灰色页面底，两侧灰边让第三方正文看起来比普通邮件窄一截。
             AndroidView(
-                modifier = Modifier.weight(1f).fillMaxWidth().padding(horizontal = 20.dp),
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxWidth()
+                    .background(c.bgCard)
+                    .padding(horizontal = 16.dp),
                 factory = { viewCtx ->
                     WebView(viewCtx).apply {
                         settings.javaScriptEnabled = false
