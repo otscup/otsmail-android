@@ -404,7 +404,7 @@ private fun PasskeyCard(
             )
             if (item.createdAt.isNotEmpty()) {
                 Text(
-                    "创建时间: ${item.createdAt}",
+                    "创建时间: ${TimeFmt.preciseTime(item.createdAt)}",
                     style = t.caption2,
                     color = c.label3,
                 )

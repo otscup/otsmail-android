@@ -248,7 +248,7 @@ fun UnsubscribeScreen(
                                             if (sub.createTime.isNotBlank()) {
                                                 Spacer(Modifier.height(2.dp))
                                                 Text(
-                                                    text = "最近收到: ${sub.createTime}",
+                                                    text = "最近收到: ${TimeFmt.preciseTime(sub.createTime)}",
                                                     style = t.caption1,
                                                     color = c.label3,
                                                 )

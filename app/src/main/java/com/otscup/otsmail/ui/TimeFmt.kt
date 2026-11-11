@@ -112,4 +112,28 @@ internal object TimeFmt {
         val ldt = localOf(raw) ?: return raw
         return "${ldt.year}年${ldt.monthValue}月${ldt.dayOfMonth}日 ${hm(ldt.hour, ldt.minute)}"
     }
+
+    /**
+     * 只需日期的场景（用户注册时间、注册码到期日）：按设备本地时区取 `yyyy-MM-dd`。
+     * 服务端是 UTC 时间戳，直接 `take(10)` 会让北京时间 0–8 点产生的记录显示成前一天。
+     * 解析不出来时退回原始字符串前 10 位，保持旧行为。
+     */
+    internal fun localDate(raw: String): String {
+        val ldt = localOf(raw) ?: return raw.take(10)
+        return ldt.toLocalDate().toString()
+    }
+
+    /**
+     * 设备/会话、通行密钥这类后台记录：完整本地时间 `2026-11-11 21:10:38`。
+     * 不带 T/Z/毫秒，固定空格分隔；服务端仍给 ISO 8601 UTC，这里只负责换算到设备本地时区。
+     * 秒缺失时补 00；解析不出来原样返回，避免把时间整段吞掉。
+     */
+    internal fun preciseTime(raw: String): String {
+        val ldt = localOf(raw) ?: return raw
+        return String.format(
+            CN,
+            "%04d-%02d-%02d %02d:%02d:%02d",
+            ldt.year, ldt.monthValue, ldt.dayOfMonth, ldt.hour, ldt.minute, ldt.second,
+        )
+    }
 }

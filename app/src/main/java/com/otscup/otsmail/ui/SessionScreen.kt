@@ -335,7 +335,7 @@ private fun DeviceItemRow(
 
             val details = buildList {
                 if (item.ip.isNotBlank()) add("IP: ${item.ip}")
-                if (item.time.isNotBlank()) add(item.time)
+                if (item.time.isNotBlank()) add(TimeFmt.preciseTime(item.time))
             }.joinToString(" · ")
 
             Text(
