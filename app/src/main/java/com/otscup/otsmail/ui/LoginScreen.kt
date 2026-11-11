@@ -1,6 +1,7 @@
 ﻿package com.otscup.otsmail.ui
 
 import android.net.Uri
+import android.content.Context
 import android.content.Intent
 import android.util.Base64
 import android.webkit.CookieManager
@@ -92,6 +93,40 @@ private fun hostOf(base: String): String = runCatching {
 }.getOrDefault("")
 
 /**
+ * 登录页站点配置（/setting/websiteConfig）的本地缓存。
+ * 第三方登录按钮完全由这份配置的开关决定；不缓存的话每次冷启动都要等网络回来才长按钮，
+ * 登录页底部会先空一块再「冒」出来。这里按服务器地址存最后一次成功结果，
+ * 首次组合时同步读出来（一条 prefs + 一个 JSONObject，主线程开销可忽略），网络回来再静默刷新。
+ * 单独用一个 prefs 文件：它属于服务器而不是账号，退出登录（Session.clear）不能把它清掉。
+ */
+private object WebsiteConfigCache {
+    private const val PREFS = "otsmail_login"
+    private const val KEY_BASE = "websiteConfigBase"
+    private const val KEY_JSON = "websiteConfigJson"
+
+    fun load(context: Context, base: String): JSONObject? {
+        val key = base.trim()
+        if (key.isEmpty()) return null
+        val prefs = context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        // 换了服务器就不能用上一台的开关，否则会显示对方根本不支持的登录方式
+        if (prefs.getString(KEY_BASE, "") != key) return null
+        val raw = prefs.getString(KEY_JSON, "").orEmpty()
+        if (raw.isEmpty()) return null
+        return runCatching { JSONObject(raw) }.getOrNull()
+    }
+
+    fun save(context: Context, base: String, cfg: JSONObject) {
+        val key = base.trim()
+        if (key.isEmpty()) return
+        context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .edit()
+            .putString(KEY_BASE, key)
+            .putString(KEY_JSON, cfg.toString())
+            .apply()
+    }
+}
+
+/**
  * 登录页唯一的强调色：低饱和灰蓝（HSL 约 205°，饱和度 13%）。
  * 亮色 #5C6A76 对 bgGrouped #F2F2F7 约 4.9:1，暗色 #9BAAB8 对纯黑约 8.6:1，都过 WCAG AA。
  * 只用在链接、光标这类小面积元素；logo 与主按钮保持黑白灰，避免整页被品牌蓝压住。
@@ -140,8 +175,11 @@ fun LoginScreen(session: Session, onLoggedIn: () -> Unit) {
     var error by remember { mutableStateOf("") }
     var serverSheet by remember { mutableStateOf(false) }
     var serverBusy by remember { mutableStateOf(false) }
-    // 登录前可读的站点配置：注册开关、注册码策略、域名列表、第三方登录开关
-    var config by remember { mutableStateOf<JSONObject?>(null) }
+    // 登录前可读的站点配置：注册开关、注册码策略、域名列表、第三方登录开关。
+    // 先读上一次成功结果的本地缓存：第三方登录按钮首帧就能就位，不再等网络回来才「冒」出来。
+    var config by remember { mutableStateOf(WebsiteConfigCache.load(context, base)) }
+    // 配置请求还没收口：没有缓存时用它决定要不要显示等高的按钮占位
+    var configLoading by remember { mutableStateOf(true) }
     var twoFactorCode by remember { mutableStateOf("") }
     var twoFactorNeeded by remember { mutableStateOf(false) }
     var registerOpen by remember { mutableStateOf(false) }
@@ -193,8 +231,12 @@ fun LoginScreen(session: Session, onLoggedIn: () -> Unit) {
 
     LaunchedEffect(base) {
         Api.base = base.trim()
+        // 换服务器时先切到该服务器自己的缓存，不能把上一台的第三方登录方式带过来
+        config = WebsiteConfigCache.load(context, base)
+        configLoading = true
         runCatching { Api.websiteConfig() }.onSuccess { cfg ->
             config = cfg
+            WebsiteConfigCache.save(context, base, cfg)
             // 服务端给了域名列表时用它做默认后缀（哪儿都不给才回退到服务器 host）
             if (session.loginDomain.isEmpty()) {
                 val first = cfg.optJSONArray("domainList")?.let { a ->
@@ -203,6 +245,8 @@ fun LoginScreen(session: Session, onLoggedIn: () -> Unit) {
                 if (first.isNotEmpty()) domain = first
             }
         }
+        // 失败时保留缓存；没有缓存则收起占位，避免一直显示假的按钮
+        configLoading = false
     }
 
     fun submit() {
@@ -717,22 +761,17 @@ fun LoginScreen(session: Session, onLoggedIn: () -> Unit) {
         }
 
         val providers = oauthProviders(config)
-        if (providers.isNotEmpty()) {
-            // 或
-            Row(
-                Modifier.fillMaxWidth().padding(vertical = 24.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Box(Modifier.weight(1f).height(1.dp).background(c.separator))
-                Text("或", style = t.footnote, color = c.label3, modifier = Modifier.padding(horizontal = 12.dp))
-                Box(Modifier.weight(1f).height(1.dp).background(c.separator))
-            }
-
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                providers.forEach { p ->
-                    OidcButton(p.label, p.icon) { startOAuth(p) }
+        when {
+            providers.isNotEmpty() -> {
+                OrDivider()
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    providers.forEach { p ->
+                        OidcButton(p.label, p.icon) { startOAuth(p) }
+                    }
                 }
             }
+            // 没有缓存、站点配置又还没回来：先按两个入口占好高度，别让底部空一块再跳出来
+            config == null && configLoading -> OAuthPlaceholder()
         }
 
         Spacer(Modifier.height(32.dp))
@@ -817,6 +856,43 @@ fun LoginScreen(session: Session, onLoggedIn: () -> Unit) {
             },
             onCancel = { cancelOAuth() },
         )
+    }
+}
+
+/** 第三方登录区上方的「或」分隔线；真实按钮与占位共用，保证两种状态高度一致。 */
+@Composable
+private fun OrDivider() {
+    val t = OT.type
+    val c = OT.colors
+    Row(
+        Modifier.fillMaxWidth().padding(vertical = 24.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(Modifier.weight(1f).height(1.dp).background(c.separator))
+        Text("或", style = t.footnote, color = c.label3, modifier = Modifier.padding(horizontal = 12.dp))
+        Box(Modifier.weight(1f).height(1.dp).background(c.separator))
+    }
+}
+
+/**
+ * 站点配置既没有本地缓存、请求也还没回来时的占位：
+ * 按最常见的两个第三方入口预留等高位置，首帧不塌陷，配置回来后就地替换。
+ */
+@Composable
+private fun OAuthPlaceholder() {
+    val c = OT.colors
+    OrDivider()
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        repeat(2) {
+            Box(
+                Modifier
+                    .fillMaxWidth()
+                    .height(48.dp)
+                    .clip(RoundedCornerShape(OT.dimens.rMd.dp))
+                    .background(c.bgCard)
+                    .border(1.dp, c.separatorSoft, RoundedCornerShape(OT.dimens.rMd.dp)),
+            )
+        }
     }
 }
 
