@@ -217,6 +217,7 @@ object ExtMailStore {
         sinceMs: Long,
         limit: Int,
         keyword: String = "",
+        starredOnly: Boolean = false,
     ): List<ExtLocalMail> {
         if (extIds.isEmpty() || limit <= 0) return emptyList()
         val ids = extIds.joinToString(",") { it.toString() }
@@ -224,6 +225,7 @@ object ExtMailStore {
         val where = buildString {
             append("ext_id IN (").append(ids).append(")")
             if (sinceMs > 0) append(" AND date_ms >= ").append(sinceMs)
+            if (starredOnly) append(" AND starred = 1")
             val k = keyword.trim()
             if (k.isNotEmpty()) {
                 append(" AND (").append(RECEIVED_SEARCH_WHERE).append(")")
@@ -269,11 +271,35 @@ object ExtMailStore {
         }
     }
 
-    /** 解绑后清本地（第二批不接 UI，留给界面批次调用） */
-    fun deleteAccount(extId: Long) {
+    /**
+     * 解绑单个第三方账户：只删这个 ext_id 的本地镜像，同一登录账号下其他第三方邮箱不受影响。
+     * 未初始化时先打开库（从设置页直接解绑、没进过收件箱的情况）。
+     */
+    fun deleteAccount(context: Context, extId: Long) {
+        init(context)
         db().delete("ext_mail", "ext_id = ?", arrayOf(extId.toString()))
         db().delete("ext_sent", "ext_id = ?", arrayOf(extId.toString()))
         db().delete("ext_state", "ext_id = ?", arrayOf(extId.toString()))
+    }
+
+    /**
+     * 退出登录 / 删除账号：清空全部第三方邮箱本地数据（正文、地址、附件元信息、游标、已发送副本）。
+     *
+     * 本地库本身没有用户维度，里面的行都属于当前登录用户；退出后不能留给下一个账号，
+     * 否则新账号的收件箱会混进上一个账号的第三方邮件。切换账户（session.accountId）不走这里。
+     */
+    fun clearAll(context: Context) {
+        init(context)
+        val db = db()
+        db.beginTransaction()
+        try {
+            db.delete("ext_mail", null, null)
+            db.delete("ext_sent", null, null)
+            db.delete("ext_state", null, null)
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
     }
 
     // ---- 上游写操作成功后的本地镜像 ----

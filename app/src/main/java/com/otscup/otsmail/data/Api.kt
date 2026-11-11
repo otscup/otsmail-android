@@ -73,6 +73,10 @@ data class MailItem(
     val toName: String = "",
     /** 该邮件所属用户的登录邮箱（服务端 userEmail），用于行内归属标签 */
     val userEmail: String = "",
+    /** 邮件提取到的验证码（服务端解析优先，本地正则提取兜底） */
+    val code: String = "",
+    /** 退订链接/头信息（若有） */
+    val listUnsubscribe: String = "",
 )
 
 /**
@@ -96,6 +100,14 @@ data class MailDetail(
     val recipient: List<String> = emptyList(),
     /** 原 Cc 列表：回复全部时带入抄送 */
     val cc: List<String> = emptyList(),
+    val code: String = "",
+    val otpLink: String = "",
+    val authSpf: String = "",
+    val authDmarc: String = "",
+    val listUnsubscribe: String = "",
+    val listUnsubscribePost: String = "",
+    val status: Int = 0,
+    val type: Int = 0,
 )
 
 /**
@@ -136,6 +148,28 @@ data class Me(
     val twoFactorRequired: Boolean = false,
     /** 服务端 user.type 原样（当 roleId 用）；0 = 系统管理员，全站邮件入口的门槛之一 */
     val type: Long = -1,
+    val recoveryEmail: String = "",
+    val disablePasswordLogin: Boolean = false,
+)
+
+data class UnsubscribeItem(
+    val sendEmail: String,
+    val name: String,
+    val emailId: Long,
+    val createTime: String,
+    val count: Int,
+    val listUnsubscribe: String,
+    val listUnsubscribePost: String,
+)
+
+data class SessionDeviceItem(
+    val id: String,
+    val current: Boolean,
+    val ip: String,
+    val browser: String,
+    val os: String,
+    val device: String,
+    val time: String,
 )
 
 /**
@@ -159,17 +193,22 @@ object Api {
         readTimeoutMs: Int = 20_000,
         /** 覆盖全局 base：退出登录/换服务器时全局地址已经变了，旧请求仍要打旧服务器 */
         baseUrl: String? = null,
-    ): JSONObject =
-        withContext(Dispatchers.IO) {
+    ): JSONObject {
+        // 鉴权上下文在**调用方线程**快照：连接是在 IO 线程里造的，中间可能发生
+        // 「退出登录 → 立刻换号登录」，那时全局 token/base 已经是新会话的了。
+        // 快照后旧请求只可能用旧令牌打旧服务器，不会串到新账号上。
+        val authToken = if (auth) token else ""
+        val targetBase = baseUrl ?: base
+        return withContext(Dispatchers.IO) {
             // 演示构建（-Pdemo=true，独立 applicationId）：全部请求由本地虚构数据应答，
             // 不连服务器、不碰真实账户。正式包 BuildConfig.DEMO=false，这里不会命中。
             if (BuildConfig.DEMO) return@withContext Demo.respond(method, path, body)
-            val conn = (URL((baseUrl ?: base).trimEnd('/') + path).openConnection() as HttpURLConnection).apply {
+            val conn = (URL(targetBase.trimEnd('/') + path).openConnection() as HttpURLConnection).apply {
                 requestMethod = method
                 connectTimeout = 15_000
                 readTimeout = readTimeoutMs
                 setRequestProperty("Content-Type", "application/json")
-                if (auth && token.isNotEmpty()) setRequestProperty("Authorization", token)
+                if (authToken.isNotEmpty()) setRequestProperty("Authorization", authToken)
                 headers.forEach { (k, v) -> setRequestProperty(k, v) }
                 if (body != null) {
                     doOutput = true
@@ -196,13 +235,18 @@ object Api {
             val bizCode = json.optInt("code", code)
             // 业务错误码优先：服务端 2FA 用 428 表达「缺验证码」，HTTP 状态仍是 200
             val failCode = if (code in 200..299) bizCode else code
-            // 401 只在这里登记一次，界面统一显示顶部「登录已过期」；token 与缓存都不清
-            if (auth && failCode == 401) AuthState.expire()
+            // 401 只在这里登记一次，界面统一显示顶部「登录已过期」；token 与缓存都不清。
+            // 仅当请求用的令牌仍是当前令牌时才登记：否则这是上一次会话的迟到响应，
+            // 不能把已经重新登录成功的新会话误标成过期（换服务器同理，base 也一起比对）。
+            if (auth && failCode == 401 && authToken == token && targetBase.trimEnd('/') == base.trimEnd('/')) {
+                AuthState.expire()
+            }
             if (code !in 200..299 || bizCode != 200) {
                 throw ApiException(failCode, json.optString("message").ifEmpty { "HTTP $code" })
             }
             json
         }
+    }
 
     private suspend fun obj(
         method: String,
@@ -346,6 +390,8 @@ object Api {
             twoFactor = d.optBoolean("twoFactor", false),
             twoFactorRequired = d.optBoolean("twoFactorRequired", false),
             type = d.optLong("type", -1L),
+            recoveryEmail = d.optString("recoveryEmail"),
+            disablePasswordLogin = d.optBoolean("disablePasswordLogin", false),
         )
     }
 
@@ -410,6 +456,122 @@ object Api {
 
     suspend fun deleteMyAccount() {
         obj("DELETE", "/my/delete")
+    }
+
+    /** 绑定/修改辅助安全邮箱（需输入当前密码核验身份；传空解绑） */
+    suspend fun updateRecoveryEmail(recoveryEmail: String, password: String): String {
+        val body = JSONObject().apply {
+            put("recoveryEmail", recoveryEmail)
+            put("password", password)
+        }
+        val d = obj("PUT", "/my/recoveryEmail", body = body)
+        return d.optString("recoveryEmail")
+    }
+
+    /** 切换关闭/开启密码登录（安全熔断：若要关闭，必须至少绑定一种第三方或免密方式） */
+    suspend fun togglePasswordLogin(disable: Boolean): Boolean {
+        val body = JSONObject().apply {
+            put("disable", disable)
+        }
+        val d = obj("PUT", "/my/togglePasswordLogin", body = body)
+        return d.optBoolean("disablePasswordLogin", disable)
+    }
+
+    /** 获取当前账号的所有在线设备与会话列表 */
+    suspend fun getSessions(): List<SessionDeviceItem> {
+        val arr = arr("GET", "/my/sessions")
+        return buildList {
+            for (i in 0 until arr.length()) {
+                val o = arr.optJSONObject(i) ?: continue
+                add(
+                    SessionDeviceItem(
+                        id = o.optString("id"),
+                        current = o.optBoolean("current", false),
+                        ip = o.optString("ip"),
+                        browser = o.optString("browser"),
+                        os = o.optString("os"),
+                        device = o.optString("device"),
+                        time = o.optString("time"),
+                    )
+                )
+            }
+        }
+    }
+
+    /** 踢出并注销指定设备会话 */
+    suspend fun kickSession(sessionId: String) {
+        obj("DELETE", "/my/sessions/$sessionId")
+    }
+
+    /** 通行密钥（Passkey）凭据项 */
+    data class PasskeyItem(
+        val id: Long,
+        val name: String,
+        val credentialId: String,
+        val createdAt: String,
+    )
+
+    /** 获取用户已绑定的通行密钥列表 */
+    suspend fun passkeyList(): List<PasskeyItem> {
+        val arr = arr("GET", "/my/passkey/list")
+        val out = ArrayList<PasskeyItem>()
+        for (i in 0 until arr.length()) {
+            val o = arr.optJSONObject(i) ?: continue
+            out.add(
+                PasskeyItem(
+                    id = o.optLong("id"),
+                    name = o.optString("name").ifEmpty { "通行密钥" },
+                    credentialId = o.optString("credentialId"),
+                    createdAt = o.optString("createdAt"),
+                ),
+            )
+        }
+        return out
+    }
+
+    /** 生成用于注册通行密钥的 challenge 与配置 */
+    suspend fun passkeyRegisterOptions(): JSONObject =
+        obj("POST", "/my/passkey/register/options")
+
+    /** 提交已注册的通行密钥凭据验证并落库 */
+    suspend fun passkeyRegisterVerify(credentialJson: JSONObject) {
+        raw("POST", "/my/passkey/register/verify", credentialJson)
+    }
+
+    /** 删除指定的通行密钥凭据 */
+    suspend fun passkeyDelete(id: Long) {
+        raw("DELETE", "/my/passkey/$id")
+    }
+
+    /** 免密登录：生成挑战参数 */
+    suspend fun passkeyLoginOptions(): JSONObject =
+        raw("POST", "/login/passkey/options", auth = false).optJSONObject("data") ?: JSONObject()
+
+    /** 免密登录：验证凭据并返回 session token */
+    suspend fun passkeyLoginVerify(credentialJson: JSONObject): String {
+        val res = raw("POST", "/login/passkey/verify", credentialJson, auth = false).optJSONObject("data") ?: JSONObject()
+        return res.optString("token").ifEmpty { throw ApiException(401, "免密登录验证失败") }
+    }
+
+    /** 获取聚合邮件订阅与退订列表（RFC 8058 / RFC 2369） */
+    suspend fun unsubscribeList(): List<UnsubscribeItem> {
+        val arr = arr("GET", "/email/unsubscribeList")
+        return buildList {
+            for (i in 0 until arr.length()) {
+                val o = arr.optJSONObject(i) ?: continue
+                add(
+                    UnsubscribeItem(
+                        sendEmail = o.optString("sendEmail"),
+                        name = o.optString("name"),
+                        emailId = o.optLong("emailId"),
+                        createTime = o.optString("createTime"),
+                        count = o.optInt("count", 1),
+                        listUnsubscribe = o.optString("listUnsubscribe"),
+                        listUnsubscribePost = o.optString("listUnsubscribePost"),
+                    )
+                )
+            }
+        }
     }
 
     // ---- 邮件 ----
@@ -532,7 +694,21 @@ object Api {
         val email: String,
         val group: String,
         val remark: String = "",
-    )
+    ) {
+        val isVip: Boolean
+            get() = group.equals("VIP", ignoreCase = true) ||
+                remark.contains("VIP", ignoreCase = true) ||
+                remark.contains("特别关注", ignoreCase = true)
+    }
+
+    /** 内存快照：特别关注（VIP）联系人邮箱集合，供列表极速判断加星 */
+    @Volatile var vipEmails: Set<String> = emptySet()
+
+    fun isVipSender(email: String): Boolean {
+        if (email.isBlank() || vipEmails.isEmpty()) return false
+        val clean = email.substringAfter("<").substringBefore(">").trim().lowercase()
+        return vipEmails.contains(clean)
+    }
 
     /** 返回联系人列表 + 服务端已有的分组名（分组下拉基于全量，不受 q/group 过滤影响）。 */
     suspend fun contactList(q: String = "", group: String = ""): Pair<List<ContactItem>, List<String>> {
@@ -556,12 +732,37 @@ object Api {
                 ),
             )
         }
+        val vips = out.filter { it.isVip }.map { it.email.trim().lowercase() }.toSet()
+        vipEmails = if (q.isBlank() && group.isBlank()) vips else (vipEmails + vips)
+
         val groups = data.optJSONArray("groups") ?: JSONArray()
         val groupNames = ArrayList<String>()
         for (i in 0 until groups.length()) {
             groups.optString(i).takeIf { it.isNotBlank() }?.let { groupNames.add(it) }
         }
         return out to groupNames
+    }
+
+    /** 快速切换联系人的 VIP 特别关注状态 */
+    suspend fun contactToggleVip(item: ContactItem) {
+        val willBeVip = !item.isVip
+        val newGroup = if (willBeVip) {
+            if (item.group.isBlank()) "VIP" else item.group
+        } else {
+            if (item.group.equals("VIP", ignoreCase = true)) "" else item.group
+        }
+        val newRemark = if (willBeVip) {
+            if (item.remark.isBlank()) "VIP特别关注" else if (!item.remark.contains("VIP", ignoreCase = true)) "${item.remark} [VIP]" else item.remark
+        } else {
+            item.remark.replace("[VIP]", "").replace("(VIP)", "").replace("VIP特别关注", "").replace("特别关注", "").trim()
+        }
+        if (item.id > 0) {
+            contactSet(item.id, item.name, item.email, newGroup, newRemark)
+        } else {
+            contactAdd(item.name, item.email, newGroup, newRemark)
+        }
+        val cleanEmail = item.email.trim().lowercase()
+        vipEmails = if (willBeVip) (vipEmails + cleanEmail) else (vipEmails - cleanEmail)
     }
 
     /**
@@ -628,6 +829,10 @@ object Api {
      * 服务端要先扫描候选邮件再走模型，实测一次 25 秒以上，所以这里单独放宽读超时到 60 秒，
      * 否则客户端 20 秒必然先超时（旧版「AI 没回话」的真正原因）。
      */
+    /** 调用服务端大模型对全收件箱进行智能主题分类 */
+    suspend fun aiClassify(): JSONObject =
+        obj("POST", "/ai/classify", JSONObject(), readTimeoutMs = 60_000)
+
     suspend fun ai(text: String, accountId: Long, history: List<Pair<String, String>>, emailId: Long? = null): Pair<String, List<AiAction>> {
         val hist = org.json.JSONArray()
         history.takeLast(20).forEach { (role, t) ->
@@ -911,6 +1116,16 @@ object Api {
             category = d.optString("category"),
             recipient = parseAddresses(d.optString("recipient")),
             cc = parseAddresses(d.optString("cc")),
+            code = d.optString("code").ifEmpty {
+                VerificationCode.find("${d.optString("subject")}\n$body")?.code.orEmpty()
+            },
+            otpLink = d.optString("otpLink"),
+            authSpf = d.optString("authSpf"),
+            authDmarc = d.optString("authDmarc"),
+            listUnsubscribe = d.optString("listUnsubscribe"),
+            listUnsubscribePost = d.optString("listUnsubscribePost"),
+            status = d.optInt("status"),
+            type = d.optInt("type"),
         )
     }
 
@@ -1010,6 +1225,22 @@ object Api {
     /** DELETE /email/clearDeleted：彻底清空当前用户的已删除（服务端返回清除条数）。 */
     suspend fun clearDeleted(): Int = obj("DELETE", "/email/clearDeleted").optInt("total")
 
+    /** POST /email/learn：学习用户对分类的纠正，并记录发件人和关键词规则 */
+    suspend fun emailLearn(emailId: Long, category: String, keyword: String = ""): String {
+        val body = JSONObject()
+            .put("emailId", emailId)
+            .put("category", category)
+        if (keyword.isNotEmpty()) body.put("keyword", keyword)
+        val d = obj("POST", "/email/learn", body)
+        return d.optString("category")
+    }
+
+    /** POST /email/retry：对发送失败或超时的已发送邮件发起重试 */
+    suspend fun emailRetry(emailId: Long): JSONObject {
+        val body = JSONObject().put("emailId", emailId)
+        return obj("POST", "/email/retry", body)
+    }
+
     suspend fun send(
         accountId: Long,
         to: List<String>,
@@ -1081,6 +1312,10 @@ object Api {
         if (this == null) return emptyList()
         return (0 until length()).mapNotNull { i ->
             val o = optJSONObject(i) ?: return@mapNotNull null
+            val serverCode = o.optString("code")
+            val codeVal = if (serverCode.isNotBlank()) serverCode else {
+                VerificationCode.find("${o.optString("subject")}\n${o.optString("text")}")?.code.orEmpty()
+            }
             MailItem(
                 emailId = o.optLong("emailId"),
                 from = o.optString("sendEmail"),
@@ -1099,6 +1334,8 @@ object Api {
                 toEmail = o.optString("toEmail"),
                 toName = o.optString("toName"),
                 userEmail = o.optString("userEmail"),
+                code = codeVal,
+                listUnsubscribe = o.optString("listUnsubscribe"),
             )
         }
     }

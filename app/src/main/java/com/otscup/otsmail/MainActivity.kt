@@ -16,11 +16,18 @@ import com.otscup.otsmail.push.PushRouter
 import com.otscup.otsmail.ui.OtsApp
 
 class MainActivity : ComponentActivity() {
+    companion object {
+        const val EXTRA_SNOOZE_OPEN = "snooze_open_id"
+        const val EXTRA_SNOOZE_MAIL = "snooze_mail_id"
+        const val EXTRA_SNOOZE_SOURCE = "snooze_source"
+        const val EXTRA_SNOOZE_LIST = "snooze_open_list"
+    }
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         PushNotifications.ensureChannel(this)
         // 冷启动点通知：把 emailId 交给路由，等 Compose 起来后跳详情
         PushRouter.open(intent)
+        handleSnoozeIntent(intent)
         // 冷启动由 Custom Tabs 回调拉起：otsmail://oauth/callback?code&state
         handleOAuthIntent(intent)
         // 长按图标「扫一扫」/外部唤起：otsmail://qr
@@ -35,6 +42,7 @@ class MainActivity : ComponentActivity() {
         setIntent(intent)
         // App 在运行中点通知：singleTop 会走到这里
         PushRouter.open(intent)
+        handleSnoozeIntent(intent)
         handleOAuthIntent(intent)
         handleQrIntent(intent)
         maybeRunPushDedupeSelfTest(intent)
@@ -53,6 +61,17 @@ class MainActivity : ComponentActivity() {
     private fun handleQrIntent(intent: Intent?) {
         val data = intent?.data ?: return
         if (data.scheme == "otsmail" && data.host == "qr") QrScanBus.post()
+    }
+
+    private fun handleSnoozeIntent(intent: Intent?) {
+        if (intent == null) return
+        val openList = intent.getBooleanExtra(EXTRA_SNOOZE_LIST, false)
+        val openId = intent.getStringExtra(EXTRA_SNOOZE_OPEN)
+        val mailId = intent.getStringExtra(EXTRA_SNOOZE_MAIL)
+        val source = intent.getStringExtra(EXTRA_SNOOZE_SOURCE)
+        if (openList || !openId.isNullOrBlank() || !mailId.isNullOrBlank()) {
+            com.otscup.otsmail.schedule.SnoozeRouter.open(openId, mailId, source, openList)
+        }
     }
 
     /**

@@ -8,6 +8,7 @@ import android.util.Base64
 import android.util.Log
 import com.otscup.otsmail.push.PushDedupe
 import com.otscup.otsmail.push.PushSettings
+import com.otscup.otsmail.schedule.SnoozeScheduler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -41,6 +42,15 @@ class Session(context: Context) {
     var accountId: Long
         get() = prefs.getLong("accountId", 0L)
         set(value) = prefs.edit().putLong("accountId", value).apply()
+
+    /**
+     * 登录用户 id（/my/loginUserInfo 的 userId）。
+     * 定时发送等跨会话任务用它校验「记录的创建者还是不是当前登录用户」；
+     * 切换账户只改 [accountId]，不换 userId。
+     */
+    var userId: Long
+        get() = prefs.getLong("userId", 0L)
+        set(value) = prefs.edit().putLong("userId", value).apply()
 
     var name: String
         get() = prefs.getString("name", "").orEmpty()
@@ -115,6 +125,7 @@ class Session(context: Context) {
             .remove("token")
             .remove("tokenEnc")
             .remove("accountId")
+            .remove("userId")
             .remove("name")
             .remove("email")
             .remove("loginDomain")
@@ -136,8 +147,19 @@ class Session(context: Context) {
             android.webkit.CookieManager.getInstance().removeAllCookies(null)
             android.webkit.CookieManager.getInstance().flush()
         }
+        // 切号/退出仅取消“稍后提醒”调度与展示，保留该账号提醒数据，重登同账号后恢复。
+        // 解绑/删除账号的数据清理由调用方在清登录态前按当前账号显式处理（见 SettingsScreen）。
+        runCatching { SnoozeScheduler.cancelAlarmsOnly(appContext) }
         // 退出登录/删除账户：列表与详情缓存一起清，避免换号后串数据
         MailCache.wipe()
+        // 第三方邮箱本地库（正文、地址、附件元信息、游标、已发送副本）同属上一个账号：
+        // 不清会让新账号的收件箱混进旧账号的第三方邮件。切换账户不走这里。
+        runCatching { ExtMailStore.clearAll(appContext) }
+            .onFailure { Log.w(TAG, "清理第三方邮箱本地数据失败：${it.message}") }
+        // 第三方同步的节流时间与按账户记的失败计数也属于上一个账号
+        runCatching { ExtSync.clearLocalState(appContext) }
+        // 邮件附件预览缓存（cacheDir/att）属于上一会话；用户主动下载到「下载」目录的文件不动
+        runCatching { java.io.File(appContext.cacheDir, "att").deleteRecursively() }
     }
 }
 

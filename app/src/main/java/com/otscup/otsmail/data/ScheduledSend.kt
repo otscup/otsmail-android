@@ -50,6 +50,13 @@ internal data class ScheduledMail(
     val draftId: String? = null,
     /** 发件账号邮箱，恢复草稿时用 */
     val fromEmail: String = "",
+    /**
+     * 创建时的服务器地址与登录用户 id：到点执行时用来校验登录态是否还是同一份。
+     * 换号或换服务器后旧定时邮件不能拿新身份去发。
+     * 旧记录没有这两个字段（空/0）时跳过校验，保持升级前的行为。
+     */
+    val base: String = "",
+    val userId: Long = 0,
 ) {
     val pending: Boolean get() = status == STATUS_PENDING
 
@@ -73,9 +80,13 @@ internal data class ScheduledMail(
         .put("createdAt", createdAt)
         .put("draftId", draftId.orEmpty())
         .put("fromEmail", fromEmail)
+        .put("base", base)
+        .put("userId", userId)
 
     companion object {
         const val STATUS_PENDING = "pending"
+        /** 已开始提交：进程在发送途中被杀时留在磁盘上，重启后不会被当成待发送再发一遍 */
+        const val STATUS_SENDING = "sending"
         const val STATUS_FAILED = "failed"
 
         private fun JSONArray?.strList(): List<String> =
@@ -104,6 +115,8 @@ internal data class ScheduledMail(
                 createdAt = o.optLong("createdAt"),
                 draftId = o.optString("draftId").ifBlank { null },
                 fromEmail = o.optString("fromEmail"),
+                base = o.optString("base"),
+                userId = o.optLong("userId"),
             )
         }
     }
@@ -236,6 +249,38 @@ internal object ScheduledSendStore {
     fun markFailed(ctx: Context, id: String, error: String) = synchronized(lock) {
         write(ctx, read(ctx).map {
             if (it.id == id) it.copy(status = ScheduledMail.STATUS_FAILED, error = error) else it
+        })
+    }
+
+    /**
+     * 发送前先落「发送中」：只有仍是等待中的记录才改，返回值表示这次是否抢到执行权。
+     * 进程在发信途中被杀时记录会停在 sending，重启后由 [recoverInterrupted] 标成失败，
+     * 不会被当成待发送再发一遍（服务端没有幂等键，重发就是真的多一封）。
+     */
+    fun markSending(ctx: Context, id: String): Boolean = synchronized(lock) {
+        val list = read(ctx)
+        val target = list.firstOrNull { it.id == id } ?: return false
+        if (!target.pending) return false
+        write(ctx, list.map {
+            if (it.id == id) it.copy(status = ScheduledMail.STATUS_SENDING, error = "") else it
+        })
+        true
+    }
+
+    /**
+     * 启动时恢复：上次发送途中被杀（状态停在 sending）的记录转成失败，给出可读原因，
+     * 让用户先到原邮箱确认是否已发出，再决定重试或转草稿；不做静默重发。
+     */
+    fun recoverInterrupted(ctx: Context) = synchronized(lock) {
+        val list = read(ctx)
+        if (list.none { it.status == ScheduledMail.STATUS_SENDING }) return
+        write(ctx, list.map {
+            if (it.status == ScheduledMail.STATUS_SENDING) {
+                it.copy(
+                    status = ScheduledMail.STATUS_FAILED,
+                    error = "上次发送过程被中断，请先到原邮箱确认是否已发出，再决定重试或转为草稿",
+                )
+            } else it
         })
     }
 

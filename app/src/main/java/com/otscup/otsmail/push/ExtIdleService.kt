@@ -40,6 +40,8 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import org.json.JSONArray
 import org.json.JSONObject
+import java.util.Calendar
+import java.util.Date
 import java.util.concurrent.ConcurrentHashMap
 
 /**
@@ -62,12 +64,54 @@ object ExtIdleManager {
     @Volatile
     private var deciding = false
 
+    /**
+     * Android 15 起 `dataSync` 前台服务每 24 小时只有 6 小时配额。配额用尽时系统回调
+     * [ExtIdleService.onTimeout]，这里把「等配额重置」的时间记下来，重置前不再拉起服务，
+     * 避免反复启动→立刻超时→闪一条常驻通知。
+     */
+    private const val PREFS_QUOTA = "otsmail_ext_idle_quota"
+    private const val KEY_QUOTA_BLOCKED_UNTIL = "blockedUntil"
+
+    internal fun markQuotaExhausted(context: Context) {
+        val app = context.applicationContext
+        val until = nextQuotaResetAt()
+        app.getSharedPreferences(PREFS_QUOTA, Context.MODE_PRIVATE)
+            .edit().putLong(KEY_QUOTA_BLOCKED_UNTIL, until).apply()
+        Log.w(TAG, "dataSync 前台服务配额用尽，暂停 IDLE 服务到 ${Date(until)}（本地时间次日 0 点）")
+    }
+
+    /** 配额是否还没重置；跨过重置时间会自动解除。 */
+    internal fun quotaBlocked(context: Context): Boolean {
+        val prefs = context.applicationContext.getSharedPreferences(PREFS_QUOTA, Context.MODE_PRIVATE)
+        val until = prefs.getLong(KEY_QUOTA_BLOCKED_UNTIL, 0L)
+        if (until <= 0L) return false
+        if (System.currentTimeMillis() < until) return true
+        prefs.edit().remove(KEY_QUOTA_BLOCKED_UNTIL).apply()
+        return false
+    }
+
+    /** 系统按本地时区日界重置配额：取次日 0 点。 */
+    private fun nextQuotaResetAt(): Long {
+        val cal = Calendar.getInstance()
+        cal.add(Calendar.DAY_OF_YEAR, 1)
+        cal.set(Calendar.HOUR_OF_DAY, 0)
+        cal.set(Calendar.MINUTE, 0)
+        cal.set(Calendar.SECOND, 0)
+        cal.set(Calendar.MILLISECOND, 0)
+        return cal.timeInMillis
+    }
+
     /** App 启动 / 登录后调用；重复调用幂等。 */
     fun startIfNeeded(context: Context) {
         val app = context.applicationContext
         if (BuildConfig.DEMO) return
         if (Session(app).token.isEmpty() || Api.token.isEmpty()) {
             ExtIdleService.stop(app)
+            return
+        }
+        if (quotaBlocked(app)) {
+            // 今天配额已用完：不再拉起前台服务（拉起也只会立刻超时），等次日 0 点后自动恢复
+            Log.i(TAG, "dataSync 配额未重置，今天不再启动 IDLE 服务")
             return
         }
         if (deciding) return
@@ -153,6 +197,12 @@ object ExtIdleManager {
         val app = context.applicationContext
         // 用户选「关闭第三方邮件提醒」时服务本就不该在跑，别为一个对齐请求把它拉起来闪一条通知
         if (currentMode(app) != MODE_IDLE) return
+        // 配额未重置时不能 startForegroundService：服务会在 onCreate 里直接 stopSelf，
+        // 触发系统「did not call startForeground」异常
+        if (quotaBlocked(app)) {
+            Log.i(TAG, "dataSync 配额未重置，跳过账户对齐（明天恢复）")
+            return
+        }
         val intent = Intent(app, ExtIdleService::class.java).setAction(ExtIdleService.ACTION_ACCOUNTS_CHANGED)
         runCatching { ContextCompat.startForegroundService(app, intent) }
             .onFailure { Log.w(TAG, "通知 IDLE 服务对齐账户失败：${it.message}") }
@@ -225,14 +275,25 @@ class ExtIdleService : Service() {
         Session(applicationContext).apply()
 
         power = getSystemService(PowerManager::class.java)
-        startInForeground(0)
-        registerNetwork()
-        registerIdleMode()
-
+        // 先判定该不该跑，再进前台：不该跑时直接 stopSelf()（系统允许在 5s 内自行停止），
+        // 避免先建出一条通知再立刻撤掉
         if (!shouldRun()) {
             stopSelf()
             return
         }
+        // 配额用尽/后台受限时 startForeground 可能抛出，不能让它把进程带崩：
+        // 记日志后优雅停止，不留下一条死的常驻通知
+        val foreground = runCatching { startInForeground(0) }
+            .onFailure { Log.w(TAG, "进入前台失败（dataSync 配额/后台限制），停止 IDLE 服务：${it.message}") }
+            .isSuccess
+        if (!foreground) {
+            runCatching { stopForeground(STOP_FOREGROUND_REMOVE) }
+            stopSelf()
+            return
+        }
+        registerNetwork()
+        registerIdleMode()
+
         // 账户对齐改成事件驱动（启动 / 网络恢复 / 退 Doze / 绑定解绑 / 手动刷新），
         // 待机时不再每分钟请求一次 /ext/accounts（原来 60 次/小时 = 1,440 次/天）
         checkAccounts("服务启动", forceRestart = true)
@@ -261,14 +322,21 @@ class ExtIdleService : Service() {
         super.onDestroy()
     }
 
-    /** Android 15：dataSync 前台服务每天 6 小时配额用尽后必须停。 */
+    /**
+     * Android 15：dataSync 前台服务每 24 小时累计 6 小时配额，用尽后系统回调这里，
+     * 只给几秒收尾时间。必须主动退出前台并停服务（否则会被系统判为 ANR/崩溃），
+     * 常驻通知也要一起摘掉；同时记下配额重置时间，重置前不再拉起服务。
+     */
     override fun onTimeout(startId: Int, fgsType: Int) {
-        Log.w(TAG, "IDLE 前台服务超时（系统 dataSync 配额），先停止，下次启动再恢复")
+        Log.w(TAG, "IDLE 前台服务超时（系统 dataSync 配额），停止服务并等配额重置")
+        ExtIdleManager.markQuotaExhausted(this)
+        runCatching { stopForeground(STOP_FOREGROUND_REMOVE) }
         stopSelf()
     }
 
     private fun shouldRun(): Boolean {
         if (BuildConfig.DEMO) return false
+        if (ExtIdleManager.quotaBlocked(this)) return false
         if (Session(applicationContext).token.isEmpty()) return false
         // 只看「第三方邮件提醒方式」，不再看设备有没有 FCM token：
         // 服务端不给第三方邮件下发 FCM，有 token 也必须挂 IDLE。

@@ -61,6 +61,9 @@ internal object ScheduledSendScheduler {
 
     /** 重启/装包/手动触发：把存储里所有等待项重新排上（过去时刻会立即触发）。 */
     fun rescheduleAll(ctx: Context) {
+        // 上次发送途中进程被杀：先把 sending 恢复成失败，避免它既不发也永远卡在「发送中」
+        runCatching { ScheduledSendStore.recoverInterrupted(ctx) }
+            .onFailure { Log.w("ScheduledSend", "恢复中断的定时邮件失败：${it.message}") }
         ScheduledSendStore.list(ctx).filter { it.pending }.forEach { schedule(ctx, it) }
     }
 
@@ -119,17 +122,26 @@ class ScheduledSendRescheduleReceiver : BroadcastReceiver() {
     }
 }
 
-/** 真正提交：读记录 → 恢复登录态 → 发信 → 成功删除 / 失败保留原因。 */
+/** 真正提交：读记录 → 恢复登录态 → 校验身份/服务器 → 标记发送中 → 发信 → 成功删除 / 失败保留原因。 */
 internal object ScheduledSendRunner {
     suspend fun run(context: Context, id: String) {
         val mail = ScheduledSendStore.get(context, id) ?: return
         if (!mail.pending) return
-        Session(context).apply()
+        val session = Session(context)
+        session.apply()
         if (Api.base.isBlank() || Api.token.isBlank()) {
             ScheduledSendStore.markFailed(context, id, "登录已失效，定时邮件未发送")
             notify(context, mail, "登录已失效，请重新登录后重试")
             return
         }
+        // 换号/换服务器后旧定时邮件不能拿新身份去发：不匹配就标失败，等用户切回原账号再处理
+        identityMismatch(mail, session)?.let { reason ->
+            ScheduledSendStore.markFailed(context, id, reason)
+            notify(context, mail, reason)
+            return
+        }
+        // 先落「发送中」再发：进程在发信途中被杀也不会在重启后被当成待发送再发一遍
+        if (!ScheduledSendStore.markSending(context, id)) return
         val attachments = runCatching {
             val arr = JSONArray(mail.attachmentsJson)
             (0 until arr.length()).map { arr.getJSONObject(it) }
@@ -154,6 +166,23 @@ internal object ScheduledSendRunner {
             ScheduledSendStore.markFailed(context, id, reason)
             notify(context, mail, reason)
         }
+    }
+
+    /**
+     * 记录创建时绑定的登录身份与服务器还在不在。
+     * 旧记录没有这两个字段（空/0）时跳过校验，保持升级前的行为；
+     * 顺带说明：站内「切换账户」只换 accountId、不换 token/userId，这条路径不会被误判。
+     */
+    private fun identityMismatch(mail: ScheduledMail, session: Session): String? {
+        val mailBase = mail.base.trimEnd('/')
+        val curBase = session.base.trimEnd('/')
+        if (mailBase.isNotEmpty() && mailBase != curBase) {
+            return "定时邮件属于其他服务器（${mailBase}），当前登录的是 ${curBase.ifEmpty { "未知服务器" }}，未发送"
+        }
+        if (mail.userId > 0 && session.userId != mail.userId) {
+            return "登录账号已切换，定时邮件未发送；请切回原账号后重试或转为草稿"
+        }
+        return null
     }
 }
 

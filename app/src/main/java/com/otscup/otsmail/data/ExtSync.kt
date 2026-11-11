@@ -100,6 +100,16 @@ object ExtSync {
         rev++
     }
 
+    /**
+     * 退出登录 / 删除账号：清掉同步节流时间与按账户记的归档失败计数。
+     * 这些值属于上一个账号；留下会让新账号第一次同步被旧的时间戳挡住。
+     */
+    fun clearLocalState(context: Context) {
+        context.applicationContext
+            .getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .edit().clear().apply()
+    }
+
     private data class AccountResult(
         val fetched: Int,
         val archived: Int,
