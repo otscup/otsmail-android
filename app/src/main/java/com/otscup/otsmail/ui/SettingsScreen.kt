@@ -298,7 +298,7 @@ fun SettingsScreen(
                 OTDivider(inset = 16)
                 SettingRow(
                     title = "端到端加密 (E2EE)",
-                    value = "本地密钥与同步",
+                    value = "未启用 · 仅密钥管理",
                     onClick = onOpenE2EE,
                     showChevron = true,
                 )

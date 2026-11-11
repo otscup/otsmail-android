@@ -23,7 +23,6 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.ContentCopy
 import androidx.compose.material.icons.outlined.Key
 import androidx.compose.material.icons.outlined.Lock
-import androidx.compose.material.icons.outlined.QrCode
 import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.outlined.Security
 import androidx.compose.material.icons.outlined.Sync
@@ -48,8 +47,9 @@ import com.otscup.otsmail.data.E2EEManager
 import com.otscup.otsmail.ui.theme.OT
 
 /**
- * 端到端加密（E2EE）安全管理中心
- * 支持本地 RSA-2048 身份公私钥管理、公钥导出复制与跨设备扫码同步
+ * 端到端加密（E2EE）密钥管理页
+ * 当前仅提供本地 RSA-2048 密钥对的查看、导出与重建；加密发送与接收解密尚未接入收发链路，
+ * 跨设备密钥同步亦未开发，页面上如实标注为「未启用 / 待开发」。
  */
 @Composable
 fun E2EEScreen(
@@ -98,17 +98,29 @@ fun E2EEScreen(
                         Modifier
                             .size(38.dp)
                             .clip(CircleShape)
-                            .background(c.blue.copy(alpha = 0.12f)),
+                            .background(c.bgInput),
                         contentAlignment = Alignment.Center,
                     ) {
-                        Icon(Icons.Outlined.Security, contentDescription = null, tint = c.blue, modifier = Modifier.size(20.dp))
+                        Icon(Icons.Outlined.Security, contentDescription = null, tint = c.label2, modifier = Modifier.size(20.dp))
                     }
                     Spacer(Modifier.width(12.dp))
                     Column(Modifier.weight(1f)) {
-                        Text("零知识端到端保护", style = t.subhead.copy(fontWeight = FontWeight.SemiBold), color = c.label)
-                        Spacer(Modifier.height(4.dp))
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text("端到端加密", style = t.subhead.copy(fontWeight = FontWeight.SemiBold), color = c.label)
+                            Spacer(Modifier.width(8.dp))
+                            Text(
+                                "未启用",
+                                style = t.caption2.copy(fontWeight = FontWeight.Medium),
+                                color = c.label3,
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(OT.dimens.rPill.dp))
+                                    .background(c.bgInput)
+                                    .padding(horizontal = 8.dp, vertical = 3.dp),
+                            )
+                        }
+                        Spacer(Modifier.height(6.dp))
                         Text(
-                            "基于 RSA-2048 与 AES-256-GCM 混合加密，私钥仅保存在当前设备本地，邮件在离开设备前已被加密，服务器或第三方中继均无法解密读取内容。",
+                            "这里目前只管理本机的一对加密密钥，可查看指纹、复制公钥、重新生成。加密发送与接收解密尚未接入邮件的收发流程，当前不会对任何邮件加密，服务器上的邮件与以往一致。",
                             style = t.footnote,
                             color = c.label2,
                             lineHeight = 18.sp,
@@ -179,15 +191,12 @@ fun E2EEScreen(
             }
 
             item {
-                // 跨设备同步卡片
+                // 跨设备同步（待开发，暂不可操作）
                 Row(
                     Modifier
                         .fillMaxWidth()
                         .clip(RoundedCornerShape(OT.dimens.rLg.dp))
                         .background(c.bgCard)
-                        .clickable {
-                            Toast.makeText(context, "请在另一台设备（如平板/电脑）打开扫码进行密钥对同步", Toast.LENGTH_LONG).show()
-                        }
                         .padding(16.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
@@ -198,15 +207,28 @@ fun E2EEScreen(
                             .background(c.bgInput),
                         contentAlignment = Alignment.Center,
                     ) {
-                        Icon(Icons.Outlined.Sync, contentDescription = null, tint = c.label, modifier = Modifier.size(20.dp))
+                        Icon(Icons.Outlined.Sync, contentDescription = null, tint = c.label3, modifier = Modifier.size(20.dp))
                     }
                     Spacer(Modifier.width(12.dp))
                     Column(Modifier.weight(1f)) {
-                        Text("跨设备安全密钥同步", style = t.subhead.copy(fontWeight = FontWeight.SemiBold), color = c.label)
+                        Text("跨设备安全密钥同步", style = t.subhead.copy(fontWeight = FontWeight.SemiBold), color = c.label2)
                         Spacer(Modifier.height(2.dp))
-                        Text("支持通过本地加密二维码将本端解密私钥迁移至新设备", style = t.caption1, color = c.label3)
+                        Text(
+                            "尚未开发。完成后可通过本地加密二维码把本机私钥迁移到新设备，当前不可使用。",
+                            style = t.caption1,
+                            color = c.label3,
+                        )
                     }
-                    Icon(Icons.Outlined.QrCode, contentDescription = null, tint = c.blue, modifier = Modifier.size(20.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        "待开发",
+                        style = t.caption2.copy(fontWeight = FontWeight.Medium),
+                        color = c.label3,
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(OT.dimens.rPill.dp))
+                            .background(c.bgInput)
+                            .padding(horizontal = 8.dp, vertical = 3.dp),
+                    )
                 }
             }
 
