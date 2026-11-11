@@ -129,6 +129,26 @@
             </intent-filter>
         </receiver>
 
+        <!-- 稍后提醒到点触发与通知栏快捷操作：只接本 App 的 PendingIntent -->
+        <receiver
+            android:name=".schedule.SnoozeReceiver"
+            android:exported="false" />
+        <receiver
+            android:name=".schedule.SnoozeActionReceiver"
+            android:exported="false" />
+
+        <!-- 开机/装包/改时间/改时区后恢复稍后提醒；系统广播因此必须 exported=true -->
+        <receiver
+            android:name=".schedule.SnoozeRescheduleReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+                <action android:name="android.intent.action.TIME_SET" />
+                <action android:name="android.intent.action.TIMEZONE_CHANGED" />
+            </intent-filter>
+        </receiver>
+
         <!-- 服务端走 data 消息时才用得上这两个兜底（通知栏小图标/渠道）。
              渠道 id 必须指向 ensureChannel 里真正会创建、且不会被删除的那条，否则 FCM 找不到默认渠道 -->
         <meta-data
