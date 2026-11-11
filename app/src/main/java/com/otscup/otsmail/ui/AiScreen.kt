@@ -212,7 +212,9 @@ fun AiScreen(
                     .fillMaxHeight(0.75f)
                     .clip(RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp))
                     .background(c.bgCard)
-                    .navigationBarsPadding(),
+                    .navigationBarsPadding()
+                    // 面板空白处吞掉点击，避免穿透到遮罩把面板误关
+                    .pointerInput(Unit) { detectTapGestures { } },
             ) {
                 // 标题栏：写邮件入口 + 明确的关闭按钮
                 Row(
