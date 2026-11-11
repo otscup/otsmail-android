@@ -269,14 +269,14 @@ OAuth 的 `*_client_id`、`*_callback_url` 以及开关（`github_switch`、`goo
 
 ## 8. 当前版本状态与发版流程
 
+> **现状注记（2026-11-09，只读核对；以 Git tag + 仓库当前状态为准，云端控制台未核验）**：本地 Git `HEAD=d0ff80d chore: 发布 0.3.4（预发布）`，tag 含 `v0.3.4`；`app/build.gradle.kts:63-64` `nextReleaseName="0.3.4"`。GitHub Releases/Actions/Latest 指针/PRERELEASE/Release 资产与 CI 实况需在控制台确认，当前无权限 → **阻塞，不臆测**。本地工作区另有 10 个未提交源码改动 + 临时产物（已补 `.gitignore`），B1/脏树证据不等于 clean 发布证据。
+
 **是什么**
 
-- 当前最新 tag：`v0.3.3`（2026-11-07T22:41Z 发布，本地时间为 11-08 早晨），Release 资产只有 `otsmail-0.3.3-release.apk`；`mapping-v0.3.3.txt` 只在 Actions artifact。
-- 最新提交：`ae3826a chore: 发布 0.3.3（预发布）`；`v0.3.3` 的 Release 与 CI 均成功。
-- GitHub Releases 页面的 Latest 指针仍停在 `v0.3.2`：`v0.3.3` 的 `isPrerelease=false` 但 `isLatest=false`；原因未见记录，交接时在 Releases 页手动确认/调整。
-- 版本号规则：`versionCode = major*10000 + minor*100 + patch`；`0.3.3 → 303`。**只升不降**。
+- 版本号规则：`versionCode = major*10000 + minor*100 + patch`（`app/build.gradle.kts:55-61`）。**只升不降**。
 - 本地包：`<下一个正式版本>-dev.<序号>`，序号存 `.dev-version`（不入库）；dev 包与对应正式版共用同一个 `versionCode`，覆盖安装不触发降级。
-- 发版入口：`.github/workflows/release.yml`，`push tag v*` 或 `workflow_dispatch`（手动档只出 artifact，不建 Release，且必须显式填版本号）。
+- 发版入口：`.github/workflows/release.yml`，`push tag v*` 或 `workflow_dispatch`（手动档只出 artifact，不建 Release，且必须显式填版本号）；tag push 默认 `PRERELEASE:"true"`（`release.yml:197`）。
+- 历史记录（早晨版，供追溯）：`v0.3.3`（2026-11-07T22:41Z）Release/CI 曾记录为成功、Release 资产 `otsmail-0.3.3-release.apk`、`mapping-v0.3.3.txt` 仅在 Actions artifact；当时 Latest 指针曾停在 `v0.3.2`（`v0.3.3` `isPrerelease=false` 但 `isLatest=false`，原因未记录）。以上云端现状需重新确认。
 
 **存在哪**
 
@@ -284,7 +284,7 @@ OAuth 的 `*_client_id`、`*_callback_url` 以及开关（`github_switch`、`goo
 
 **怎么转移 / 发版步骤**
 
-1. 发版前先把 `app/build.gradle.kts` 里的 `nextReleaseName` 推到下一个版本（当前仍是 `"0.3.3"`，下次应为 `0.3.4`）；否则本地 dev 包版本名会和已发布版重叠，虽然 `versionCode` 相同、覆盖安装能过，但容易混淆。
+1. 发版前确认 `app/build.gradle.kts` 的 `nextReleaseName` 与目标版本一致；2026-11-09 只读核对时仓库已为 `"0.3.4"` 且存在 `v0.3.4` tag（`HEAD=d0ff80d`），发下一个版本前再推进。避免 dev 包版本名与已发布版重叠（`versionCode` 相同覆盖能过但易混淆）。
 2. 写 `docs/release-notes/<版本>.md`，必须包含五段：`## 新增功能`、`## 修复`、`## 已知问题`、`## 安装提示`、`## 本版仍未经真机验证的项`；缺一段 CI 直接判红。
 3. 提交代码，打 tag `vX.Y.Z`，推送 tag。
 4. CI 会：解码 keystore 与 `google-services.json` → 构建签名 APK → 用 `apksigner`/`aapt` 断言包内版本等于 tag 版本、`versionCode` 等于规则值 → 强制要求 `mapping.txt` 存在（缺失直接失败）→ 上传 artifact（90 天）→ 建 Release（当前工作流写死 `PRERELEASE: "true"`，即默认发预发布；要正式发布需改成 `"false"`）→ 清理更旧的 Release，只保留最近 3 个，**tag 不删**。
@@ -302,15 +302,15 @@ OAuth 的 `*_client_id`、`*_callback_url` 以及开关（`github_switch`、`goo
 
 ## 9. 已知未验证 / 已知缺陷
 
-> 以下按 `docs/路线图-2026-11.md` 与 `docs/release-notes/0.3.1`~`0.3.3` 汇总。路线图的版本段已过期（还写着最后 tag `v0.2.5`、下一版 `0.2.6`），部分「已实现未验证」可能已在后续补验，交接时逐条复核，不要直接当现状。
+> 以下按 `docs/路线图-2026-11.md` 与 `docs/release-notes/0.3.1`~`0.3.3` 等汇总。路线图/文档可能滞后，**以 Git tag + 仓库当前状态 + 实测证据为准**（2026-11-09 只读核对：`HEAD=d0ff80d`，tag 含 `v0.3.4`，`app/build.gradle.kts:63-64` `nextReleaseName="0.3.4"`）；交接时逐条复核，不要直接当现状。
 >
-> 2026-11 当前维护者的最新手动验证：详情页验证码复制已成功；通知栏复制尚未测；关闭第三方长连接后常驻通知/任务已确认消失。
+> 2026-11 维护者手动反馈（单设备 GMS，证据粒度不一）：详情页验证码复制已成功；扫码登录已测试没问题；FCM 已通；日常暂无大问题；手机可调试；关闭第三方长连接后常驻通知/任务已确认消失。**边界/矩阵仍待验证或阻塞**：通知栏复制（锁屏/折叠）、扫码暗光/方向/无效码/窄屏、跨通道 Message-ID 去重、多设备/无GMS、可控凭据 E2E、定时发送 E2E 等；无录屏/logcat/矩阵的细项不记为通过。
 
 **发布 / 工程**
 
 | 项 | 状态 | 说明 |
 |---|---|---|
-| 扫码登录端到端 | 未验证 | 网页出码 → App 扫码确认 → 网页登录未真机走通；`/login/qr` 线上已确认 200 |
+| 扫码登录端到端 | 有用户实测反馈，边界待验证 | 2026-11-09 用户反馈“扫码登录已测试没问题”（单设备/GMS，未提供录屏/logcat/矩阵）；暗光/对焦/方向、无效码提示、窄屏排布等仍需按 P1 矩阵复验；`/login/qr` 线上 200 需控制台/线上确认时再更新 |
 | 相机预览方向 / 对焦 / 暗光成功率 | 未验证 | 0.3.3 只通过 adb 日志确认帧能到、旋转不抛异常 |
 | 提示音与震动 | 未验证 | 音量、时长、听感未验证 |
 | 无效二维码提示 | 未验证 | 仅代码层确认文案与去重 |
@@ -367,12 +367,14 @@ OAuth 的 `*_client_id`、`*_callback_url` 以及开关（`github_switch`、`goo
 
 ## 10. 交接时已发现的不一致（先确认再动手）
 
-1. **路线图版本段过期**：`docs/路线图-2026-11.md` 写「最后正式 tag `v0.2.5`、下一版 `0.2.6`」，实际最新 tag 是 `v0.3.3`；以 GitHub tag 为准。
-2. **`nextReleaseName` 过期**：`app/build.gradle.kts` 仍写 `"0.3.3"`，下次发版前改 `0.3.4`。
-3. **Latest 指针未移动**：`v0.3.3` 不是 GitHub 的 Latest（仍指向 `v0.3.2`），页面手动确认。
+> 2026-11-09 只读核对更新（证据：本地 Git `HEAD=d0ff80d`、tag 含 `v0.3.4`、`app/build.gradle.kts:63-64`；云端未核验）
+
+1. **路线图/文档版本段易过期**：以 Git tag + 仓库当前状态为准；核对时本地 tag 含 `v0.3.4`，`nextReleaseName="0.3.4"`。GitHub Latest/PRERELEASE/Release 资产需控制台确认（**阻塞**）。
+2. **`nextReleaseName`（历史）**：早晨版曾记录仍为 `0.3.3`；2026-11-09 仓库已为 `0.3.4`（`app/build.gradle.kts:63-64`），发下一个版本前再推进。
+3. **Latest 指针/Release 状态**：需在 GitHub Releases 页确认（无权限，**阻塞**，不臆测）。
 4. **gotify-plus 的 google-services secret 未被使用**：工作流没有解码步骤，构建也没接 google-services 插件；先确认是否预留。
-5. **服务端仓库未收口**：17 项未提交变更，且 CI 部署不可用；交接前先 `git status` 与线上版本对齐。
-6. **本机设备状态过期**：路线图里的 `0.2.6-dev.15` / 206 是旧装机记录，当前正式版已到 0.3.3；设备验证记录不能直接复用。
+5. **服务端仓库未收口**：服务端未提交变更与 CI 部署状态需在服务端仓库/控制台核对（**阻塞**）。
+6. **设备/本地验证记录时效**：旧装机/版本记录不能直接复用；2026-11-09 用户反馈扫码已测没问题、FCM 已通、R28M22RRZ6T 可调试、日常暂无大问题（单设备/GMS，边界/矩阵仍待验证）。
 
 ---
 
