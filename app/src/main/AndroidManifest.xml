@@ -51,6 +51,13 @@
             android:name="android.app.shortcuts"
             android:resource="@xml/shortcuts" />
 
+        <!-- 通行密钥：FIDO2 API（Android 13 及以下 Credential Manager 走 GMS 桥）
+             要求 app 显式声明要加载的 Digital Asset Links 文件，否则 GMS 报
+             50152 RP ID cannot be validated，界面提示「此应用不支持通行密钥」。 -->
+        <meta-data
+            android:name="asset_statements"
+            android:resource="@string/asset_statements" />
+
         <activity
             android:name=".MainActivity"
             android:exported="true"

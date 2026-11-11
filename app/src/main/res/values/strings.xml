@@ -2,4 +2,7 @@
 <resources>
     <string name="app_name">OTSMail</string>
     <string name="shortcut_scan_qr">扫一扫</string>
+    <!-- FIDO2 / Android 13 及以下 Credential Manager（GMS 桥）要求的域名关联声明：
+         告诉 GMS 去哪加载 assetlinks.json。缺这一项时 GMS 直接报 50152 RP ID cannot be validated。 -->
+    <string name="asset_statements" translatable="false">[{\"include\":\"https://mail.otscup.com/.well-known/assetlinks.json\"}]</string>
 </resources>
