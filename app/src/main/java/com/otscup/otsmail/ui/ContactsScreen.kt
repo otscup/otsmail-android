@@ -35,7 +35,13 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Star
+import androidx.compose.material.icons.outlined.StarBorder
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.otscup.otsmail.R
 import com.otscup.otsmail.data.Api
@@ -72,6 +78,7 @@ fun ContactsScreen(session: Session, onBack: () -> Unit, onWrite: (String) -> Un
     var loading by remember { mutableStateOf(true) }
     var error by remember { mutableStateOf("") }
     var reloadTick by remember { mutableIntStateOf(0) }
+    var vipOnly by remember { mutableStateOf(false) }
     // null = 面板关闭；Api.ContactItem(id=0) = 新建；否则是编辑已有联系人
     var editing by remember { mutableStateOf<Api.ContactItem?>(null) }
     var deleting by remember { mutableStateOf<Api.ContactItem?>(null) }
@@ -132,6 +139,41 @@ fun ContactsScreen(session: Session, onBack: () -> Unit, onWrite: (String) -> Un
             }
         }
 
+        val vipCount = contacts.count { it.item.isVip }
+        if (contacts.isNotEmpty()) {
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 6.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Box(
+                    Modifier
+                        .clip(RoundedCornerShape(OT.dimens.rPill.dp))
+                        .background(if (!vipOnly) c.bgPressed else c.bgInput)
+                        .tapArea { vipOnly = false }
+                        .padding(horizontal = 12.dp, vertical = 6.dp),
+                ) {
+                    Text("全部 (${contacts.size})", style = t.caption1, color = if (!vipOnly) c.label else c.label2)
+                }
+                Box(
+                    Modifier
+                        .clip(RoundedCornerShape(OT.dimens.rPill.dp))
+                        .background(if (vipOnly) Color(0xFFFFB300).copy(alpha = 0.18f) else c.bgInput)
+                        .tapArea { vipOnly = true }
+                        .padding(horizontal = 12.dp, vertical = 6.dp),
+                ) {
+                    Text(
+                        "⭐ 特别关注 ($vipCount)",
+                        style = t.caption1.copy(fontWeight = if (vipOnly) FontWeight.Bold else FontWeight.Normal),
+                        color = if (vipOnly) Color(0xFFD97706) else c.label2,
+                    )
+                }
+            }
+        }
+
+        val displayContacts = if (vipOnly) contacts.filter { it.item.isVip } else contacts
+
         when {
             error.isNotEmpty() -> Text(error, style = t.body, color = c.red, modifier = Modifier.padding(16.dp))
             loading -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -140,8 +182,11 @@ fun ContactsScreen(session: Session, onBack: () -> Unit, onWrite: (String) -> Un
             contacts.isEmpty() -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                 Text("还没有联系人", style = t.footnote, color = c.label2)
             }
+            vipOnly && displayContacts.isEmpty() -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                Text("暂无特别关注联系人，可点击联系人右侧星标添加", style = t.footnote, color = c.label2)
+            }
             else -> {
-                val grouped = contacts.groupBy { it.letter }.toList()
+                val grouped = displayContacts.groupBy { it.letter }.toList()
                 Box(Modifier.fillMaxSize()) {
                     LazyColumn(state = listState, modifier = Modifier.fillMaxSize()) {
                         grouped.forEach { (letter, rows) ->
@@ -161,10 +206,23 @@ fun ContactsScreen(session: Session, onBack: () -> Unit, onWrite: (String) -> Un
                                         ) {
                                             OTAvatar(row.item.name, size = 36)
                                             Column(Modifier.weight(1f)) {
-                                                Text(
-                                                    row.item.name, style = t.body, color = c.label,
-                                                    maxLines = 1, overflow = TextOverflow.Ellipsis,
-                                                )
+                                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                                    Text(
+                                                        row.item.name, style = t.body, color = c.label,
+                                                        maxLines = 1, overflow = TextOverflow.Ellipsis,
+                                                    )
+                                                    if (row.item.isVip) {
+                                                        Spacer(Modifier.width(6.dp))
+                                                        Box(
+                                                            Modifier
+                                                                .clip(RoundedCornerShape(4.dp))
+                                                                .background(Color(0xFFFFB300).copy(alpha = 0.15f))
+                                                                .padding(horizontal = 5.dp, vertical = 1.dp),
+                                                        ) {
+                                                            Text("⭐ VIP", style = t.caption2.copy(fontWeight = FontWeight.Bold), color = Color(0xFFD97706))
+                                                        }
+                                                    }
+                                                }
                                                 Text(
                                                     if (row.item.group.isEmpty()) row.item.email
                                                     else "${row.item.email} · ${row.item.group}",
@@ -172,10 +230,34 @@ fun ContactsScreen(session: Session, onBack: () -> Unit, onWrite: (String) -> Un
                                                     maxLines = 1, overflow = TextOverflow.Ellipsis,
                                                 )
                                             }
-                                            Icon(
-                                                painterResource(R.drawable.ot_chevron_right), contentDescription = null,
-                                                tint = c.label3, modifier = Modifier.size(18.dp),
-                                            )
+                                            Box(
+                                                Modifier
+                                                    .size(36.dp)
+                                                    .clip(CircleShape)
+                                                    .tapArea {
+                                                        scope.launch {
+                                                            runCatching { Api.contactToggleVip(row.item) }
+                                                                .onSuccess { reloadTick++ }
+                                                        }
+                                                    },
+                                                contentAlignment = Alignment.Center,
+                                            ) {
+                                                if (row.item.isVip) {
+                                                    Icon(
+                                                        Icons.Filled.Star,
+                                                        contentDescription = "取消特别关注",
+                                                        tint = Color(0xFFFFB300),
+                                                        modifier = Modifier.size(20.dp),
+                                                    )
+                                                } else {
+                                                    Icon(
+                                                        Icons.Outlined.StarBorder,
+                                                        contentDescription = "设为特别关注",
+                                                        tint = c.label3,
+                                                        modifier = Modifier.size(20.dp),
+                                                    )
+                                                }
+                                            }
                                         }
                                     }
                                 }
@@ -285,6 +367,7 @@ private fun ContactEditSheet(
     var email by remember(contact) { mutableStateOf(contact.email) }
     var group by remember(contact) { mutableStateOf(contact.group) }
     var remark by remember(contact) { mutableStateOf(contact.remark) }
+    var isVip by remember(contact) { mutableStateOf(contact.isVip) }
     var err by remember(contact) { mutableStateOf("") }
     var busy by remember(contact) { mutableStateOf(false) }
     val isNew = contact.id <= 0
@@ -334,6 +417,13 @@ private fun ContactEditSheet(
         }
         OTDivider(inset = 16)
         OTFieldRow(label = "备注", value = remark, onValueChange = { remark = it }, hint = "可选", singleLine = false)
+        OTDivider(inset = 16)
+        OTSwitchRow(
+            title = "特别关注 (VIP 联系人)",
+            subtitle = "在收件箱中突出显示 ⭐ VIP 徽章",
+            checked = isVip,
+            onChange = { isVip = it },
+        )
 
         if (err.isNotEmpty()) {
             Text(err, style = t.footnote, color = c.red, modifier = Modifier.padding(horizontal = 20.dp, vertical = 6.dp))
@@ -350,7 +440,15 @@ private fun ContactEditSheet(
                     enabled = !busy && emailOk,
                 ) {
                     busy = true
-                    onSave(name.trim(), email.trim(), group.trim(), remark.trim()) { message ->
+                    val finalGroup = if (isVip && group.isBlank()) "VIP" else group
+                    val finalRemark = if (isVip && !remark.contains("VIP", ignoreCase = true)) {
+                        if (remark.isBlank()) "VIP特别关注" else "$remark [VIP]"
+                    } else if (!isVip) {
+                        remark.replace("[VIP]", "").replace("(VIP)", "").replace("VIP特别关注", "").replace("特别关注", "").trim()
+                    } else {
+                        remark.trim()
+                    }
+                    onSave(name.trim(), email.trim(), finalGroup.trim(), finalRemark) { message ->
                         busy = false
                         err = message
                     }

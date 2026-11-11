@@ -8,6 +8,8 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.annotation.DrawableRes
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -37,6 +39,7 @@ import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Check
 import androidx.compose.material.icons.outlined.ChevronRight
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.Person
@@ -209,6 +212,8 @@ fun ComposeScreen(
     val attachments = remember { mutableListOf<JSONObject>() }
     var picks by remember { mutableStateOf(emptyList<String>()) }
     val isExt = extId > 0
+    // 定时发送要绑定创建时的登录身份与服务器（见 ScheduledSendRunner.identityMismatch）
+    val session = remember { Session(ctx) }
     // 第三方邮箱发信：签名是 otsmail 账号的，不能塞进别人的 SMTP 发件里
     val signature = remember { if (isExt) "" else Session(ctx).signature }
     // 草稿隔离键：第三方写信页用负的 extId 单独命名空间，
@@ -219,6 +224,7 @@ fun ComposeScreen(
     var fromEmail by remember { mutableStateOf(if (isExt) extAddress else "") }
     var accounts by remember { mutableStateOf(listOf<Pair<Long, String>>()) }
     var pickingFrom by remember { mutableStateOf(false) }
+    var isRichText by remember { mutableStateOf(true) }
     var showCc by remember { mutableStateOf(cc.isNotEmpty()) }
     var showBcc by remember { mutableStateOf(false) }
     // 新建写信页时提示恢复本账号最近一份未完成草稿（不自动覆盖用户正在写的空白页）
@@ -772,11 +778,15 @@ fun ComposeScreen(
             if (sig.isNotEmpty()) append(if (body.text.isEmpty()) sig else "\n\n$sig")
         }.ifEmpty { " " }
         // 显式声明 charset=utf-8：引用里可能带原信的旧 charset 声明，缺省声明会让收件端按错编码解
-        val html = "<!DOCTYPE html><html><head><meta charset=\"utf-8\"></head><body>" +
-            textToHtml(body.text) +
-            (if (sig.isEmpty()) "" else "<p>${escapeHtml(sig).replace("\n", "<br>")}</p>") +
-            quotedHtml +
-            "</body></html>"
+        val html = if (isRichText) {
+            "<!DOCTYPE html><html><head><meta charset=\"utf-8\"></head><body>" +
+                textToHtml(body.text) +
+                (if (sig.isEmpty()) "" else "<p>${escapeHtml(sig).replace("\n", "<br>")}</p>") +
+                quotedHtml +
+                "</body></html>"
+        } else {
+            ""
+        }
         return PendingEmail(
             accountId = fromId,
             to = recipients,
@@ -837,6 +847,9 @@ fun ComposeScreen(
                 atLocal = ScheduledSendTime.localStamp(at),
                 draftId = p.draftId,
                 fromEmail = fromEmail,
+                // 到点执行时校验：换号/换服务器后不能拿新登录态去发旧定时邮件
+                base = session.base,
+                userId = session.userId,
             )
             val saved = withContext(Dispatchers.IO) {
                 if (!ScheduledSendStore.upsert(ctx, mail)) return@withContext null
@@ -1005,7 +1018,17 @@ fun ComposeScreen(
             } else if (accounts.isNotEmpty()) {
                 Column(Modifier.fillMaxWidth().background(c.bgCard)) {
                     Row(
-                        Modifier.fillMaxWidth().height(48.dp).tapArea { pickingFrom = !pickingFrom }.padding(horizontal = 16.dp),
+                        Modifier
+                            .fillMaxWidth()
+                            .height(48.dp)
+                            .tapArea {
+                                if (accounts.size > 1) {
+                                    pickingFrom = true
+                                } else {
+                                    Toast.makeText(ctx, "当前仅有一个发件身份", Toast.LENGTH_SHORT).show()
+                                }
+                            }
+                            .padding(horizontal = 16.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         Text("发件人", style = t.body, color = c.label, modifier = Modifier.width(56.dp))
@@ -1015,27 +1038,17 @@ fun ComposeScreen(
                             modifier = Modifier.weight(1f),
                             textAlign = TextAlign.Start,
                         )
-                        Icon(Icons.Outlined.ChevronRight, contentDescription = null, tint = c.label3, modifier = Modifier.size(14.dp))
-                    }
-                    if (pickingFrom) {
-                        accounts.forEach { (id, email) ->
-                            OTDivider(inset = 16)
-                            Row(
-                                Modifier.fillMaxWidth().heightIn(min = 44.dp).tapArea {
-                                    fromId = id
-                                    fromEmail = email
-                                    pickingFrom = false
-                                    touched = true
-                                }.padding(horizontal = 16.dp),
-                                verticalAlignment = Alignment.CenterVertically,
+                        if (accounts.size > 1) {
+                            Box(
+                                Modifier
+                                    .clip(RoundedCornerShape(OT.dimens.rPill.dp))
+                                    .background(c.bgInput)
+                                    .padding(horizontal = 8.dp, vertical = 3.dp),
                             ) {
-                                Text(
-                                    email, style = t.body,
-                                    color = if (id == fromId) c.blue else c.label,
-                                    modifier = Modifier.weight(1f),
-                                )
-                                if (id == fromId) Text("当前", style = t.caption1, color = c.blue)
+                                Text("切换", style = t.caption1.copy(fontWeight = FontWeight.Medium), color = c.blue)
                             }
+                        } else {
+                            Icon(Icons.Outlined.ChevronRight, contentDescription = null, tint = c.label3, modifier = Modifier.size(14.dp))
                         }
                     }
                 }
@@ -1391,15 +1404,47 @@ fun ComposeScreen(
                 horizontalArrangement = Arrangement.spacedBy(2.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                ToolbarButton(text = "B", weight = FontWeight.Bold) { wrap("**", "**") }
-                ToolbarButton(text = "I", italic = true) { wrap("*", "*") }
-                ToolbarButton(text = "U", underline = true) { wrap("__", "__") }
-                ToolbarButton(text = "H", weight = FontWeight.Bold) { prefixLine("# ") }
-                ToolbarIcon(R.drawable.ot_list, "项目符号列表") { prefixLine("- ") }
-                ToolbarButton(text = "1.") { prefixLine("1. ") }
-                ToolbarIcon(R.drawable.ot_quote, "引用") { prefixLine("> ") }
-                ToolbarIcon(R.drawable.ot_link, "插入链接") { insertLink() }
-                ToolbarIcon(R.drawable.ot_image, "插入图片（作为附件）") { imagePicker.launch(arrayOf("image/*")) }
+                // 富文本 / 纯文本 切换药丸
+                Box(
+                    Modifier
+                        .clip(RoundedCornerShape(OT.dimens.rPill.dp))
+                        .background(if (isRichText) c.blue.copy(alpha = 0.12f) else c.bgInput)
+                        .clickable {
+                            isRichText = !isRichText
+                            Toast.makeText(
+                                ctx,
+                                if (isRichText) "已切换为富文本模式" else "已切换为纯文本模式",
+                                Toast.LENGTH_SHORT,
+                            ).show()
+                        }
+                        .padding(horizontal = 10.dp, vertical = 6.dp),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        if (isRichText) "富文本" else "纯文本",
+                        style = t.caption2.copy(fontWeight = FontWeight.SemiBold),
+                        color = if (isRichText) c.blue else c.label2,
+                    )
+                }
+                Spacer(Modifier.width(4.dp))
+                if (isRichText) {
+                    ToolbarButton(text = "B", weight = FontWeight.Bold) { wrap("**", "**") }
+                    ToolbarButton(text = "I", italic = true) { wrap("*", "*") }
+                    ToolbarButton(text = "U", underline = true) { wrap("__", "__") }
+                    ToolbarButton(text = "H", weight = FontWeight.Bold) { prefixLine("# ") }
+                    ToolbarIcon(R.drawable.ot_list, "项目符号列表") { prefixLine("- ") }
+                    ToolbarButton(text = "1.") { prefixLine("1. ") }
+                    ToolbarIcon(R.drawable.ot_quote, "引用") { prefixLine("> ") }
+                    ToolbarIcon(R.drawable.ot_link, "插入链接") { insertLink() }
+                    ToolbarIcon(R.drawable.ot_image, "插入图片（作为附件）") { imagePicker.launch(arrayOf("image/*")) }
+                } else {
+                    Text(
+                        "${body.text.length} 字",
+                        style = t.caption1,
+                        color = c.label3,
+                        modifier = Modifier.padding(horizontal = 8.dp),
+                    )
+                }
                 ToolbarIcon(R.drawable.ot_attach, "添加附件") {
                     picker.launch(arrayOf("image/*", "application/pdf", "text/plain", "*/*"))
                 }
@@ -1455,6 +1500,94 @@ fun ComposeScreen(
                 scheduleSend(at)
             },
         )
+    }
+
+    if (pickingFrom) {
+        SenderAccountSheet(
+            accounts = accounts,
+            currentId = fromId,
+            onSelect = { id, email ->
+                fromId = id
+                fromEmail = email
+                pickingFrom = false
+                touched = true
+            },
+            onDismiss = { pickingFrom = false },
+        )
+    }
+}
+
+/** 卡片化发件身份切换抽屉 */
+@Composable
+private fun SenderAccountSheet(
+    accounts: List<Pair<Long, String>>,
+    currentId: Long,
+    onSelect: (Long, String) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val c = OT.colors
+    val t = OT.type
+
+    OTSheet(onDismiss = onDismiss) {
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 20.dp, vertical = 8.dp),
+        ) {
+            Text("选择发件身份", style = t.title3, color = c.label)
+            Spacer(Modifier.height(4.dp))
+            Text("将以此邮箱地址作为发件人投递本封邮件", style = t.caption1, color = c.label3)
+            Spacer(Modifier.height(14.dp))
+
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                accounts.forEach { (id, email) ->
+                    val isSelected = id == currentId
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(OT.dimens.rMd.dp))
+                            .background(if (isSelected) c.blue.copy(alpha = 0.10f) else c.bgInput)
+                            .border(
+                                width = if (isSelected) 1.5.dp else 0.dp,
+                                color = if (isSelected) c.blue else androidx.compose.ui.graphics.Color.Transparent,
+                                shape = RoundedCornerShape(OT.dimens.rMd.dp),
+                            )
+                            .clickable {
+                                onSelect(id, email)
+                            }
+                            .padding(14.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        OTAvatar(email, size = 38)
+                        Spacer(Modifier.width(12.dp))
+                        Column(Modifier.weight(1f)) {
+                            Text(
+                                email,
+                                style = t.subhead.copy(fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Normal),
+                                color = if (isSelected) c.blue else c.label,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                            Spacer(Modifier.height(2.dp))
+                            Text(
+                                "原生邮箱账户",
+                                style = t.caption2,
+                                color = c.label3,
+                            )
+                        }
+                        if (isSelected) {
+                            Icon(
+                                Icons.Outlined.Check,
+                                contentDescription = "当前选中",
+                                tint = c.blue,
+                                modifier = Modifier.size(20.dp),
+                            )
+                        }
+                    }
+                }
+            }
+            Spacer(Modifier.height(16.dp))
+        }
     }
 }
 

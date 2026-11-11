@@ -37,6 +37,7 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Fingerprint
 import androidx.compose.material.icons.outlined.Mail
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
@@ -74,6 +75,7 @@ import com.otscup.otsmail.data.OAuthCallbackBus
 import com.otscup.otsmail.data.OAuthPendingStore
 import com.otscup.otsmail.data.OAuthRequest
 import com.otscup.otsmail.data.OAuthTiming
+import com.otscup.otsmail.data.PasskeyManager
 import com.otscup.otsmail.data.Session
 import com.otscup.otsmail.data.ServerAddress
 import com.otscup.otsmail.data.friendlyError
@@ -144,6 +146,7 @@ fun LoginScreen(session: Session, onLoggedIn: () -> Unit) {
     var twoFactorNeeded by remember { mutableStateOf(false) }
     var registerOpen by remember { mutableStateOf(false) }
     var forgotOpen by remember { mutableStateOf(false) }
+    var passkeyBusy by remember { mutableStateOf(false) }
     val oauthStore = remember { OAuthPendingStore(context) }
     // 进程被杀后冷启动时，授权上下文从本地恢复（PKCE verifier 不能丢）
     var oauthPending by remember { mutableStateOf(oauthStore.load()) }
@@ -173,6 +176,8 @@ fun LoginScreen(session: Session, onLoggedIn: () -> Unit) {
             OAuthTiming.mark(context, "me-ok")
             session.token = token
             session.accountId = me.accountId
+            // 定时发送等跨会话任务要靠 userId 校验「是否还是同一个登录用户」
+            session.userId = me.userId
             session.name = me.name
             session.email = me.email.ifEmpty { fallbackEmail }
             session.signature = me.signature
@@ -233,6 +238,30 @@ fun LoginScreen(session: Session, onLoggedIn: () -> Unit) {
                 }
             }
             loading = false
+        }
+    }
+
+    fun startPasskeyLogin() {
+        if (passkeyBusy || loading) return
+        passkeyBusy = true
+        error = ""
+        scope.launch {
+            runCatching {
+                session.base = base.trim()
+                session.loginDomain = domain
+                session.apply()
+                Api.base = session.base
+                val options = Api.passkeyLoginOptions()
+                val assertion = PasskeyManager.authenticatePasskey(context, options)
+                val token = Api.passkeyLoginVerify(assertion)
+                applyLogin(token, "")
+            }.onSuccess {
+                onLoggedIn()
+            }.onFailure { e ->
+                val msg = friendlyError(e)
+                error = if (msg.isNotBlank()) msg else (e.message ?: "通行密钥验证失败")
+            }
+            passkeyBusy = false
         }
     }
 
@@ -650,6 +679,41 @@ fun LoginScreen(session: Session, onLoggedIn: () -> Unit) {
                     Text("注册", style = t.footnote, color = loginAccent())
                 }
             }
+        }
+
+        Spacer(Modifier.height(16.dp))
+        // 通行密钥免密登录
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .height(48.dp)
+                .clip(RoundedCornerShape(OT.dimens.rMd.dp))
+                .background(c.bgInput)
+                .clickable(enabled = !loading && !passkeyBusy) { startPasskeyLogin() }
+                .padding(horizontal = 14.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.Center,
+        ) {
+            if (passkeyBusy) {
+                CircularProgressIndicator(
+                    Modifier.size(18.dp),
+                    strokeWidth = 2.dp,
+                    color = c.label,
+                )
+            } else {
+                Icon(
+                    Icons.Outlined.Fingerprint,
+                    contentDescription = null,
+                    tint = c.label,
+                    modifier = Modifier.size(20.dp),
+                )
+            }
+            Spacer(Modifier.width(8.dp))
+            Text(
+                if (passkeyBusy) "正在验证通行密钥…" else "使用通行密钥登录 (Passkey)",
+                style = t.subhead.copy(fontWeight = FontWeight.Medium),
+                color = c.label,
+            )
         }
 
         val providers = oauthProviders(config)

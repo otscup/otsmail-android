@@ -31,12 +31,19 @@ import androidx.compose.ui.unit.dp
 import com.otscup.otsmail.data.Api
 import com.otscup.otsmail.data.ExtBindStep
 import com.otscup.otsmail.data.ExtBinder
+import com.otscup.otsmail.data.ExtMailStore
 import com.otscup.otsmail.data.ExtProviders
+import com.otscup.otsmail.data.ExtSync
+import com.otscup.otsmail.data.ExtVisibility
+import com.otscup.otsmail.data.SnoozeReminderStore
 import com.otscup.otsmail.push.ExtIdleManager
 import com.otscup.otsmail.push.PushNotifications
 import com.otscup.otsmail.push.PushSettings
+import com.otscup.otsmail.schedule.SnoozeScheduler
 import com.otscup.otsmail.ui.theme.OT
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 private data class BoundAccount(
     val extId: Long,
@@ -67,6 +74,8 @@ fun ExtBindScreen(
     val binder = remember { ExtBinder() }
 
     var bound by remember { mutableStateOf<List<BoundAccount>>(emptyList()) }
+    /** 已隐藏的账户：只影响收件箱展示，不清数据、不影响同步与稍后提醒 */
+    var hiddenIds by remember { mutableStateOf<Set<Long>>(emptySet()) }
     var pendingRemove by remember { mutableStateOf<BoundAccount?>(null) }
     var pushMode by remember { mutableStateOf(PushSettings.extPushMode(context)) }
     // 通知权限被系统关掉时，绑定成功也收不到提醒：这里与绑定结果一起明确提示
@@ -92,7 +101,10 @@ fun ExtBindScreen(
         }.getOrDefault(emptyList())
     }
 
-    LaunchedEffect(Unit) { reload() }
+    LaunchedEffect(Unit) {
+        reload()
+        hiddenIds = ExtVisibility.hidden(context)
+    }
 
     Column(Modifier.fillMaxSize().background(c.bgGrouped)) {
         OTNavBar(
@@ -211,10 +223,26 @@ fun ExtBindScreen(
                                 )
                             },
                         )
+                        // 隐藏 ≠ 解绑：只改收件箱是否展示，邮件、同步、稍后提醒都不动
+                        OTSwitchRow(
+                            title = "在收件箱中显示",
+                            checked = item.extId !in hiddenIds,
+                            subtitle = if (item.extId in hiddenIds) {
+                                "已隐藏：不在收件箱、搜索和筛选里出现；邮件和提醒都保留，随时可以打开恢复。"
+                            } else {
+                                "关闭后只是不在收件箱显示，与「移除」不同。"
+                            },
+                        ) { on ->
+                            ExtVisibility.setHidden(context, item.extId, !on)
+                            hiddenIds = ExtVisibility.hidden(context)
+                            // 收件箱的 extAccounts 只在同步/切号时重读，这里借此让它带新偏好重算
+                            ExtSync.changed()
+                            onToast(if (on) "已恢复显示" else "已在收件箱隐藏，邮件和提醒都保留")
+                        }
                     }
                 }
                 Text(
-                    "解绑只删除服务端保存的凭据与本地账户行；原邮箱里的邮件不受影响。",
+                    "「在收件箱中显示」只是显不显示，随时可恢复；「移除」才会解绑，删除服务端保存的凭据与本地账户行。两者都不影响原邮箱里的邮件。",
                     style = t.footnote, color = c.label2,
                     modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp),
                 )
@@ -234,6 +262,16 @@ fun ExtBindScreen(
                     scope.launch {
                         runCatching { Api.deleteExtAccount(target.extId) }
                             .onSuccess {
+                                // 服务端解绑成功后同步清掉这个账户的本地镜像（正文/地址/游标/已发送副本）；
+                                // 本地清理失败不影响解绑结果，下次同步也不会再拉到这个账户
+                                withContext(Dispatchers.IO) {
+                                    runCatching { ExtMailStore.deleteAccount(context, target.extId) }
+                                }
+                                // 解绑即删该邮箱的稍后提醒（数据 + 闹钟），同账号的 OTS 与其他第三方提醒不动
+                                runCatching {
+                                    SnoozeScheduler.cancelAlarmsForExt(context, target.extId)
+                                    SnoozeReminderStore.clearForExt(context, target.extId)
+                                }
                                 onToast("已移除")
                                 // 事件驱动：立刻断开这个账户的 IDLE 连接，不必等它下次重连才发现
                                 ExtIdleManager.onAccountsChanged(context)

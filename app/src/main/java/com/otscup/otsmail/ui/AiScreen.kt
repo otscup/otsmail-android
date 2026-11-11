@@ -78,7 +78,29 @@ fun AiScreen(session: Session, onBack: () -> Unit, onOpenCompose: () -> Unit) {
         if (busy) listState.animateScrollToItem((msgs.lastIndex + 1).coerceAtLeast(0))
     }
 
+    fun runAutoClassify() {
+        if (busy) return
+        busy = true
+        msgs.add(Msg("me", "执行全箱 AI 智能分类整理"))
+        scope.launch {
+            runCatching {
+                Api.aiClassify()
+            }.onSuccess { res ->
+                val count = res.optInt("count", res.optInt("classifiedCount", 0))
+                msgs.add(Msg("ai", if (count > 0) "已成功完成全箱智能分类，整理了 $count 封邮件。" else "全箱智能分类已完成，当前邮件已处于最新归类。"))
+            }.onFailure { e ->
+                msgs.add(Msg("ai", "智能分类未能完成：${friendlyError(e)}"))
+            }
+            busy = false
+            listState.animateScrollToItem(msgs.lastIndex.coerceAtLeast(0))
+        }
+    }
+
     fun send(text: String) {
+        if (text == "🤖 智能分类整理全箱") {
+            runAutoClassify()
+            return
+        }
         val q = text.trim()
         if (q.isEmpty() || busy) return
         busy = true
@@ -134,8 +156,8 @@ fun AiScreen(session: Session, onBack: () -> Unit, onOpenCompose: () -> Unit) {
             item { Spacer(Modifier.height(d.sp2.dp)) }
         }
 
-        // 快捷指令（样张 .aichips：FlowRow 换行 + 4 个预设）
-        val presets = listOf("汇总今天的未读", "找最近 7 天的验证码", "清理推广邮件", "起草一封新邮件")
+        // 快捷指令（样张 .aichips：FlowRow 换行 + 预设）
+        val presets = listOf("汇总今天的未读", "找最近 7 天的验证码", "🤖 智能分类整理全箱", "清理推广邮件", "起草一封新邮件")
         FlowRow(
             modifier = Modifier.fillMaxWidth().padding(horizontal = d.sp3.dp, vertical = d.sp1.dp),
             horizontalArrangement = Arrangement.spacedBy(d.sp2.dp),

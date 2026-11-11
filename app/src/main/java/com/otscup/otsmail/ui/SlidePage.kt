@@ -43,7 +43,13 @@ import kotlin.math.abs
  * shortcut: 拖拽时底下的页面不会跟着视差后移（iOS 是这样做的），等需要更强的层次感再补。
  */
 @Composable
-fun SlidePage(onDismiss: () -> Unit, content: @Composable () -> Unit) {
+fun SlidePage(onDismiss: () -> Unit, enabled: Boolean = true, content: @Composable () -> Unit) {
+    if (!enabled) {
+        androidx.compose.foundation.layout.Box(Modifier.fillMaxSize()) {
+            content()
+        }
+        return
+    }
     val scope = rememberCoroutineScope()
     val widthPx = with(LocalDensity.current) { LocalConfiguration.current.screenWidthDp.dp.toPx() }
     val anim = remember { Animatable(widthPx) }

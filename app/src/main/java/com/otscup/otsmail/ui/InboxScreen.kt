@@ -1,5 +1,6 @@
 package com.otscup.otsmail.ui
 
+import android.widget.Toast
 import androidx.compose.foundation.Canvas
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
@@ -100,14 +101,18 @@ import com.otscup.otsmail.push.ExtIdleManager
 import com.otscup.otsmail.push.PushNotifications
 import com.otscup.otsmail.data.Api
 import com.otscup.otsmail.data.ExtLocalMail
+import com.otscup.otsmail.data.ExtImapActions
 import com.otscup.otsmail.data.ExtMailStore
 import com.otscup.otsmail.data.ExtSync
+import com.otscup.otsmail.data.ExtSyncError
+import com.otscup.otsmail.data.ExtVisibility
 import com.otscup.otsmail.data.InboxMerge
 import com.otscup.otsmail.data.MergedMail
 import com.otscup.otsmail.data.friendlyError
 import com.otscup.otsmail.data.MailCache
 import com.otscup.otsmail.data.MailItem
 import com.otscup.otsmail.data.Session
+import com.otscup.otsmail.data.VerificationCode
 import com.otscup.otsmail.ui.motion.MailSwipeRow
 import com.otscup.otsmail.ui.theme.OT
 import kotlinx.coroutines.CoroutineScope
@@ -271,6 +276,8 @@ fun InboxScreen(
     onOpenQrScan: () -> Unit = {},
     /** 抽屉里的「草稿箱」：本地草稿不进服务端列表，交给 App 打开 DraftsScreen */
     onOpenDrafts: () -> Unit = {},
+    /** 稍后提醒（本机、跟随账号） */
+    onOpenSnooze: () -> Unit = {},
     /** 行内右滑 → 回复：由 App 负责拿原文并进写信页 */
     onSwipeReply: (MailItem) -> Unit = {},
     /** 合并列表里点了第三方邮件：交给 App 打开详情；sent=true 表示点的是本地已发送副本 */
@@ -312,13 +319,18 @@ fun InboxScreen(
     var accounts by remember { mutableStateOf<List<Pair<Long, String>>>(emptyList()) }
     var counts by remember { mutableStateOf<Map<String, Int>>(emptyMap()) }
     var catCounts by remember { mutableStateOf<Map<String, Int>>(emptyMap()) }
+    var codeDialogData by remember { mutableStateOf<Pair<String, String>?>(null) }
 
     // 第三方邮箱：账户摘要（含最近一次同步失败原因）+ 本地已拉取的邮件窗口
     var extAccounts by remember { mutableStateOf<List<ExtAccountRow>>(emptyList()) }
+    /** 被「在收件箱中显示」关掉的第三方账户：只影响展示，数据/同步/提醒照旧 */
+    var hiddenExtIds by remember { mutableStateOf<Set<Long>>(emptySet()) }
     var extMails by remember { mutableStateOf<List<ExtLocalMail>>(emptyList()) }
     /** 第三方列表的分页步进（本地 SQLite 查询，页大小见下方 load 逻辑） */
     var extPage by remember { mutableStateOf(1) }
     var extHasMore by remember { mutableStateOf(false) }
+    /** 第三方写操作进行中（同一时刻只允许一条，避免连点把 IMAP 顺序打乱） */
+    var extWriteBusy by remember { mutableStateOf(false) }
 
     // 第三方邮箱同步状态：进行中/已拉取 N 封/没有新邮件/失败原因，避免「点了同步没反应」
     val extSyncStatus by ExtSync.status.collectAsState()
@@ -362,11 +374,12 @@ fun InboxScreen(
                 }
             }.getOrDefault(emptyList())
         }
-        // 正在筛选的账户已经被解绑：退回「全部」，否则列表会一直空白
+        // 正在筛选的账户已经被解绑或被隐藏：退回「全部」，否则列表会一直空白
+        hiddenExtIds = withContext(Dispatchers.IO) { ExtVisibility.hidden(context) }
         val f = InboxUi.extFilter
         if (f.startsWith("ext:")) {
             val id = f.removePrefix("ext:").toLongOrNull()
-            if (id == null || extAccounts.none { it.extId == id }) InboxUi.extFilter = ""
+            if (id == null || id in hiddenExtIds || extAccounts.none { it.extId == id }) InboxUi.extFilter = ""
         }
     }
 
@@ -420,6 +433,9 @@ fun InboxScreen(
         canSiteSearch = runCatching { Api.me() }.getOrNull()?.let { me ->
             me.type == 0L || me.permKeys.contains("all-email:query") || me.permKeys.contains("*")
         } ?: false
+        if (Api.vipEmails.isEmpty() && !com.otscup.otsmail.BuildConfig.DEMO) {
+            runCatching { Api.contactList() }
+        }
     }
     LaunchedEffect(canSiteSearch) {
         if (!canSiteSearch && InboxUi.searchScope == 2) InboxUi.searchScope = 0
@@ -467,20 +483,27 @@ fun InboxScreen(
     // ---- 合并列表：服务端 email 表（照旧走 MailCache 分页）+ 本地第三方邮件（按窗口补齐）----
     val serverSnapshot = items.toList()
     val hasMoreServer = items.size < store.total
-    // 第三方邮件按信箱取源：收件箱/未读取本地已拉取，已发送取本地发送副本；
-    // 星标/垃圾箱/已删除这些服务端专属箱不再混入第三方邮件（写操作只做了收件箱那套）
+    // 第三方邮件按信箱取源：收件箱/未读/已标星取本地已拉取的，已发送取本地发送副本；
+    // 垃圾箱/已删除这些服务端专属箱不再混入第三方邮件（本地没有 Trash 副本，也就无法恢复）
     val extSourceKind = when (current.key) {
         "sent" -> "sent"
         "receive", "unread" -> "inbox"
+        "starred" -> "starred"
         else -> "none"
     }
     val extFilter = InboxUi.extFilter
     val isExtOnly = extFilter.startsWith("ext:")
-    val filterExtIds = remember(extAccounts, extFilter) {
+    // 被隐藏的账户不进「全部」：列表/搜索/已标星/已发送都走 filterExtIds，一处过滤全对
+    val shownExtAccounts = remember(extAccounts, hiddenExtIds) {
+        extAccounts.filterNot { it.extId in hiddenExtIds }
+    }
+    val filterExtIds = remember(extAccounts, hiddenExtIds, extFilter) {
         when {
             extFilter == "ots" -> emptyList()
-            extFilter.startsWith("ext:") -> listOfNotNull(extFilter.removePrefix("ext:").toLongOrNull())
-            else -> extAccounts.map { it.extId }
+            extFilter.startsWith("ext:") ->
+                listOfNotNull(extFilter.removePrefix("ext:").toLongOrNull())
+                    .filterNot { id -> id in hiddenExtIds }
+            else -> ExtVisibility.visible(extAccounts.map { it.extId }, hiddenExtIds)
         }
     }
     val extAddressOf = remember(extAccounts) { extAccounts.associate { it.extId to it.address } }
@@ -526,7 +549,7 @@ fun InboxScreen(
                 if (extSourceKind == "sent") {
                     ExtMailStore.sentFeed(filterExtIds, floor, limit, keyword)
                 } else {
-                    ExtMailStore.feed(filterExtIds, floor, limit, keyword)
+                    ExtMailStore.feed(filterExtIds, floor, limit, keyword, starredOnly = extSourceKind == "starred")
                 }
             }.getOrDefault(emptyList())
         }
@@ -781,6 +804,10 @@ fun InboxScreen(
         moveProgress = 0 to ids.size
         scope.launch {
             val failed = MailBatchOps.move(target, ids) { done, total -> moveProgress = done to total }
+            // 提交分类 AI 自主学习与纠错反馈
+            ids.forEach { id ->
+                runCatching { Api.emailLearn(id, target) }
+            }
             // 在某个分类里把邮件移走：该视图不再包含它们
             if (category.isNotEmpty() && target != category) ids.forEach { MailCache.removeRow(listKey, it) }
             // 分类是服务端状态：通知列表/计数重新拉，别只改本地缓存
@@ -792,7 +819,7 @@ fun InboxScreen(
             notice = if (failed > 0) {
                 "已移到「$label」${ids.size - failed} 封，$failed 封失败"
             } else {
-                "已移到「$label」${ids.size} 封"
+                "已移到「$label」并完成分类纠错学习"
             }
             loadCounts()
         }
@@ -1062,6 +1089,15 @@ fun InboxScreen(
                                         onOpenDrafts()
                                     },
                                 )
+                                DrawerRow(
+                                    icon = painterResource(R.drawable.ot_bell),
+                                    label = "稍后提醒",
+                                    selected = false,
+                                    onClick = {
+                                        close()
+                                        onOpenSnooze()
+                                    },
+                                )
                             }
                             OTDash()
                             Column(Modifier.padding(horizontal = 8.dp)) {
@@ -1208,7 +1244,7 @@ fun InboxScreen(
                     }
                     // 账户筛选：全部 / 当前 otsmail 账号 / 每个已绑定的第三方邮箱。
                     // 没有第三方账户时整行不出现，不额外占高度。
-                    if (extAccounts.isNotEmpty()) {
+                    if (shownExtAccounts.isNotEmpty()) {
                         Row(
                             Modifier
                                 .fillMaxWidth()
@@ -1219,7 +1255,7 @@ fun InboxScreen(
                         ) {
                             SearchScopeChip("全部", InboxUi.extFilter == "") { InboxUi.extFilter = "" }
                             SearchScopeChip(session.email, InboxUi.extFilter == "ots") { InboxUi.extFilter = "ots" }
-                            extAccounts.forEach { acc ->
+                            extAccounts.filterNot { it.extId in hiddenExtIds }.forEach { acc ->
                                 SearchScopeChip(
                                     acc.address,
                                     InboxUi.extFilter == "ext:${acc.extId}",
@@ -1453,43 +1489,106 @@ fun InboxScreen(
                                     val mail = row.server
                                     val ext = row.ext
                                     if (ext != null) {
-                                        // 第三方邮件：收件箱那批可点开做已读/星标/删除；已发送是本机副本
+                                        // 第三方邮件：收件箱/已标星那批可点开做星标/删除；已发送是本机副本
                                         val isSentRow = extSourceKind == "sent"
-                                        Column(Modifier.fillMaxWidth().background(c.bgCard)) {
-                                            if (index > 0) {
-                                                OTDivider(inset = 60, endInset = 16)
-                                            }
-                                            OTMailRow(
-                                                from = if (isSentRow) {
-                                                    "发给 " + ext.toAddr.ifEmpty { "（无收件人）" }
-                                                } else {
-                                                    ext.fromName.ifEmpty {
-                                                        ext.fromAddr.ifEmpty { "（未知发件人）" }
-                                                    }
-                                                },
-                                                subject = ext.subject.ifEmpty { "（无主题）" },
-                                                snippet = ext.snippet,
-                                                time = TimeFmt.rowTime(row.timeText),
-                                                unread = !isSentRow && !ext.seen,
-                                                starred = !isSentRow && ext.starred,
-                                                onOpen = { onOpenExtDetail(ext.localId, isSentRow) },
-                                                onStar = {
-                                                    notice = if (isSentRow) {
-                                                        "已发送是本机副本，没有可同步的星标"
+                                        val extCode = if (!isSentRow) {
+                                            VerificationCode.find("${ext.subject}\n${ext.snippet}")?.code ?: ""
+                                        } else ""
+                                        val rowBody: @Composable () -> Unit = {
+                                            Column(Modifier.fillMaxWidth().background(c.bgCard)) {
+                                                if (index > 0) {
+                                                    OTDivider(inset = 60, endInset = 16)
+                                                }
+                                                OTMailRow(
+                                                    from = if (isSentRow) {
+                                                        "发给 " + ext.toAddr.ifEmpty { "（无收件人）" }
                                                     } else {
-                                                        "星标请在这封邮件的详情页里操作"
+                                                        ext.fromName.ifEmpty {
+                                                            ext.fromAddr.ifEmpty { "（未知发件人）" }
+                                                        }
+                                                    },
+                                                    subject = ext.subject.ifEmpty { "（无主题）" },
+                                                    snippet = ext.snippet,
+                                                    time = TimeFmt.rowTime(row.timeText),
+                                                    unread = !isSentRow && !ext.seen,
+                                                    starred = !isSentRow && ext.starred,
+                                                    isVip = !isSentRow && Api.isVipSender(ext.fromAddr),
+                                                    onOpen = { onOpenExtDetail(ext.localId, isSentRow) },
+                                                    onStar = {
+                                                        if (isSentRow) {
+                                                            notice = "已发送是本机副本，没有可同步的星标"
+                                                        } else if (!extWriteBusy) {
+                                                            val next = !ext.starred
+                                                            // 乐观更新：先翻本行，失败再翻回来
+                                                            extMails = extMails.map {
+                                                                if (it.localId == ext.localId) it.copy(starred = next) else it
+                                                            }
+                                                            extWriteBusy = true
+                                                            scope.launch {
+                                                                runCatching {
+                                                                    ExtImapActions.setStarred(ext.extId, ext.localId, ext.uid, next)
+                                                                }.onFailure {
+                                                                    extMails = extMails.map { m ->
+                                                                        if (m.localId == ext.localId) m.copy(starred = !next) else m
+                                                                    }
+                                                                    notice = ExtSyncError.reason(it)
+                                                                }
+                                                                extWriteBusy = false
+                                                            }
+                                                        }
+                                                    },
+                                                    showAvatar = showAvatars,
+                                                    accountColor = if (showAvatars) null
+                                                    else accountColorFor(
+                                                        extAccounts.indexOfFirst { it.extId == ext.extId },
+                                                        ext.fromAddr,
+                                                    ),
+                                                    seed = ext.fromAddr,
+                                                    mailboxLabel = extAddressOf[ext.extId],
+                                                    hasAttachment = ext.attachmentsJson.isNotBlank() &&
+                                                        ext.attachmentsJson != "[]",
+                                                    verificationCode = extCode,
+                                                    onCopyCode = { code ->
+                                                        copyToClipboard(context, "验证码", code)
+                                                        Toast.makeText(context, "已复制验证码: $code", Toast.LENGTH_SHORT).show()
+                                                    },
+                                                    onOpenCodeDialog = { code ->
+                                                        codeDialogData = code to ext.fromName.ifEmpty { ext.fromAddr }
+                                                    },
+                                                )
+                                            }
+                                        }
+                                        if (isSentRow) {
+                                            rowBody()
+                                        } else {
+                                            MailSwipeRow(
+                                                enabled = !selectMode && !extWriteBusy,
+                                                // 右滑进详情（回复入口在那里）；左滑删到对方邮箱的回收站，不可撤销
+                                                rightIcon = R.drawable.ot_mail,
+                                                rightLabel = "打开",
+                                                onReply = { onOpenExtDetail(ext.localId, false) },
+                                                onDelete = {
+                                                    if (!extWriteBusy) {
+                                                        val at = extMails.indexOfFirst { it.localId == ext.localId }
+                                                        extMails = extMails.filterNot { it.localId == ext.localId }
+                                                        extWriteBusy = true
+                                                        scope.launch {
+                                                            runCatching {
+                                                                ExtImapActions.deleteToTrash(ext.extId, ext.localId, ext.uid)
+                                                            }.onSuccess {
+                                                                notice = "已移到邮箱回收站（${it.trashName}），可在邮箱网页版恢复"
+                                                            }.onFailure {
+                                                                // 回滚到原位，别让一封没删掉的邮件凭空消失
+                                                                extMails = extMails.toMutableList().also { list ->
+                                                                    if (at >= 0) list.add(at.coerceAtMost(list.size), ext)
+                                                                }
+                                                                notice = ExtSyncError.reason(it)
+                                                            }
+                                                            extWriteBusy = false
+                                                        }
                                                     }
                                                 },
-                                                showAvatar = showAvatars,
-                                                accountColor = if (showAvatars) null
-                                                else accountColorFor(
-                                                    extAccounts.indexOfFirst { it.extId == ext.extId },
-                                                    ext.fromAddr,
-                                                ),
-                                                seed = ext.fromAddr,
-                                                mailboxLabel = extAddressOf[ext.extId],
-                                                hasAttachment = ext.attachmentsJson.isNotBlank() &&
-                                                    ext.attachmentsJson != "[]",
+                                                content = rowBody,
                                             )
                                         }
                                     } else if (mail != null) {
@@ -1506,6 +1605,11 @@ fun InboxScreen(
                                         if (index > 0) {
                                             OTDivider(inset = 60, endInset = 16)
                                         }
+                                        val otsCode = if (mail.type != 1) {
+                                            mail.code.ifEmpty {
+                                                VerificationCode.find("${mail.subject}\n${mail.text}")?.code ?: ""
+                                            }
+                                        } else ""
                                         OTMailRow(
                                             // 已发送箱的行要显示收件人，显示自己没意义
                                             from = if (mail.type == 1) {
@@ -1518,6 +1622,7 @@ fun InboxScreen(
                                             time = TimeFmt.rowTime(mail.time),
                                             unread = mail.unread,
                                             starred = mail.starred,
+                                            isVip = mail.type != 1 && Api.isVipSender(mail.from),
                                             onOpen = {
                                                 if (selectMode) {
                                                     selected = if (mail.emailId in selected) selected - mail.emailId else selected + mail.emailId
@@ -1539,7 +1644,7 @@ fun InboxScreen(
                                                     items[idx] = old.copy(starred = next)
                                                     scope.launch {
                                                         runCatching {
-                                                            if (old.starred) Api.starCancel(old.emailId) else Api.starAdd(old.emailId)
+                                                             if (old.starred) Api.starCancel(old.emailId) else Api.starAdd(old.emailId)
                                                         }.onSuccess {
                                                             // 星标数字与「已标星」列表同步变，避免抽屉徽标和列表打架
                                                             MailCache.setStar(old.emailId, next)
@@ -1563,6 +1668,28 @@ fun InboxScreen(
                                             else accountColorFor(accounts.indexOfFirst { it.first == mail.accountId }, mail.from),
                                             seed = mail.from,
                                             mailboxLabel = mailboxLabelOf(mail),
+                                            verificationCode = otsCode,
+                                            onCopyCode = { code ->
+                                                copyToClipboard(context, "验证码", code)
+                                                Toast.makeText(context, "已复制验证码: $code", Toast.LENGTH_SHORT).show()
+                                            },
+                                            onOpenCodeDialog = { code ->
+                                                codeDialogData = code to (mail.name.ifEmpty { mail.from })
+                                            },
+                                            status = mail.status,
+                                            mailType = mail.type,
+                                            onRetrySend = {
+                                                scope.launch {
+                                                    runCatching {
+                                                        Api.emailRetry(mail.emailId)
+                                                    }.onSuccess {
+                                                        Toast.makeText(context, "已重新排队发送", Toast.LENGTH_SHORT).show()
+                                                        refreshFirst()
+                                                    }.onFailure { err ->
+                                                        Toast.makeText(context, "重试失败: ${friendlyError(err)}", Toast.LENGTH_SHORT).show()
+                                                    }
+                                                }
+                                            },
                                         )
                                     }
                                     }
@@ -1751,6 +1878,19 @@ fun InboxScreen(
             }
             Spacer(Modifier.height(12.dp))
         }
+    }
+
+    codeDialogData?.let { (code, sender) ->
+        VerificationCodeDialog(
+            code = code,
+            sender = sender,
+            onDismiss = { codeDialogData = null },
+            onCopy = {
+                copyToClipboard(context, "验证码", code)
+                Toast.makeText(context, "已复制验证码: $code", Toast.LENGTH_SHORT).show()
+                codeDialogData = null
+            }
+        )
     }
 }
 

@@ -6,11 +6,25 @@ import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Mail
+import androidx.compose.material3.Icon
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
@@ -23,8 +37,10 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.otscup.otsmail.BuildConfig
 import com.otscup.otsmail.data.Api
@@ -37,10 +53,14 @@ import com.otscup.otsmail.data.MailDetail
 import com.otscup.otsmail.data.OAuthTiming
 import com.otscup.otsmail.data.PushManager
 import com.otscup.otsmail.data.QrScanBus
+import com.otscup.otsmail.data.ExtMailStore
 import com.otscup.otsmail.data.Session
+import com.otscup.otsmail.data.SnoozeReminderStore
 import com.otscup.otsmail.push.ExtIdleManager
 import com.otscup.otsmail.push.PushRouter
 import com.otscup.otsmail.schedule.ScheduledSendScheduler
+import com.otscup.otsmail.schedule.SnoozeRouter
+import com.otscup.otsmail.schedule.SnoozeScheduler
 import com.otscup.otsmail.ui.theme.OT
 import com.otscup.otsmail.ui.theme.OTTheme
 import kotlinx.coroutines.launch
@@ -83,8 +103,18 @@ private sealed interface Route {
     data object AllMail : Route
     data object Drafts : Route
     data object ScheduledSends : Route
+    /** 稍后提醒（本机、跟随账号；不改服务端） */
+    data object SnoozeReminders : Route
     /** 扫码确认网页端登录（App 必须已登录；不会拿到 token） */
     data object QrScan : Route
+    /** 在线会话与设备管理 */
+    data object Sessions : Route
+    /** 邮件退订管理中心 */
+    data object Unsubscribe : Route
+    /** 通行密钥（Passkey）凭据管理 */
+    data object Passkey : Route
+    /** 端到端加密（E2EE）安全管理 */
+    data object E2EE : Route
     data object Users : Route
     data object Roles : Route
     data object RegKeys : Route
@@ -162,6 +192,11 @@ fun OtsApp() {
         runCatching { ScheduledSendScheduler.rescheduleAll(context.applicationContext) }
     }
 
+    // 稍后提醒只排当前账号：切号/退出时已取消闹钟，重登同一账号在这里恢复。
+    LaunchedEffect(session.token.isNotEmpty()) {
+        runCatching { SnoozeScheduler.rescheduleForCurrentAccount(context.applicationContext) }
+    }
+
     // 登录后空闲时预热 WebView 引擎：第一次建 WebView 约 0.9~1.4s，不预热就全算在开信耗时里
     LaunchedEffect(session.token.isNotEmpty()) {
         if (session.token.isEmpty()) return@LaunchedEffect
@@ -224,6 +259,32 @@ fun OtsApp() {
         route = Route.ExtDetail(localId)
     }
 
+    // 稍后提醒通知/点击：openList 进入列表；否则打开对应邮件详情（mailId 可能不存在时由详情降级）。
+    LaunchedEffect(session.token.isNotEmpty()) {
+        if (session.token.isEmpty()) return@LaunchedEffect
+        SnoozeRouter.events.collect { ev ->
+            val mailId = ev.mailId?.toLongOrNull()
+            when {
+                ev.openList -> { backStack.clear(); route = Route.SnoozeReminders }
+                // 第三方提醒的 mailId 是 messageId，要靠 extId 反查本地 local_id 才能开详情
+                ev.source == "ext" -> {
+                    val rem = ev.reminderId?.let { SnoozeReminderStore.get(context, it) }
+                    val extId = rem?.extId
+                    val local = if (extId != null && !ev.mailId.isNullOrBlank()) ExtMailStore.lastLocalId(extId, ev.mailId) else 0L
+                    backStack.clear()
+                    if (local > 0L) {
+                        route = Route.ExtDetail(local)
+                    } else {
+                        route = Route.SnoozeReminders
+                        toast("原邮件已不在本地，重新同步后再试")
+                    }
+                }
+                mailId != null -> { backStack.clear(); route = Route.Detail(mailId) }
+                else -> { backStack.clear(); route = Route.SnoozeReminders }
+            }
+        }
+    }
+
     // 第三方邮件提醒：默认走 IMAP IDLE；用户可在外部邮箱页选「关闭第三方邮件提醒」。
     // otsmail 自己的邮件始终走 FCM，与这里无关；判断与停止路径详见 ExtIdleManager，重复调用幂等。
     LaunchedEffect(session.token.isNotEmpty()) {
@@ -235,8 +296,13 @@ fun OtsApp() {
     }
 
     OTTheme {
-        androidx.compose.foundation.layout.Box(Modifier.fillMaxSize().background(OT.colors.bgGrouped)) {
-            when (val r = route) {
+        @Composable
+        fun RenderRoute(
+            r: Route,
+            slideEnabled: Boolean = true,
+            onDismissRoute: () -> Unit = { goBack() },
+        ) {
+            when (r) {
                 Route.ServerSetup -> ServerSetupScreen(
                     session = session,
                     onConfigured = { route = Route.Login },
@@ -301,6 +367,7 @@ fun OtsApp() {
                     onOpenAi = { go(Route.Ai) },
                     onOpenQrScan = { go(Route.QrScan) },
                     onOpenDrafts = { go(Route.Drafts) },
+                    onOpenSnooze = { go(Route.SnoozeReminders) },
                     onOpenExtDetail = { localId, sent -> go(Route.ExtDetail(localId, sent)) },
                     onComposeExt = { extId, accountId, address ->
                         go(
@@ -316,7 +383,7 @@ fun OtsApp() {
                     },
                 )
 
-                Route.Contacts -> SlidePage(onDismiss = { goBack() }) {
+                Route.Contacts -> SlidePage(onDismiss = onDismissRoute, enabled = slideEnabled) {
                     ContactsScreen(
                         session = session,
                         onBack = { goBack() },
@@ -324,7 +391,7 @@ fun OtsApp() {
                     )
                 }
 
-                Route.Ai -> SlidePage(onDismiss = { goBack() }) {
+                Route.Ai -> SlidePage(onDismiss = onDismissRoute, enabled = slideEnabled) {
                     AiScreen(
                         session = session,
                         onBack = { goBack() },
@@ -332,7 +399,7 @@ fun OtsApp() {
                     )
                 }
 
-                Route.Drafts -> SlidePage(onDismiss = { goBack() }) {
+                Route.Drafts -> SlidePage(onDismiss = onDismissRoute, enabled = slideEnabled) {
                     DraftsScreen(
                         accountId = session.accountId,
                         onBack = { goBack() },
@@ -340,14 +407,32 @@ fun OtsApp() {
                     )
                 }
 
-                Route.ScheduledSends -> SlidePage(onDismiss = { goBack() }) {
+                Route.ScheduledSends -> SlidePage(onDismiss = onDismissRoute, enabled = slideEnabled) {
                     ScheduledSendScreen(
                         onBack = { goBack() },
                         onToast = toast,
                     )
                 }
 
-                Route.AllMail -> SlidePage(onDismiss = { goBack() }) {
+                Route.SnoozeReminders -> SlidePage(onDismiss = onDismissRoute, enabled = slideEnabled) {
+                    SnoozeReminderScreen(
+                        session = session,
+                        onBack = { goBack() },
+                        onToast = toast,
+                        onOpenMail = { r ->
+                            // 第三方提醒按 extId+messageId 反查本地行；OTS 提醒 mailId 就是服务端 emailId
+                            if (r.source == "ext") {
+                                val extId = r.extId
+                                val local = if (extId != null) ExtMailStore.lastLocalId(extId, r.mailId) else 0L
+                                if (local > 0L) go(Route.ExtDetail(local)) else toast("原邮件已不在本地，重新同步后再试")
+                            } else {
+                                go(Route.Detail(r.mailId.toLongOrNull() ?: 0L))
+                            }
+                        },
+                    )
+                }
+
+                Route.AllMail -> SlidePage(onDismiss = onDismissRoute, enabled = slideEnabled) {
                     AllMailScreen(
                         onBack = { goBack() },
                         onOpen = { go(Route.Detail(it)) },
@@ -356,7 +441,7 @@ fun OtsApp() {
                     )
                 }
 
-                is Route.SiteDetail -> SlidePage(onDismiss = { goBack() }) {
+                is Route.SiteDetail -> SlidePage(onDismiss = onDismissRoute, enabled = slideEnabled) {
                     SiteMailDetailScreen(
                         emailId = r.id,
                         onBack = { goBack() },
@@ -379,7 +464,7 @@ fun OtsApp() {
                     )
                 }
 
-                is Route.ExtDetail -> SlidePage(onDismiss = { goBack() }) {
+                is Route.ExtDetail -> SlidePage(onDismiss = onDismissRoute, enabled = slideEnabled) {
                     val extRoute = route as Route.ExtDetail
                     ExtMailDetailScreen(
                         localId = extRoute.localId,
@@ -424,36 +509,36 @@ fun OtsApp() {
                     )
                 }
 
-                Route.Users -> SlidePage(onDismiss = { goBack() }) {
+                Route.Users -> SlidePage(onDismiss = onDismissRoute, enabled = slideEnabled) {
                     UsersScreen(
                         onBack = { goBack() },
                     )
                 }
 
-                Route.Roles -> SlidePage(onDismiss = { goBack() }) {
+                Route.Roles -> SlidePage(onDismiss = onDismissRoute, enabled = slideEnabled) {
                     RolesScreen(
                         onBack = { goBack() },
                     )
                 }
 
-                Route.RegKeys -> SlidePage(onDismiss = { goBack() }) {
+                Route.RegKeys -> SlidePage(onDismiss = onDismissRoute, enabled = slideEnabled) {
                     RegKeysScreen(
                         onBack = { goBack() },
                     )
                 }
 
-                Route.Analysis -> SlidePage(onDismiss = { goBack() }) {
+                Route.Analysis -> SlidePage(onDismiss = onDismissRoute, enabled = slideEnabled) {
                     AnalysisScreen(onBack = { goBack() })
                 }
 
-                Route.ServerSettings -> SlidePage(onDismiss = { goBack() }) {
+                Route.ServerSettings -> SlidePage(onDismiss = onDismissRoute, enabled = slideEnabled) {
                     SysSettingsScreen(
                         onBack = { goBack() },
                         onToast = toast,
                     )
                 }
 
-                Route.SystemSettings -> SlidePage(onDismiss = { goBack() }) {
+                Route.SystemSettings -> SlidePage(onDismiss = onDismissRoute, enabled = slideEnabled) {
                     SystemSettingsScreen(
                         session = session,
                         // 改服务器地址会清掉登录态，直接回登录页而不是停在已登出的设置页
@@ -476,7 +561,7 @@ fun OtsApp() {
                     )
                 }
 
-                Route.Settings -> SlidePage(onDismiss = { goBack() }) {
+                Route.Settings -> SlidePage(onDismiss = onDismissRoute, enabled = slideEnabled) {
                     SettingsScreen(
                         session = session,
                         onBack = {
@@ -486,14 +571,45 @@ fun OtsApp() {
                         onOpenSystemSettings = { go(Route.SystemSettings) },
                         onOpenExtAccounts = { go(Route.ExtBind) },
                         onOpenScheduled = { go(Route.ScheduledSends) },
+                        onOpenSnooze = { go(Route.SnoozeReminders) },
+                        onOpenSessions = { go(Route.Sessions) },
+                        onOpenUnsubscribe = { go(Route.Unsubscribe) },
+                        onOpenPasskey = { go(Route.Passkey) },
+                        onOpenE2EE = { go(Route.E2EE) },
                     )
                 }
 
-                Route.QrScan -> SlidePage(onDismiss = { goBack() }) {
+                Route.Sessions -> SlidePage(onDismiss = onDismissRoute, enabled = slideEnabled) {
+                    SessionScreen(
+                        onBack = { goBack() },
+                        onToast = toast,
+                    )
+                }
+
+                Route.Unsubscribe -> SlidePage(onDismiss = onDismissRoute, enabled = slideEnabled) {
+                    UnsubscribeScreen(
+                        onBack = { goBack() },
+                        onToast = toast,
+                    )
+                }
+
+                Route.Passkey -> SlidePage(onDismiss = onDismissRoute, enabled = slideEnabled) {
+                    PasskeyScreen(
+                        onBack = { goBack() },
+                    )
+                }
+
+                Route.E2EE -> SlidePage(onDismiss = onDismissRoute, enabled = slideEnabled) {
+                    E2EEScreen(
+                        onBack = { goBack() },
+                    )
+                }
+
+                Route.QrScan -> SlidePage(onDismiss = onDismissRoute, enabled = slideEnabled) {
                     QrScanScreen(session = session, onBack = { goBack() })
                 }
 
-                Route.ExtBind -> SlidePage(onDismiss = { goBack() }) {
+                Route.ExtBind -> SlidePage(onDismiss = onDismissRoute, enabled = slideEnabled) {
                     ExtBindScreen(
                         onBack = { goBack() },
                         onCompose = { extId, accountId, address ->
@@ -512,7 +628,7 @@ fun OtsApp() {
                     )
                 }
 
-                is Route.Detail -> SlidePage(onDismiss = { goBack() }) {
+                is Route.Detail -> SlidePage(onDismiss = onDismissRoute, enabled = slideEnabled) {
                     DetailScreen(
                         emailId = r.id,
                         onBack = { goBack() },
@@ -540,7 +656,7 @@ fun OtsApp() {
                     )
                 }
 
-                is Route.Compose -> SlidePage(onDismiss = { goBack() }) {
+                is Route.Compose -> SlidePage(onDismiss = onDismissRoute, enabled = slideEnabled) {
                     ComposeScreen(
                         accountId = if (r.extId > 0) r.extAccountId else session.accountId,
                         to = r.to,
@@ -569,6 +685,81 @@ fun OtsApp() {
                     )
                 }
             }
+        }
+
+        BoxWithConstraints(Modifier.fillMaxSize().background(OT.colors.bgGrouped)) {
+            val isLargeScreen = maxWidth >= 720.dp && session.token.isNotEmpty() && route != Route.Login && route != Route.ServerSetup
+
+            if (isLargeScreen) {
+                // 平板 / 折叠屏展开态自适应双栏（List-Detail Pane）布局
+                Row(Modifier.fillMaxSize()) {
+                    // 左侧常驻列表栏（360dp，保证抽屉与现有交互完好）
+                    androidx.compose.foundation.layout.Box(
+                        Modifier.width(360.dp).fillMaxHeight(),
+                    ) {
+                        InboxScreen(
+                            session = session,
+                            onOpenDetail = { OpenPerf.click(it); go(Route.Detail(it)) },
+                            onCompose = { go(Route.Compose("", "", "")) },
+                            onSwipeReply = { m ->
+                                scope.launch {
+                                    val d = MailCache.detailMemory(m.emailId)?.first
+                                        ?: MailCache.detailDisk(m.emailId)?.first
+                                    val quoted = d?.let { buildQuoteHtml(it.name.ifEmpty { it.from }, it.content) }.orEmpty()
+                                    val subj = if (m.subject.startsWith("Re:")) m.subject else "Re: ${m.subject}"
+                                    go(Route.Compose(m.from, subj, quoted, quoteEmailId = m.emailId))
+                                }
+                            },
+                            onOpenSettings = { go(Route.Settings) },
+                            onOpenContacts = { go(Route.Contacts) },
+                            onOpenAi = { go(Route.Ai) },
+                            onOpenQrScan = { go(Route.QrScan) },
+                            onOpenDrafts = { go(Route.Drafts) },
+                            onOpenSnooze = { go(Route.SnoozeReminders) },
+                            onOpenExtDetail = { localId, sent -> go(Route.ExtDetail(localId, sent)) },
+                            onComposeExt = { extId, accountId, address ->
+                                go(
+                                    Route.Compose(
+                                        to = "",
+                                        subject = "",
+                                        quoted = "",
+                                        extId = extId,
+                                        extAccountId = accountId,
+                                        extAddress = address,
+                                    ),
+                                )
+                            },
+                        )
+                    }
+
+                    // 纵向分隔线
+                    androidx.compose.foundation.layout.Box(
+                        Modifier.width(1.dp).fillMaxHeight().background(OT.colors.separator),
+                    )
+
+                    // 右侧内容区
+                    androidx.compose.foundation.layout.Box(
+                        Modifier.weight(1f).fillMaxHeight(),
+                    ) {
+                        if (route == Route.Inbox) {
+                            LargeScreenEmptyPreview(onCompose = { go(Route.Compose("", "", "")) })
+                        } else {
+                            RenderRoute(
+                                r = route,
+                                slideEnabled = false,
+                                onDismissRoute = { if (backStack.isNotEmpty()) goBack() else route = Route.Inbox },
+                            )
+                        }
+                    }
+                }
+            } else {
+                RenderRoute(
+                    r = route,
+                    slideEnabled = true,
+                    onDismissRoute = { goBack() },
+                )
+            }
+
             SnackbarHost(hostState = snackbar)
 
             // 401 的唯一可见提示：不跳页、不清数据，点一下才去登录；重登成功回到原页面
@@ -598,6 +789,55 @@ fun OtsApp() {
                     )
                     Text("重新登录", style = OT.type.footnote, color = Color.White)
                 }
+            }
+        }
+    }
+}
+
+/** 平板/折叠屏大屏未选中邮件时的右侧空预览状态 */
+@Composable
+private fun LargeScreenEmptyPreview(onCompose: () -> Unit) {
+    val c = OT.colors
+    val t = OT.type
+    androidx.compose.foundation.layout.Box(
+        Modifier
+            .fillMaxSize()
+            .background(c.bgGrouped)
+            .padding(32.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Center,
+        ) {
+            androidx.compose.foundation.layout.Box(
+                Modifier
+                    .size(64.dp)
+                    .clip(CircleShape)
+                    .background(c.blue.copy(alpha = 0.12f)),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    Icons.Outlined.Mail,
+                    contentDescription = null,
+                    tint = c.blue,
+                    modifier = Modifier.size(32.dp),
+                )
+            }
+            Spacer(Modifier.height(16.dp))
+            Text("选择一封邮件", style = t.title3, color = c.label)
+            Spacer(Modifier.height(6.dp))
+            Text("在左侧列表中点击邮件，即可在右侧快速预览完整内容", style = t.footnote, color = c.label2)
+            Spacer(Modifier.height(20.dp))
+            androidx.compose.foundation.layout.Box(
+                Modifier
+                    .clip(RoundedCornerShape(OT.dimens.rPill.dp))
+                    .background(c.blue)
+                    .clickable { onCompose() }
+                    .padding(horizontal = 20.dp, vertical = 10.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text("撰写新邮件", style = t.subhead.copy(fontWeight = FontWeight.SemiBold), color = Color.White)
             }
         }
     }

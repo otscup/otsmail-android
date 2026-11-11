@@ -1,6 +1,10 @@
 package com.otscup.otsmail.ui
 
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import android.graphics.BitmapFactory
+import com.otscup.otsmail.data.IcsParser
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.tween
@@ -8,6 +12,7 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -70,6 +75,7 @@ import androidx.compose.ui.graphics.painter.Painter
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.otscup.otsmail.R
 import com.otscup.otsmail.ui.theme.OT
 import kotlinx.coroutines.Dispatchers
@@ -511,6 +517,16 @@ fun OTMailRow(
     ownerLabel: String? = null,
     /** 有附件时在摘要行末尾加回形针标记 */
     hasAttachment: Boolean = false,
+    /** 是否为特别关注（VIP）联系人 */
+    isVip: Boolean = false,
+    /** 邮件提取到的验证码（若有，在摘要下方展示快捷复制胶囊） */
+    verificationCode: String? = null,
+    onCopyCode: ((String) -> Unit)? = null,
+    onOpenCodeDialog: ((String) -> Unit)? = null,
+    /** 邮件发送状态（已发送箱中 status=3 失败或 5 延迟） */
+    status: Int = 0,
+    mailType: Int = 0,
+    onRetrySend: (() -> Unit)? = null,
 ) {
     val t = OT.type
     val c = OT.colors
@@ -552,8 +568,24 @@ fun OTMailRow(
                         color = c.label,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f),
+                        modifier = Modifier.weight(1f, fill = false),
                     )
+                    if (isVip) {
+                        Spacer(Modifier.width(5.dp))
+                        Box(
+                            Modifier
+                                .clip(RoundedCornerShape(4.dp))
+                                .background(Color(0xFFFFB300).copy(alpha = 0.16f))
+                                .padding(horizontal = 4.dp, vertical = 1.dp),
+                        ) {
+                            Text(
+                                "⭐ VIP",
+                                style = t.caption2.copy(fontWeight = FontWeight.Bold, fontSize = 9.sp),
+                                color = Color(0xFFD97706),
+                            )
+                        }
+                    }
+                    Spacer(Modifier.weight(1f))
                     Spacer(Modifier.width(6.dp))
                     Text(time, style = t.caption1, color = c.label2, maxLines = 1)
                     if (unread && showAvatar) {
@@ -624,6 +656,65 @@ fun OTMailRow(
                     }
                     // 右下角星标按钮的可点区域，避免文字压上去
                     Spacer(Modifier.width(48.dp))
+                }
+                if (!verificationCode.isNullOrBlank()) {
+                    Spacer(Modifier.height(4.dp))
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(6.dp))
+                            .background(c.blue.copy(alpha = 0.10f))
+                            .border(0.5.dp, c.blue.copy(alpha = 0.35f), RoundedCornerShape(6.dp))
+                            .padding(horizontal = 6.dp, vertical = 2.dp)
+                    ) {
+                        Text(
+                            text = "⚡ 验证码: $verificationCode",
+                            style = t.caption1.copy(fontWeight = FontWeight.Bold),
+                            color = c.blue,
+                            modifier = Modifier.clickable { onCopyCode?.invoke(verificationCode) },
+                        )
+                        Spacer(Modifier.width(6.dp))
+                        Text(
+                            text = "复制",
+                            style = t.caption2.copy(fontWeight = FontWeight.SemiBold),
+                            color = c.blue,
+                            modifier = Modifier.clickable { onCopyCode?.invoke(verificationCode) },
+                        )
+                        if (onOpenCodeDialog != null) {
+                            Spacer(Modifier.width(8.dp))
+                            Text(
+                                text = "弹窗",
+                                style = t.caption2,
+                                color = c.label2,
+                                modifier = Modifier.clickable { onOpenCodeDialog.invoke(verificationCode) },
+                            )
+                        }
+                    }
+                }
+                if (mailType == 1 && (status == 3 || status == 5)) {
+                    Spacer(Modifier.height(4.dp))
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(6.dp))
+                            .background(c.red.copy(alpha = 0.10f))
+                            .border(0.5.dp, c.red.copy(alpha = 0.35f), RoundedCornerShape(6.dp))
+                            .padding(horizontal = 6.dp, vertical = 2.dp)
+                    ) {
+                        Text(
+                            text = if (status == 3) "⚠️ 发送失败" else "⏳ 发送延迟",
+                            style = t.caption1.copy(fontWeight = FontWeight.Bold),
+                            color = c.red,
+                        )
+                        if (onRetrySend != null) {
+                            Spacer(Modifier.width(8.dp))
+                            Text(
+                                text = "重试",
+                                style = t.caption1.copy(fontWeight = FontWeight.Bold, color = c.blue),
+                                modifier = Modifier.clickable { onRetrySend.invoke() },
+                            )
+                        }
+                    }
                 }
             }
         }
@@ -737,4 +828,287 @@ object OTSpace {
     val s1 = 4.dp; val s2 = 8.dp; val s3 = 12.dp; val s4 = 16.dp
     val s5 = 20.dp; val s6 = 24.dp; val s7 = 32.dp; val s8 = 44.dp
     val cardGap = 8.dp
+}
+
+/** 验证码大卡片快捷展示与复制弹窗 */
+@Composable
+fun VerificationCodeDialog(
+    code: String,
+    sender: String = "",
+    onDismiss: () -> Unit,
+    onCopy: () -> Unit,
+) {
+    val c = OT.colors
+    val t = OT.type
+    androidx.compose.material3.AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Text("提取到验证码", style = t.title3, color = c.label)
+        },
+        text = {
+            Column(
+                modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
+                if (sender.isNotBlank()) {
+                    Text(
+                        text = "来自: $sender",
+                        style = t.subhead,
+                        color = c.label2,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Spacer(Modifier.height(10.dp))
+                }
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(c.blue.copy(alpha = 0.08f))
+                        .padding(vertical = 16.dp),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        text = code,
+                        style = t.title1.copy(
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 28.sp,
+                            letterSpacing = 4.sp,
+                        ),
+                        color = c.blue,
+                    )
+                }
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    text = "点击下方按钮复制验证码到剪贴板",
+                    style = t.caption1,
+                    color = c.label3,
+                )
+            }
+        },
+        confirmButton = {
+            androidx.compose.material3.Button(
+                onClick = onCopy,
+                colors = androidx.compose.material3.ButtonDefaults.buttonColors(
+                    containerColor = c.blue,
+                    contentColor = Color.White,
+                ),
+                shape = RoundedCornerShape(8.dp),
+            ) {
+                Text("复制验证码")
+            }
+        },
+        dismissButton = {
+            androidx.compose.material3.TextButton(onClick = onDismiss) {
+                Text("关闭", color = c.label2)
+            }
+        },
+        containerColor = c.bgCard,
+    )
+}
+
+fun copyToClipboard(context: Context, label: String, text: String) {
+    val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+    cm?.setPrimaryClip(ClipData.newPlainText(label, text))
+}
+
+/** 邮件内日程邀请卡片：展示摘要、时间、地点，并支持免权限一键导入系统日历 */
+@Composable
+fun IcsCalendarCard(
+    event: IcsParser.Event,
+    onAddToCalendar: () -> Unit,
+) {
+    val c = OT.colors
+    val t = OT.type
+    val timeFormatter = remember {
+        java.text.SimpleDateFormat("yyyy年M月d日 HH:mm", java.util.Locale.CHINA)
+    }
+    val startStr = remember(event.startTimeMillis) {
+        if (event.startTimeMillis > 0) timeFormatter.format(java.util.Date(event.startTimeMillis)) else ""
+    }
+    val endStr = remember(event.endTimeMillis) {
+        if (event.endTimeMillis > 0) {
+            java.text.SimpleDateFormat("HH:mm", java.util.Locale.CHINA).format(java.util.Date(event.endTimeMillis))
+        } else ""
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 20.dp, vertical = 8.dp)
+            .clip(RoundedCornerShape(12.dp))
+            .background(c.blue.copy(alpha = 0.08f))
+            .border(1.dp, c.blue.copy(alpha = 0.2f), RoundedCornerShape(12.dp))
+            .padding(14.dp)
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Text(
+                "📅 日程邀请",
+                style = t.caption1.copy(fontWeight = FontWeight.SemiBold),
+                color = c.blue,
+                modifier = Modifier.weight(1f)
+            )
+            Box(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(100))
+                    .background(c.blue)
+                    .clickable { onAddToCalendar() }
+                    .padding(horizontal = 12.dp, vertical = 6.dp)
+            ) {
+                Text(
+                    "添加到系统日历",
+                    style = t.caption1.copy(fontWeight = FontWeight.Medium),
+                    color = Color.White
+                )
+            }
+        }
+        Spacer(Modifier.height(6.dp))
+        Text(
+            text = event.summary,
+            style = t.title3.copy(fontWeight = FontWeight.Bold),
+            color = c.label
+        )
+        if (startStr.isNotBlank()) {
+            Spacer(Modifier.height(4.dp))
+            Text(
+                text = "⏰ $startStr ${if (endStr.isNotBlank()) "~ $endStr" else ""}",
+                style = t.caption1,
+                color = c.label2
+            )
+        }
+        if (event.location.isNotBlank()) {
+            Spacer(Modifier.height(2.dp))
+            Text(
+                text = "📍 ${event.location}",
+                style = t.caption1,
+                color = c.label2,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+    }
+}
+
+/** 邮件退订胶囊条（RFC 8058） */
+@Composable
+fun UnsubscribeBanner(
+    isOneClick: Boolean,
+    onUnsubscribe: () -> Unit,
+) {
+    val c = OT.colors
+    val t = OT.type
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 20.dp, vertical = 4.dp)
+            .clip(RoundedCornerShape(8.dp))
+            .background(c.bgGrouped)
+            .padding(horizontal = 12.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text = "✉️ 此邮件来自邮件列表 / 订阅源",
+            style = t.caption1,
+            color = c.label2,
+            modifier = Modifier.weight(1f)
+        )
+        Box(
+            modifier = Modifier
+                .clip(RoundedCornerShape(100))
+                .background(c.bgInput)
+                .clickable { onUnsubscribe() }
+                .padding(horizontal = 10.dp, vertical = 4.dp)
+        ) {
+            Text(
+                text = if (isOneClick) "一键退订" else "退订",
+                style = t.caption1.copy(fontWeight = FontWeight.Medium),
+                color = c.blue
+            )
+        }
+    }
+}
+
+/** 发信失败 / 延迟横幅与快速重试 */
+@Composable
+fun OutboundFailedBanner(
+    onRetry: () -> Unit,
+) {
+    val c = OT.colors
+    val t = OT.type
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 20.dp, vertical = 4.dp)
+            .clip(RoundedCornerShape(8.dp))
+            .background(c.red.copy(alpha = 0.10f))
+            .padding(horizontal = 12.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text = "⚠️ 邮件发送失败或投递延迟",
+            style = t.caption1.copy(fontWeight = FontWeight.Medium),
+            color = c.red,
+            modifier = Modifier.weight(1f)
+        )
+        Box(
+            modifier = Modifier
+                .clip(RoundedCornerShape(100))
+                .background(c.red)
+                .clickable { onRetry() }
+                .padding(horizontal = 10.dp, vertical = 4.dp)
+        ) {
+            Text(
+                text = "重试发送",
+                style = t.caption1.copy(fontWeight = FontWeight.Medium),
+                color = Color.White
+            )
+        }
+    }
+}
+
+/** 发件来源安全防伪标识（SPF & DMARC） */
+@Composable
+fun SecurityBadgeRow(
+    authSpf: String,
+    authDmarc: String,
+) {
+    val c = OT.colors
+    val t = OT.type
+    val isVerified = authSpf.equals("pass", ignoreCase = true) || authDmarc.equals("pass", ignoreCase = true)
+    val isFailed = authSpf.contains("fail", ignoreCase = true) || authDmarc.contains("fail", ignoreCase = true)
+
+    if (isVerified && !isFailed) {
+        Row(
+            modifier = Modifier
+                .padding(vertical = 4.dp)
+                .clip(RoundedCornerShape(100))
+                .background(c.green.copy(alpha = 0.12f))
+                .padding(horizontal = 8.dp, vertical = 3.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = "🛡️ SPF & DMARC 已验证",
+                style = t.caption2.copy(fontWeight = FontWeight.Medium),
+                color = c.green
+            )
+        }
+    } else if (isFailed) {
+        Row(
+            modifier = Modifier
+                .padding(vertical = 4.dp)
+                .clip(RoundedCornerShape(100))
+                .background(c.red.copy(alpha = 0.12f))
+                .padding(horizontal = 8.dp, vertical = 3.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = "⚠️ 发件来源验证失败 (防伪异常)",
+                style = t.caption2.copy(fontWeight = FontWeight.Medium),
+                color = c.red
+            )
+        }
+    }
 }

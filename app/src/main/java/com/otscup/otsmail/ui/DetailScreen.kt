@@ -95,13 +95,21 @@ import com.otscup.otsmail.data.ExtImapActions
 import com.otscup.otsmail.data.ExtLocalMail
 import com.otscup.otsmail.data.ExtMailStore
 import com.otscup.otsmail.data.ExtSyncError
+import com.otscup.otsmail.data.IcsParser
 import com.otscup.otsmail.data.MailAtt
 import com.otscup.otsmail.data.MailCache
 import com.otscup.otsmail.data.MailDetail
 import com.otscup.otsmail.data.SiteMail
+import com.otscup.otsmail.data.UnsubscribeHelper
 import com.otscup.otsmail.data.VerificationCode
 import com.otscup.otsmail.data.aiErrorText
+import com.otscup.otsmail.data.Session
+import com.otscup.otsmail.data.SnoozeReminder
+import com.otscup.otsmail.data.SnoozeStatus
+import com.otscup.otsmail.data.SnoozeTime
 import com.otscup.otsmail.data.friendlyError
+import com.otscup.otsmail.push.PushNotifications
+import com.otscup.otsmail.schedule.SnoozeScheduler
 import com.otscup.otsmail.push.PushSettings
 import com.otscup.otsmail.ui.theme.OT
 import kotlinx.coroutines.Dispatchers
@@ -163,8 +171,10 @@ font:15px/20px -apple-system,"Noto Sans SC",sans-serif;letter-spacing:-0.24px;wo
 p{margin:0 0 12px}img,video{max-width:100%;height:auto}a{color:$link}
 /* 邮件模板（MJML/营销邮件）普遍把 table/td 写死成 600px，表格单元格不吃 max-width，
    只靠 * 规则压不住；具体像素宽度在 [normalizeFixedWidths] 里清洗成百分比/自适应，
-   这里只做兜底：表格与单元格都不允许越过视口。百分比列宽（width="33%"）保持不变。 */
-table,td,th{max-width:100%!important;min-width:0!important;box-sizing:border-box}
+   这里做自适应排版：超宽表格支持 touch 触摸横向平滑滑动，单元格自动折行，避免右侧被整体裁切。 */
+table{max-width:100%!important;min-width:0!important;box-sizing:border-box;display:block!important;overflow-x:auto!important;-webkit-overflow-scrolling:touch!important}
+tbody,thead,tfoot{display:table!important;width:100%!important;min-width:100%!important}
+td,th{min-width:0!important;box-sizing:border-box;word-break:break-word}
 /* GitHub 状态列表头被折成 Sta/tus：body 上的 word-break:break-word 等价 anywhere，
    会让单元格最小宽度退化到 1 个字符，表格自动布局就把窄列压到放不下整个 "Status"。
    表头改为只在整词放不下时才断；数据单元格不动，长 URL/订单号仍可断行。 */
@@ -498,6 +508,7 @@ fun DetailScreen(
     var bodyHeightDp by remember { mutableStateOf(0) }
     var moreOpen by remember { mutableStateOf(false) }
     var moveSheet by remember { mutableStateOf(false) }
+    var snoozeSheet by remember { mutableStateOf(false) }
     /** 无缓存 + 拉正文失败（服务端 501 / 超时）：给「重试」，别把失败伪装成「没有正文」 */
     var loadFailed by remember { mutableStateOf(false) }
     var reloadTick by remember { mutableStateOf(0) }
@@ -672,10 +683,15 @@ fun DetailScreen(
                         .tapArea {
                             moveSheet = false
                             scope.launch {
-                                runCatching { Api.moveCategory(m.emailId, key) }
+                                runCatching {
+                                    Api.moveCategory(m.emailId, key)
+                                    Api.emailLearn(m.emailId, key)
+                                }
                                     .onSuccess {
                                         MailCache.setCategory(m.emailId, key)
-                                        MailSync.changed(); onToast("已移动到$label"); onBack()
+                                        MailSync.changed()
+                                        onToast("已移动到$label 并反馈分类学习")
+                                        onBack()
                                     }
                                     .onFailure { onToast(friendlyError(it)) }
                             }
@@ -693,6 +709,39 @@ fun DetailScreen(
         }
     }
 
+    if (snoozeSheet && m != null) {
+        SnoozeTimeSheet(
+            visible = true,
+            onDismiss = { snoozeSheet = false },
+            onPick = { at, label ->
+                val mm = m ?: return@SnoozeTimeSheet
+                if (!PushNotifications.enabled(context)) {
+                    onToast("通知未开启，可能无法收到稍后提醒")
+                    openAppNotificationSettings(context)
+                }
+                val se = Session(context)
+                val key = SnoozeTime.accountKey(se.base, se.accountId, se.userId, se.email)
+                SnoozeScheduler.schedule(
+                    context,
+                    SnoozeReminder(
+                        id = SnoozeTime.upsertKey(key, "ots", mm.emailId.toString()),
+                        accountKey = key,
+                        base = se.base,
+                        userId = se.userId.takeIf { it != 0L },
+                        mailId = mm.emailId.toString(),
+                        subject = mm.subject,
+                        fromName = mm.name,
+                        atMillis = at,
+                        atLocal = label,
+                        status = SnoozeStatus.pending,
+                        source = "ots",
+                    ),
+                )
+                snoozeSheet = false
+                onToast("已设置稍后提醒：$label")
+            },
+        )
+    }
     // AI 摘要 / 智能回复：结果单独用 sheet 展示，绝不替换正文
     if (aiSheet.isNotEmpty()) {
         OTSheet(onDismiss = { if (!aiBusy) aiSheet = "" }) {
@@ -823,17 +872,80 @@ fun DetailScreen(
                     value = TimeFmt.detailTime(m.time),
                     maxLines = 1,
                 )
+                if (m.authSpf.isNotBlank() || m.authDmarc.isNotBlank()) {
+                    Spacer(Modifier.height(4.dp))
+                    SecurityBadgeRow(authSpf = m.authSpf, authDmarc = m.authDmarc)
+                }
                 Spacer(Modifier.height(12.dp))
             }
             OTDivider(strong = true)
 
-            // 验证码只做「识别 + 一键复制」：没识别到就完全不占位，不放灰按钮。
-            // 与通知栏共用 VerificationCode.find，避免两套正则给出不同结果。
-            val vcode = remember(m.subject, m.content, translated, showingOriginal) {
-                VerificationCode.find(
-                    m.subject + "\n" +
-                        if (translated.isNotEmpty() && !showingOriginal) translated else m.content,
+            // 发信失败或投递延迟横幅（已发信箱且状态异常）
+            if (m.type == 1 && (m.status == 3 || m.status == 5)) {
+                OutboundFailedBanner(
+                    onRetry = {
+                        scope.launch {
+                            runCatching { Api.emailRetry(m.emailId) }
+                                .onSuccess {
+                                    onToast("已重新提交发送")
+                                    reloadTick++
+                                }
+                                .onFailure { onToast("重试失败: ${friendlyError(it)}") }
+                        }
+                    }
                 )
+            }
+
+            // 邮件退订横幅（RFC 8058 / RFC 2369）
+            val unsubInfo = remember(m.listUnsubscribe, m.listUnsubscribePost) {
+                UnsubscribeHelper.parse(m.listUnsubscribe, m.listUnsubscribePost)
+            }
+            if (unsubInfo != null) {
+                UnsubscribeBanner(
+                    isOneClick = unsubInfo.isOneClick,
+                    onUnsubscribe = {
+                        if (unsubInfo.isOneClick && !unsubInfo.httpUrl.isNullOrBlank()) {
+                            scope.launch {
+                                val res = UnsubscribeHelper.executeOneClick(unsubInfo.httpUrl)
+                                if (res.isSuccess) {
+                                    onToast("已完成一键退订请求")
+                                } else {
+                                    onToast("一键退订未被响应，正尝试在浏览器打开")
+                                    UnsubscribeHelper.openInBrowserOrMail(context, unsubInfo)
+                                }
+                            }
+                        } else {
+                            UnsubscribeHelper.openInBrowserOrMail(context, unsubInfo)
+                        }
+                    }
+                )
+            }
+
+            // 日历日程邀请卡片（RFC 5545 iCalendar）
+            val icsEvent = remember(m.content) {
+                IcsParser.parse(m.content)
+            }
+            if (icsEvent != null) {
+                IcsCalendarCard(
+                    event = icsEvent,
+                    onAddToCalendar = {
+                        val ok = IcsParser.addToCalendar(context, icsEvent)
+                        if (!ok) onToast("未找到可用的日历应用")
+                    }
+                )
+            }
+
+            // 验证码只做「识别 + 一键复制」：没识别到就完全不占位，不放灰按钮。
+            // 优先使用服务端预提取 code，兜底使用 VerificationCode.find
+            val vcode = remember(m.code, m.subject, m.content, translated, showingOriginal) {
+                if (m.code.isNotBlank()) {
+                    VerificationCode.Hit(m.code, "code", 0)
+                } else {
+                    VerificationCode.find(
+                        m.subject + "\n" +
+                            if (translated.isNotEmpty() && !showingOriginal) translated else m.content,
+                    )
+                }
             }
             if (vcode != null) {
                 Row(
@@ -1391,6 +1503,10 @@ fun DetailScreen(
                             moreOpen = false
                             requestAi("reply")
                         }
+                        MoreItem("稍后提醒") {
+                            moreOpen = false
+                            snoozeSheet = true
+                        }
                         MoreItem("移动") {
                             moreOpen = false
                             moveSheet = true
@@ -1782,11 +1898,6 @@ private fun safeName(filename: String): String = filename
     .trimStart('.')
     .take(120)
     .ifEmpty { "attachment" }
-
-private fun copyToClipboard(context: Context, label: String, text: String) {
-    val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-    cm.setPrimaryClip(ClipData.newPlainText(label, text))
-}
 
 /** 「更多」菜单里的一行（44 高，15pt；暂不支持的两项用 label3）。 */
 @Composable
@@ -2501,6 +2612,7 @@ private fun ExtMailBody(
     var downloadBusy by remember(m.localId) { mutableIntStateOf(-1) }
     var confirmDelete by remember(m.localId) { mutableStateOf(false) }
     var moreOpen by remember(m.localId) { mutableStateOf(false) }
+    var snoozeSheet by remember(m.localId) { mutableStateOf(false) }
 
     val atts = remember(m.attachmentsJson) {
         runCatching {
@@ -2772,6 +2884,42 @@ private fun ExtMailBody(
         }
     }
 
+    // 第三方邮件的稍后提醒：accountKey 仍绑 otsmail 账号，extId 用于解绑该邮箱时清理
+    if (snoozeSheet) {
+        val extMailId = m.messageId.ifBlank { "local:${m.localId}" }
+        SnoozeTimeSheet(
+            visible = true,
+            onDismiss = { snoozeSheet = false },
+            onPick = { at, label ->
+                snoozeSheet = false
+                if (!PushNotifications.enabled(ctx)) {
+                    onToast("通知未开启，可能无法收到稍后提醒")
+                    openAppNotificationSettings(ctx)
+                }
+                val se = Session(ctx)
+                val key = SnoozeTime.accountKey(se.base, se.accountId, se.userId, se.email)
+                SnoozeScheduler.schedule(
+                    ctx,
+                    SnoozeReminder(
+                        id = SnoozeTime.upsertKey(key, "ext", extMailId),
+                        accountKey = key,
+                        base = se.base,
+                        userId = se.userId.takeIf { it != 0L },
+                        extId = m.extId,
+                        mailId = extMailId,
+                        subject = m.subject,
+                        fromName = m.fromName,
+                        atMillis = at,
+                        atLocal = label,
+                        status = SnoozeStatus.pending,
+                        source = "ext",
+                    ),
+                )
+                onToast("已设置稍后提醒：$label")
+            },
+        )
+    }
+
     // 「更多」浮层：只放第三方链路真能执行的 IMAP 操作；服务端能力置灰并说明原因
     if (moreOpen) {
         Popup(
@@ -2808,6 +2956,10 @@ private fun ExtMailBody(
                                 if (seenNow) "已标记为已读" else "已标记为未读"
                             }
                         }
+                    }
+                    MoreItem("稍后提醒") {
+                        moreOpen = false
+                        snoozeSheet = true
                     }
                     // 以下能力依赖 otsmail 服务端，第三方邮件不在服务端库里，明确置灰
                     MoreItem("移动到分类", dimmed = true) {
@@ -2861,7 +3013,7 @@ private fun ExtMailBody(
                                 action("delete") {
                                     val r = ExtImapActions.deleteToTrash(m.extId, m.localId, m.uid)
                                     onDeleted()
-                                    "已移动到回收站（${r.trashName}）"
+                                    "已移到邮箱回收站（${r.trashName}），可在邮箱网页版恢复"
                                 }
                             }
                             .padding(horizontal = 12.dp, vertical = 8.dp),

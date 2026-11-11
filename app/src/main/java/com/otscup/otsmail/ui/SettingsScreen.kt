@@ -67,7 +67,10 @@ import com.otscup.otsmail.R
 import com.otscup.otsmail.data.Api
 import com.otscup.otsmail.data.Session
 import com.otscup.otsmail.data.ServerAddress
+import com.otscup.otsmail.data.SnoozeReminderStore
+import com.otscup.otsmail.data.SnoozeTime
 import com.otscup.otsmail.data.friendlyError
+import com.otscup.otsmail.schedule.SnoozeScheduler
 import com.otscup.otsmail.ui.theme.OT
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -97,6 +100,11 @@ fun SettingsScreen(
     onOpenSystemSettings: () -> Unit = {},
     onOpenExtAccounts: () -> Unit = {},
     onOpenScheduled: () -> Unit = {},
+    onOpenSnooze: () -> Unit = {},
+    onOpenSessions: () -> Unit = {},
+    onOpenUnsubscribe: () -> Unit = {},
+    onOpenPasskey: () -> Unit = {},
+    onOpenE2EE: () -> Unit = {},
 ) {
     val c = OT.colors
     val t = OT.type
@@ -115,6 +123,8 @@ fun SettingsScreen(
 
     var twoFactor by remember { mutableStateOf(false) }
     var twoFactorRequired by remember { mutableStateOf(false) }
+    var recoveryEmail by remember { mutableStateOf("") }
+    var disablePasswordLogin by remember { mutableStateOf(false) }
 
     var avatarSheet by remember { mutableStateOf(false) }
     var avatarLink by remember { mutableStateOf("") }
@@ -128,6 +138,10 @@ fun SettingsScreen(
     var twoFactorUrl by remember { mutableStateOf("") }
     var twoFactorCode by remember { mutableStateOf("") }
     var disableCode by remember { mutableStateOf("") }
+    var recoverySheet by remember { mutableStateOf(false) }
+    var recoveryDraft by remember { mutableStateOf("") }
+    var recoveryPassword by remember { mutableStateOf("") }
+    var recoveryBusy by remember { mutableStateOf(false) }
     var deleteConfirm by remember { mutableStateOf(false) }
 
     // 进页面拉一次最新值（别的地方可能改过）
@@ -140,6 +154,8 @@ fun SettingsScreen(
             avatarUrl = it.avatar
             twoFactor = it.twoFactor
             twoFactorRequired = it.twoFactorRequired
+            recoveryEmail = it.recoveryEmail
+            disablePasswordLogin = it.disablePasswordLogin
             session.signature = it.signature
             session.sendOnEnter = it.sendOnEnter
             if (it.avatar.isNotEmpty()) session.avatar = it.avatar
@@ -267,6 +283,38 @@ fun SettingsScreen(
             OTGroupHeader("安全")
             OTGroup(Modifier.padding(horizontal = OTSpace.s4)) {
                 SettingRow(
+                    title = "登录设备管理",
+                    value = "查看在线会话",
+                    onClick = onOpenSessions,
+                    showChevron = true,
+                )
+                OTDivider(inset = 16)
+                SettingRow(
+                    title = "通行密钥 (Passkey)",
+                    value = "免密指纹/面容",
+                    onClick = onOpenPasskey,
+                    showChevron = true,
+                )
+                OTDivider(inset = 16)
+                SettingRow(
+                    title = "端到端加密 (E2EE)",
+                    value = "本地密钥与同步",
+                    onClick = onOpenE2EE,
+                    showChevron = true,
+                )
+                OTDivider(inset = 16)
+                SettingRow(
+                    title = "辅助安全邮箱",
+                    value = recoveryEmail.ifEmpty { "未绑定" },
+                    onClick = {
+                        recoveryDraft = recoveryEmail
+                        recoveryPassword = ""
+                        recoverySheet = true
+                    },
+                    showChevron = true,
+                )
+                OTDivider(inset = 16)
+                SettingRow(
                     title = "两步验证",
                     value = if (twoFactor) "已开启" else "未开启",
                     onClick = {
@@ -292,6 +340,22 @@ fun SettingsScreen(
                                 .onSuccess { twoFactorRequired = next }
                                 .onFailure { onToast(friendlyError(it)) }
                         }
+                    }
+                }
+                OTDivider(inset = 16)
+                OTSwitchRow(
+                    title = "允许密码登录",
+                    subtitle = if (disablePasswordLogin) "已禁用密码登录（仅限第三方或免密验证）" else "允许使用账号密码登录",
+                    checked = !disablePasswordLogin,
+                ) { allow ->
+                    val disable = !allow
+                    scope.launch {
+                        runCatching { Api.togglePasswordLogin(disable) }
+                            .onSuccess {
+                                disablePasswordLogin = disable
+                                onToast(if (disable) "已关闭密码登录" else "已开启密码登录")
+                            }
+                            .onFailure { onToast(friendlyError(it)) }
                     }
                 }
             }
@@ -337,6 +401,13 @@ fun SettingsScreen(
             OTGroupHeader("更多")
             OTGroup(Modifier.padding(horizontal = OTSpace.s4)) {
                 SettingRow(
+                    title = "退订管理中心",
+                    value = "管理邮件列表",
+                    onClick = onOpenUnsubscribe,
+                    showChevron = true,
+                )
+                OTDivider(inset = 16)
+                SettingRow(
                     title = "系统设置",
                     value = "",
                     onClick = onOpenSystemSettings,
@@ -347,6 +418,13 @@ fun SettingsScreen(
                     title = "定时发送",
                     value = "查看待发送",
                     onClick = onOpenScheduled,
+                    showChevron = true,
+                )
+                OTDivider(inset = 16)
+                SettingRow(
+                    title = "稍后提醒",
+                    value = "本机提醒，跟随当前账号",
+                    onClick = onOpenSnooze,
                     showChevron = true,
                 )
                 OTDivider(inset = 16)
@@ -604,6 +682,56 @@ fun SettingsScreen(
         )
     }
 
+    if (recoverySheet) {
+        OTSheet(onDismiss = { if (!recoveryBusy) recoverySheet = false }) {
+            Text(
+                "辅助安全邮箱",
+                style = t.title3,
+                color = c.label,
+                modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp),
+            )
+            Text(
+                "辅助邮箱用于找回账号与重要安全变更校验。绑定或修改需输入当前登录密码进行安全核验；清空并保存即可解绑。",
+                style = t.footnote,
+                color = c.label2,
+                modifier = Modifier.padding(horizontal = 20.dp, vertical = 4.dp),
+            )
+            Spacer(Modifier.height(8.dp))
+            OTFieldRow(
+                label = "辅助邮箱",
+                value = recoveryDraft,
+                onValueChange = { recoveryDraft = it },
+                hint = "your-backup@example.com",
+            )
+            OTFieldRow(
+                label = "当前密码",
+                value = recoveryPassword,
+                onValueChange = { recoveryPassword = it },
+                hint = "输入登录密码验证身份",
+                secret = true,
+            )
+            Box(Modifier.padding(horizontal = 16.dp, vertical = 12.dp)) {
+                OTPrimaryButton("保存", enabled = !recoveryBusy && recoveryPassword.isNotEmpty()) {
+                    recoveryBusy = true
+                    scope.launch {
+                        runCatching { Api.updateRecoveryEmail(recoveryDraft.trim(), recoveryPassword) }
+                            .onSuccess { newEmail ->
+                                recoveryEmail = newEmail
+                                recoverySheet = false
+                                recoveryBusy = false
+                                onToast(if (newEmail.isEmpty()) "已解绑辅助邮箱" else "辅助邮箱已更新")
+                            }
+                            .onFailure {
+                                recoveryBusy = false
+                                onToast(friendlyError(it))
+                            }
+                    }
+                }
+            }
+            Spacer(Modifier.height(12.dp))
+        }
+    }
+
     if (deleteConfirm) {
         AlertDialog(
             onDismissRequest = { deleteConfirm = false },
@@ -617,8 +745,15 @@ fun SettingsScreen(
             confirmButton = {
                 TextButton(onClick = {
                     scope.launch {
+                        val ctx = context
+                        val snoozeKey = SnoozeTime.accountKey(session.base, session.accountId, session.userId, session.email)
                         runCatching { Api.deleteMyAccount() }
                             .onSuccess {
+                                // 删除账号：清该账号稍后提醒数据与闹钟；Session.clear() 仅取消调度不删数据。
+                                runCatching {
+                                    SnoozeScheduler.cancelAlarmsForAccount(ctx, snoozeKey)
+                                    SnoozeReminderStore.clearForAccount(ctx, snoozeKey)
+                                }
                                 deleteConfirm = false
                                 session.clear()
                                 onBack()
