@@ -27,6 +27,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.otscup.otsmail.data.Api
 import com.otscup.otsmail.data.ExtBindStep
@@ -51,6 +52,9 @@ private data class BoundAccount(
     val address: String,
     val provider: String,
     val status: Int,
+    /** 本地游标记录的最后一次成功同步时间与错误；用作「后台同步失败」的可查入口 */
+    val lastSyncAt: Long = 0L,
+    val lastError: String = "",
 )
 
 /**
@@ -82,18 +86,26 @@ fun ExtBindScreen(
     var notifEnabled by remember { mutableStateOf(PushNotifications.enabled(context)) }
 
     suspend fun reload() {
+        withContext(Dispatchers.IO) { runCatching { ExtMailStore.init(context) } }
         bound = runCatching {
             val arr = Api.extAccounts()
             buildList {
                 for (i in 0 until arr.length()) {
                     val o = arr.optJSONObject(i) ?: continue
+                    val extId = o.optLong("ext_id")
+                    // 后台同步可能已经失败但页面上一声不响，这里把游标里的时间/原因读出来
+                    val cursor = withContext(Dispatchers.IO) {
+                        runCatching { ExtMailStore.cursor(extId) }.getOrNull()
+                    }
                     add(
                         BoundAccount(
-                            extId = o.optLong("ext_id"),
+                            extId = extId,
                             accountId = o.optLong("account_id"),
                             address = o.optString("address"),
                             provider = o.optString("provider"),
                             status = o.optInt("status", 0),
+                            lastSyncAt = cursor?.lastSyncAt ?: 0L,
+                            lastError = cursor?.lastError.orEmpty(),
                         ),
                     )
                 }
@@ -222,6 +234,22 @@ fun ExtBindScreen(
                                         .padding(horizontal = 8.dp, vertical = 6.dp),
                                 )
                             },
+                        )
+                        // 后台同步默认静默，这里给出可查入口：上次同步时间 / 失败原因
+                        Text(
+                            when {
+                                item.lastError.isNotBlank() -> "上次同步失败：${item.lastError}"
+                                item.lastSyncAt > 0L ->
+                                    "上次同步：${TimeFmt.preciseTime(item.lastSyncAt.toString())}"
+                                else -> "尚未同步"
+                            },
+                            style = t.caption2,
+                            color = if (item.lastError.isNotBlank()) c.red else c.label3,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(start = 16.dp, end = 16.dp, bottom = 6.dp),
                         )
                         // 隐藏 ≠ 解绑：只改收件箱是否展示，邮件、同步、稍后提醒都不动
                         OTSwitchRow(

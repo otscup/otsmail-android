@@ -332,13 +332,15 @@ fun InboxScreen(
     /** 第三方写操作进行中（同一时刻只允许一条，避免连点把 IMAP 顺序打乱） */
     var extWriteBusy by remember { mutableStateOf(false) }
 
-    // 第三方邮箱同步状态：进行中/已拉取 N 封/没有新邮件/失败原因，避免「点了同步没反应」
+    // 第三方邮箱同步状态：只有用户主动下拉/点「立即同步」才展示；
+    // 启动、IDLE、后台定时拉取全部静默，避免「一直显示正在同步」。
     val extSyncStatus by ExtSync.status.collectAsState()
     var extStatusVisible by remember { mutableStateOf(false) }
-    LaunchedEffect(extSyncStatus.at, extSyncStatus.phase) {
-        extStatusVisible = extSyncStatus.message.isNotBlank() &&
+    LaunchedEffect(extSyncStatus.at, extSyncStatus.phase, extSyncStatus.manual) {
+        extStatusVisible = extSyncStatus.manual && extSyncStatus.message.isNotBlank() &&
             extSyncStatus.phase != com.otscup.otsmail.data.ExtSyncPhase.IDLE
-        if (extStatusVisible && extSyncStatus.phase == com.otscup.otsmail.data.ExtSyncPhase.DONE) {
+        if (extStatusVisible && extSyncStatus.phase != com.otscup.otsmail.data.ExtSyncPhase.RUNNING) {
+            // 主动同步的结果（成功/失败）只短暂展示，失败详情去「设置 → 外部邮箱」查，不常驻
             delay(8_000)
             extStatusVisible = false
         }
@@ -763,7 +765,7 @@ fun InboxScreen(
         // 顺带对齐一次 IDLE 服务账户（事件驱动，替代原来每分钟一次的接口轮询）
         if (!com.otscup.otsmail.BuildConfig.DEMO) {
             ExtIdleManager.onAccountsChanged(context)
-            scope.launch { runCatching { ExtSync.runOnce(context) } }
+            scope.launch { runCatching { ExtSync.runOnce(context, manual = true) } }
         }
         runCatching { refreshFirst(toTop = true) }
             .onFailure { e ->
@@ -773,9 +775,9 @@ fun InboxScreen(
         refreshing = false
     }
 
-    /** 失败横条 / 空态里的「立即同步」：只跑一轮拉取，结果通过 ExtSync.rev 回到 UI。 */
+    /** 空态里的「立即同步」：只跑一轮拉取，结果通过 ExtSync.rev 回到 UI；状态条只在主动触发时出现。 */
     fun syncExtNow() {
-        scope.launch { runCatching { ExtSync.runOnce(context) } }
+        scope.launch { runCatching { ExtSync.runOnce(context, manual = true) } }
     }
 
     /** 批量动作：逐条串行；失败只汇总失败数，成功项已经由 MailBatchOps 同步列表与缓存。 */
@@ -1332,43 +1334,9 @@ fun InboxScreen(
                         }
                     }
                 }
-                // 第三方邮箱同步失败：行内提示 + 重试，不弹窗、不打断阅读
-                val failedExt = extAccounts.filter { it.lastError.isNotBlank() }
-                if (failedExt.isNotEmpty() && !selectMode) {
-                    Row(
-                        Modifier
-                            .fillMaxWidth()
-                            .padding(start = 16.dp, end = 8.dp, top = 8.dp)
-                            .clip(RoundedCornerShape(OT.dimens.rMd.dp))
-                            .background(c.bgInput)
-                            .padding(start = 12.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Icon(
-                            painterResource(R.drawable.ot_alert),
-                            contentDescription = null,
-                            tint = c.red,
-                            modifier = Modifier.size(16.dp),
-                        )
-                        Spacer(Modifier.width(8.dp))
-                        Text(
-                            text = "${failedExt.joinToString("、") { it.address }} 同步异常：" +
-                                failedExt.first().lastError,
-                            style = t.caption1,
-                            color = c.label2,
-                            maxLines = 2,
-                            overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier.weight(1f),
-                        )
-                        Box(
-                            Modifier.height(36.dp).tapArea { syncExtNow() }.padding(horizontal = 10.dp),
-                            contentAlignment = Alignment.Center,
-                        ) {
-                            Text("重试", style = t.caption1, color = c.blue)
-                        }
-                    }
-                }
-                // 第三方同步状态：进行中显示转圈，结束显示「补回/新拉取 N 封、没有新邮件、失败原因」
+                // 第三方同步失败不再在列表顶部挂常驻提示条：保持安静，
+                // 失败原因与上次成功时间统一去「设置 → 外部邮箱」查看；主动下拉仍会显示本轮结果。
+                // 第三方同步状态：只有主动触发才出现，后台同步全程静默
                 if (extStatusVisible) {
                     Row(
                         Modifier

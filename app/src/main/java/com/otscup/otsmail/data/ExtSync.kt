@@ -44,6 +44,8 @@ data class ExtSyncStatus(
     val message: String = "",
     val fetched: Int = 0,
     val at: Long = 0L,
+    /** 是否由用户主动触发（下拉刷新/立即同步）；后台静默同步为 false，界面不展示 */
+    val manual: Boolean = false,
 )
 
 /**
@@ -91,8 +93,8 @@ object ExtSync {
     private val _status = MutableStateFlow(ExtSyncStatus())
     val status: StateFlow<ExtSyncStatus> = _status.asStateFlow()
 
-    private fun emit(phase: ExtSyncPhase, message: String, fetched: Int = 0) {
-        _status.value = ExtSyncStatus(phase, message, fetched, System.currentTimeMillis())
+    private fun emit(phase: ExtSyncPhase, message: String, fetched: Int = 0, manual: Boolean = false) {
+        _status.value = ExtSyncStatus(phase, message, fetched, System.currentTimeMillis(), manual)
     }
 
     /** 本地库被写操作改过（已读/星标/删除/发送成功）时通知列表重读；不触发网络同步。 */
@@ -148,17 +150,19 @@ object ExtSync {
         limit: Int = DEFAULT_LIMIT,
         /** >0 时只同步这一个第三方账户（IDLE 唤醒时用，避免一封新邮件让所有账户重登 IMAP） */
         onlyExtId: Long = 0L,
+        /** 用户主动触发：界面才展示同步状态；后台/IDLE 一律静默 */
+        manual: Boolean = false,
     ): ExtSyncReport =
         withContext(Dispatchers.IO) {
             try {
-                syncMutex.withLock { runOnceInner(context, limit, onlyExtId) }
+                syncMutex.withLock { runOnceInner(context, limit, onlyExtId, manual) }
             } finally {
                 // 无论成功失败都通知界面重读本地库：失败原因也要能立刻显示出来
                 rev++
             }
         }
 
-    private suspend fun runOnceInner(context: Context, limit: Int, onlyExtId: Long): ExtSyncReport =
+    private suspend fun runOnceInner(context: Context, limit: Int, onlyExtId: Long, manual: Boolean): ExtSyncReport =
         withContext(Dispatchers.IO) {
             ExtMailStore.init(context.applicationContext)
             // 归档连续失败计数按账户落在这里：进程被杀后重试次数不重置，避免靠重启绕过上限
@@ -168,7 +172,7 @@ object ExtSync {
                 Api.extAccounts()
             } catch (e: Throwable) {
                 val reason = "读取账户失败：" + ExtSyncError.reason(e)
-                emit(ExtSyncPhase.FAILED, reason)
+                emit(ExtSyncPhase.FAILED, reason, manual = manual)
                 return@withContext ExtSyncReport(failed = 1, errors = listOf(reason))
             }
 
@@ -180,7 +184,7 @@ object ExtSync {
             val errors = mutableListOf<String>()
             val newMails = mutableListOf<ExtLocalMail>()
 
-            emit(ExtSyncPhase.RUNNING, "正在同步第三方邮箱…")
+            emit(ExtSyncPhase.RUNNING, "正在同步第三方邮箱…", manual = manual)
 
             for (i in 0 until accounts.length()) {
                 val o = accounts.optJSONObject(i) ?: continue
@@ -191,8 +195,8 @@ object ExtSync {
                 val address = o.optString("address")
 
                 try {
-                    emit(ExtSyncPhase.RUNNING, "正在同步 $address…")
-                    val result = syncAccount(o, extId, limit, prefs)
+                    emit(ExtSyncPhase.RUNNING, "正在同步 $address…", manual = manual)
+                    val result = syncAccount(o, extId, limit, prefs, manual)
                     fetched += result.fetched
                     archived += result.archived
                     restored += result.restored
@@ -210,9 +214,9 @@ object ExtSync {
 
             // 明确收尾：拉到几封 / 补回几封 / 没有新邮件 / 哪里失败，界面不再「点了没反应」
             if (total == 0) {
-                emit(ExtSyncPhase.DONE, "没有可同步的第三方邮箱", 0)
+                emit(ExtSyncPhase.DONE, "没有可同步的第三方邮箱", 0, manual)
             } else if (failed > 0 && fetched == 0 && restored == 0) {
-                emit(ExtSyncPhase.FAILED, errors.firstOrNull() ?: "同步失败", 0)
+                emit(ExtSyncPhase.FAILED, errors.firstOrNull() ?: "同步失败", 0, manual)
             } else {
                 val parts = mutableListOf<String>()
                 if (restored > 0) parts += "从服务端补回 $restored 封历史"
@@ -223,6 +227,7 @@ object ExtSync {
                     if (failed > 0 && fetched == 0 && restored == 0) ExtSyncPhase.FAILED else ExtSyncPhase.DONE,
                     parts.joinToString("，"),
                     fetched,
+                    manual,
                 )
             }
 
@@ -242,6 +247,7 @@ object ExtSync {
         extId: Long,
         limit: Int,
         prefs: android.content.SharedPreferences,
+        manual: Boolean,
     ): AccountResult {
         val address = account.optString("address")
 
@@ -252,7 +258,7 @@ object ExtSync {
          */
         val localBefore = ExtMailStore.cursor(extId)
         val restored = if ((localBefore == null || localBefore.lastUid <= 0) && ExtMailStore.count(extId) == 0) {
-            emit(ExtSyncPhase.RUNNING, "正在从服务端补回 $address 的历史邮件…")
+            emit(ExtSyncPhase.RUNNING, "正在从服务端补回 $address 的历史邮件…", manual = manual)
             try {
                 restoreArchive(extId)
             } catch (e: Throwable) {
