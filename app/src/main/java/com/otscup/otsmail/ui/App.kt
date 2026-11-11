@@ -97,7 +97,6 @@ private sealed interface Route {
     /** 聚合收件：第三方邮箱绑定向导（第一批只做绑定与连通性验证） */
     data object ExtBind : Route
     data object Contacts : Route
-    data object Ai : Route
     data object SystemSettings : Route
     data object ServerSettings : Route
     data object AllMail : Route
@@ -163,6 +162,8 @@ fun OtsApp() {
     val backStack = remember { androidx.compose.runtime.mutableStateListOf<Route>() }
     // 写信页自动保存产出的草稿 id：401 被拦去登录后，靠它把写信页原样接回来
     var composeDraftId by remember { mutableStateOf<String?>(null) }
+    // AI 助手是盖在当前页面上的底部面板，不占路由/返回栈：收起后原页面还在原处
+    var aiOpen by remember { mutableStateOf(false) }
     fun go(next: Route) {
         backStack.add(route)
         route = next
@@ -364,7 +365,7 @@ fun OtsApp() {
                     },
                     onOpenSettings = { go(Route.Settings) },
                     onOpenContacts = { go(Route.Contacts) },
-                    onOpenAi = { go(Route.Ai) },
+                    onOpenAi = { aiOpen = true },
                     onOpenQrScan = { go(Route.QrScan) },
                     onOpenDrafts = { go(Route.Drafts) },
                     onOpenSnooze = { go(Route.SnoozeReminders) },
@@ -388,14 +389,6 @@ fun OtsApp() {
                         session = session,
                         onBack = { goBack() },
                         onWrite = { email -> go(Route.Compose(email, "", "")) },
-                    )
-                }
-
-                Route.Ai -> SlidePage(onDismiss = onDismissRoute, enabled = slideEnabled) {
-                    AiScreen(
-                        session = session,
-                        onBack = { goBack() },
-                        onOpenCompose = { go(Route.Compose("", "", "")) },
                     )
                 }
 
@@ -712,7 +705,7 @@ fun OtsApp() {
                             },
                             onOpenSettings = { go(Route.Settings) },
                             onOpenContacts = { go(Route.Contacts) },
-                            onOpenAi = { go(Route.Ai) },
+                            onOpenAi = { aiOpen = true },
                             onOpenQrScan = { go(Route.QrScan) },
                             onOpenDrafts = { go(Route.Drafts) },
                             onOpenSnooze = { go(Route.SnoozeReminders) },
@@ -789,6 +782,23 @@ fun OtsApp() {
                     )
                     Text("重新登录", style = OT.type.footnote, color = Color.White)
                 }
+            }
+
+            // AI 助手：盖在当前页面上的底部面板，关闭后原页面与状态都还在
+            if (aiOpen) {
+                AiScreen(
+                    session = session,
+                    onClose = { aiOpen = false },
+                    onOpenCompose = {
+                        aiOpen = false
+                        go(Route.Compose("", "", ""))
+                    },
+                    // 把这段 AI 内容作为正文带进写信页；不绑收件人、不自动发送
+                    onReply = { text ->
+                        aiOpen = false
+                        go(Route.Compose("", "", "", body = text))
+                    },
+                )
             }
         }
     }
