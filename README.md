@@ -19,7 +19,7 @@ OTS Mail 的 Android 客户端。Kotlin + Jetpack Compose，Material 3，单 Act
 
 以下截图来自 `-Pdemo=true` 的演示构建（包名带 `.demo` 后缀），**邮件、账户、头像全部是本地虚构数据**，与任何真实邮箱无关；邮件头像为产品本身的「取色圆底 + 首字母」样式，账户头像是一张 AI 合成的虚拟人像（非真实人物、仅演示构建打包）。截图在真机（Samsung Galaxy S10e，1080×2280）以系统字体 100% 拍摄，裁去系统状态栏与手势导航条后为 1080×2136，四角圆角透明。
 
-下面两张是 2×2 拼图（tile 宽 540px，间距 28px，白底），八张单图仍保留在 `docs/screenshots/` 目录：
+下面两张是 2×2 拼图（tile 宽 540px，间距 28px，白底）：
 
 ![登录（含 GitHub/Google 登录入口）、收件箱、侧边栏、详情页](docs/screenshots/preview-a.png)
 
