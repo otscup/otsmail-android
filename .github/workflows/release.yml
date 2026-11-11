@@ -193,8 +193,8 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-          # 扫码功能还没真机验证通过，先发预发布；验证通过后改成 "false" 即恢复正式发布
-          PRERELEASE: "true"
+          # 0.3.7 起恢复正式发布；若后续版本又要先发预发布，改回 "true"。
+          PRERELEASE: "false"
         run: |
           ASSET="otsmail-${{ steps.ver.outputs.value }}-release.apk"
           MAPPING="mapping-v${{ steps.ver.outputs.value }}.txt"
