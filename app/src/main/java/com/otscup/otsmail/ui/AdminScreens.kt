@@ -474,7 +474,7 @@ fun UsersScreen(onBack: () -> Unit) {
                 val uname = u.optString("username").takeUnless { it == "null" || it == "undefined" }.orEmpty()
                 val role = if (type == 0L) "管理员" else roleNames[type] ?: "普通用户"
                 val banned = u.optInt("status") > 0
-                val created = u.optString("createTime").take(10)
+                val created = TimeFmt.localDate(u.optString("createTime"))
                 val meta = listOfNotNull(
                     uname.takeIf { it.isNotEmpty() && it != email },
                     role,
@@ -590,7 +590,7 @@ fun RegKeysScreen(onBack: () -> Unit) {
                 val used = rk.optInt("used")
                 val count = rk.optInt("count")
                 val expireTime = rk.optString("expireTime")
-                val exp = if (expireTime.length >= 10) expireTime.substring(0, 10) else ""
+                val exp = if (expireTime.length >= 10) TimeFmt.localDate(expireTime) else ""
                 val expired = used >= count || exp.isEmpty()
                 val roleName = rk.optString("roleName").ifEmpty { "普通角色" }
                 Row(
