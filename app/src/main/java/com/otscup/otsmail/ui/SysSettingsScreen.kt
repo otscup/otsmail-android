@@ -130,7 +130,12 @@ private val CARDS = listOf(
  * 只有带 setting:set 权限的账号（默认管理员）能写；接口返回的 Key 是打码值，不回传。
  */
 @Composable
-fun SysSettingsScreen(onBack: () -> Unit, onToast: (String) -> Unit) {
+fun SysSettingsScreen(
+    onBack: () -> Unit,
+    onToast: (String) -> Unit,
+    /** 发信渠道子页：与网页端「系统设置 → 发信渠道」对齐 */
+    onOpenSenderChannels: (() -> Unit)? = null,
+) {
     val c = OT.colors
     val t = OT.type
     val d = OT.dimens
@@ -245,6 +250,30 @@ fun SysSettingsScreen(onBack: () -> Unit, onToast: (String) -> Unit) {
                                 Text(summary(one, current), style = t.footnote, color = c.label2)
                                 Text("  ›", style = t.body, color = c.label3)
                             }
+                        }
+                    }
+                }
+                if (onOpenSenderChannels != null) {
+                    OTGroupHeader("发信")
+                    Column(
+                        Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = d.sp4.dp)
+                            .padding(bottom = OTSpace.cardGap)
+                            .clip(RoundedCornerShape(14.dp))
+                            .background(c.bgCard),
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .pressable(pressedColor = c.bgInput) { onOpenSenderChannels() }
+                                .heightIn(min = 44.dp)
+                                .padding(horizontal = OTSpace.s4),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text("发信渠道", style = t.body, color = c.label, modifier = Modifier.weight(1f))
+                            Text("查看 / 接入", style = t.footnote, color = c.label2)
+                            Text("  ›", style = t.body, color = c.label3)
                         }
                     }
                 }

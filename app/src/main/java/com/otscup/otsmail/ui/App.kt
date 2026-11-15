@@ -58,6 +58,7 @@ import com.otscup.otsmail.data.Session
 import com.otscup.otsmail.data.SnoozeReminderStore
 import com.otscup.otsmail.push.ExtIdleManager
 import com.otscup.otsmail.push.PushRouter
+import com.otscup.otsmail.data.OtpScanRelay
 import com.otscup.otsmail.schedule.ScheduledSendScheduler
 import com.otscup.otsmail.schedule.SnoozeRouter
 import com.otscup.otsmail.schedule.SnoozeScheduler
@@ -112,12 +113,18 @@ private sealed interface Route {
     data object Unsubscribe : Route
     /** 通行密钥（Passkey）凭据管理 */
     data object Passkey : Route
+
+    data object Authenticator : Route
+
+    data object QrScanForOtp : Route
     /** 端到端加密（E2EE）安全管理 */
     data object E2EE : Route
     data object Users : Route
     data object Roles : Route
     data object RegKeys : Route
     data object Analysis : Route
+    /** 发信渠道：查看/接入渠道、额度与剩余（与网页端同一套接口） */
+    data object SenderChannels : Route
 }
 
 @Composable
@@ -528,6 +535,14 @@ fun OtsApp() {
                     SysSettingsScreen(
                         onBack = { goBack() },
                         onToast = toast,
+                        onOpenSenderChannels = { go(Route.SenderChannels) },
+                    )
+                }
+
+                Route.SenderChannels -> SlidePage(onDismiss = onDismissRoute, enabled = slideEnabled) {
+                    SenderChannelsScreen(
+                        onBack = { goBack() },
+                        onToast = toast,
                     )
                 }
 
@@ -568,6 +583,7 @@ fun OtsApp() {
                         onOpenSessions = { go(Route.Sessions) },
                         onOpenUnsubscribe = { go(Route.Unsubscribe) },
                         onOpenPasskey = { go(Route.Passkey) },
+                        onOpenAuthenticator = { go(Route.Authenticator) },
                         onOpenE2EE = { go(Route.E2EE) },
                     )
                 }
@@ -600,6 +616,23 @@ fun OtsApp() {
 
                 Route.QrScan -> SlidePage(onDismiss = onDismissRoute, enabled = slideEnabled) {
                     QrScanScreen(session = session, onBack = { goBack() })
+                }
+
+                Route.QrScanForOtp -> SlidePage(onDismiss = onDismissRoute, enabled = slideEnabled) {
+                    QrScanScreen(
+                        session = session,
+                        onBack = { goBack() },
+                        rawTextSink = { text -> OtpScanRelay.post(text) },
+                    )
+                }
+
+                Route.Authenticator -> SlidePage(onDismiss = onDismissRoute, enabled = slideEnabled) {
+                    AuthenticatorScreen(
+                        session = session,
+                        onBack = { goBack() },
+                        onToast = toast,
+                        onOpenQrScan = { go(Route.QrScanForOtp) },
+                    )
                 }
 
                 Route.ExtBind -> SlidePage(onDismiss = onDismissRoute, enabled = slideEnabled) {

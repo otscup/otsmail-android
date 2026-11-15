@@ -182,6 +182,7 @@ fun LoginScreen(session: Session, onLoggedIn: () -> Unit) {
     var configLoading by remember { mutableStateOf(true) }
     var twoFactorCode by remember { mutableStateOf("") }
     var twoFactorNeeded by remember { mutableStateOf(false) }
+    var twoFactorBackupMode by remember { mutableStateOf(false) }
     var registerOpen by remember { mutableStateOf(false) }
     var forgotOpen by remember { mutableStateOf(false) }
     var passkeyBusy by remember { mutableStateOf(false) }
@@ -268,7 +269,12 @@ fun LoginScreen(session: Session, onLoggedIn: () -> Unit) {
                 session.base = base.trim()
                 session.loginDomain = domain
                 session.apply()
-                val token = Api.login(full, password, twoFactorCode.trim())
+                val code = twoFactorCode.trim()
+                val token = if (twoFactorBackupMode) {
+                    Api.login(full, password, backupCode = code)
+                } else {
+                    Api.login(full, password, twoFactorCode = code)
+                }
                 applyLogin(token, full)
             }.onSuccess {
                 onLoggedIn()
@@ -676,15 +682,35 @@ fun LoginScreen(session: Session, onLoggedIn: () -> Unit) {
             if (twoFactorNeeded) {
                 OTDivider(inset = 16, strong = true)
                 Column(Modifier.padding(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 9.dp)) {
-                    Text("两步验证码", style = t.footnote, color = c.label2, modifier = Modifier.padding(bottom = 1.dp))
+                    Text(
+                        if (twoFactorBackupMode) "备用码" else "两步验证码",
+                        style = t.footnote, color = c.label2, modifier = Modifier.padding(bottom = 1.dp),
+                    )
                     BasicTextField(
                         value = twoFactorCode,
-                        onValueChange = { twoFactorCode = it.filter { ch -> ch.isDigit() }.take(6) },
+                        onValueChange = { input ->
+                            twoFactorCode = if (twoFactorBackupMode) {
+                                input.filter { ch -> ch.isLetterOrDigit() || ch == '-' }.uppercase().take(11)
+                            } else {
+                                input.filter { ch -> ch.isDigit() }.take(6)
+                            }
+                        },
                         singleLine = true,
                         textStyle = t.body.copy(color = c.label),
                         cursorBrush = SolidColor(loginAccent()),
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                        keyboardOptions = KeyboardOptions(
+                            keyboardType = if (twoFactorBackupMode) KeyboardType.Text else KeyboardType.Number,
+                        ),
                         modifier = Modifier.fillMaxWidth(),
+                    )
+                    Text(
+                        if (twoFactorBackupMode) "改用验证器验证码" else "验证器丢了？改用备用码",
+                        style = t.footnote,
+                        color = loginAccent(),
+                        modifier = Modifier.padding(top = 6.dp).tapArea {
+                            twoFactorBackupMode = !twoFactorBackupMode
+                            twoFactorCode = ""
+                        },
                     )
                 }
             }

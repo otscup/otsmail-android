@@ -65,6 +65,7 @@ import com.otscup.otsmail.push.PushSettings
 import com.otscup.otsmail.BuildConfig
 import com.otscup.otsmail.R
 import com.otscup.otsmail.data.Api
+import com.otscup.otsmail.data.OtpVault
 import com.otscup.otsmail.data.Session
 import com.otscup.otsmail.data.ServerAddress
 import com.otscup.otsmail.data.SnoozeReminderStore
@@ -104,6 +105,7 @@ fun SettingsScreen(
     onOpenSessions: () -> Unit = {},
     onOpenUnsubscribe: () -> Unit = {},
     onOpenPasskey: () -> Unit = {},
+    onOpenAuthenticator: () -> Unit = {},
     onOpenE2EE: () -> Unit = {},
 ) {
     val c = OT.colors
@@ -138,6 +140,13 @@ fun SettingsScreen(
     var twoFactorUrl by remember { mutableStateOf("") }
     var twoFactorCode by remember { mutableStateOf("") }
     var disableCode by remember { mutableStateOf("") }
+    var backupSheet by remember { mutableStateOf(false) }
+    var backupRemaining by remember { mutableStateOf(0) }
+    var backupTotal by remember { mutableStateOf(0) }
+    var backupCodes by remember { mutableStateOf<List<String>>(emptyList()) }
+    var backupInput by remember { mutableStateOf("") }
+    var backupBusy by remember { mutableStateOf(false) }
+    var authenticatorBound by remember { mutableStateOf(OtpVault.has(context, session.email)) }
     var recoverySheet by remember { mutableStateOf(false) }
     var recoveryDraft by remember { mutableStateOf("") }
     var recoveryPassword by remember { mutableStateOf("") }
@@ -161,10 +170,13 @@ fun SettingsScreen(
             if (it.avatar.isNotEmpty()) session.avatar = it.avatar
             loaded = true
         }
-        runCatching { Api.twoFactorStatus() }.onSuccess { (enabled, required) ->
-            twoFactor = enabled
-            twoFactorRequired = required
+        runCatching { Api.twoFactorStatus() }.onSuccess { status ->
+            twoFactor = status.enabled
+            twoFactorRequired = status.required
+            backupRemaining = status.backupRemaining
+            backupTotal = status.backupTotal
         }
+        authenticatorBound = OtpVault.has(context, session.email)
     }
 
     val pickAvatar = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
@@ -326,6 +338,26 @@ fun SettingsScreen(
                     },
                     showChevron = true,
                 )
+                OTDivider(inset = 16)
+                SettingRow(
+                    title = "身份验证器",
+                    value = if (authenticatorBound) "查看验证码" else "导入/绑定",
+                    onClick = onOpenAuthenticator,
+                    showChevron = true,
+                )
+                if (twoFactor) {
+                    OTDivider(inset = 16)
+                    SettingRow(
+                        title = "备用码",
+                        value = if (backupTotal == 0) "未生成" else "剩余 $backupRemaining/$backupTotal",
+                        onClick = {
+                            backupCodes = emptyList()
+                            backupInput = ""
+                            backupSheet = true
+                        },
+                        showChevron = true,
+                    )
+                }
                 OTDivider(inset = 16)
                 OTSwitchRow(
                     title = "强制两步验证",
@@ -533,29 +565,29 @@ fun SettingsScreen(
             )
             if (twoFactor) {
                 Text(
-                    "已开启。输入认证器里的 6 位验证码，或输入登录密码，任选其一即可关闭。",
+                    "已开启。输入验证器上的 6 位验证码，或一枚未使用的备用码，即可关闭。",
                     style = t.footnote, color = c.label2,
                     modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp),
                 )
                 OTFieldRow(
-                    label = "验证码或密码",
+                    label = "验证码或备用码",
                     value = disableCode,
-                    onValueChange = { disableCode = it },
-                    hint = "6 位验证码 / 登录密码",
+                    onValueChange = { if (it.length <= 11) disableCode = it },
+                    hint = "6 位验证码 / 10 位备用码",
                 )
                 Box(Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
-                    OTPrimaryButton("关闭两步验证", enabled = disableCode.isNotEmpty()) {
+                    OTPrimaryButton("关闭两步验证", enabled = disableCode.isNotBlank()) {
                         scope.launch {
-                            val codeOrPwd = disableCode.trim()
+                            val input = disableCode.trim()
+                            val isTotp = input.length == 6 && input.all { it.isDigit() }
                             runCatching {
-                                if (codeOrPwd.length == 6 && codeOrPwd.all { it.isDigit() }) {
-                                    Api.twoFactorDisable(code = codeOrPwd)
-                                } else {
-                                    Api.twoFactorDisable(password = codeOrPwd)
-                                }
+                                if (isTotp) Api.twoFactorDisable(code = input)
+                                else Api.twoFactorDisable(backupCode = input)
                             }.onSuccess {
                                 twoFactor = false
                                 twoFactorRequired = false
+                                backupRemaining = 0
+                                backupTotal = 0
                                 twoFactorSheet = false
                                 onToast("已关闭两步验证")
                             }.onFailure { onToast(friendlyError(it)) }
@@ -600,14 +632,92 @@ fun SettingsScreen(
                         OTPrimaryButton("开启两步验证", enabled = twoFactorCode.length == 6) {
                             scope.launch {
                                 runCatching { Api.twoFactorEnable(twoFactorCode) }
-                                    .onSuccess {
+                                    .onSuccess { codes ->
+                                        // 开启成功即把密钥写进本机 Keystore，直接成为验证器
+                                        OtpVault.save(context, session.email, twoFactorSecret)
+                                        authenticatorBound = true
                                         twoFactor = true
                                         twoFactorSheet = false
+                                        backupCodes = codes
+                                        backupRemaining = codes.size
+                                        backupTotal = codes.size
+                                        if (codes.isNotEmpty()) backupSheet = true
                                         onToast("两步验证已开启")
                                     }
                                     .onFailure { onToast(friendlyError(it)) }
                             }
                         }
+                    }
+                }
+            }
+            Spacer(Modifier.height(12.dp))
+        }
+    }
+
+    if (backupSheet) {
+        OTSheet(onDismiss = { if (!backupBusy) backupSheet = false }) {
+            Text(
+                "备用码",
+                style = t.title3,
+                color = c.label,
+                modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp),
+            )
+            if (backupCodes.isEmpty()) {
+                Text(
+                    "输入当前登录密码或当前验证器的 6 位验证码后再生成。重新生成会让旧备用码整批失效。",
+                    style = t.footnote, color = c.label2,
+                    modifier = Modifier.padding(horizontal = 20.dp, vertical = 4.dp),
+                )
+                OTFieldRow(
+                    label = "密码或验证码",
+                    value = backupInput,
+                    onValueChange = { backupInput = it },
+                    hint = "登录密码 / 6 位验证码",
+                )
+                Box(Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
+                    OTPrimaryButton("生成备用码", enabled = backupInput.isNotBlank() && !backupBusy) {
+                        backupBusy = true
+                        scope.launch {
+                            val input = backupInput.trim()
+                            val isTotp = input.length == 6 && input.all { it.isDigit() }
+                            runCatching {
+                                Api.twoFactorBackupCodes(
+                                    password = if (isTotp) "" else input,
+                                    twoFactorCode = if (isTotp) input else "",
+                                )
+                            }.onSuccess { codes ->
+                                backupCodes = codes
+                                backupRemaining = codes.size
+                                backupTotal = codes.size
+                                backupInput = ""
+                                onToast("备用码已生成")
+                            }.onFailure { onToast(friendlyError(it)) }
+                            backupBusy = false
+                        }
+                    }
+                }
+            } else {
+                Text(
+                    "每个备用码只能使用一次。明文只显示这一次，请立即保存。",
+                    style = t.footnote, color = c.label2,
+                    modifier = Modifier.padding(horizontal = 20.dp, vertical = 4.dp),
+                )
+                Column(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 8.dp)) {
+                    backupCodes.forEach { code ->
+                        Text(
+                            code,
+                            style = t.body.copy(
+                                fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                            ),
+                            color = c.label,
+                            modifier = Modifier.padding(vertical = 3.dp),
+                        )
+                    }
+                }
+                Box(Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
+                    OTPrimaryButton("我已保存") {
+                        backupCodes = emptyList()
+                        backupSheet = false
                     }
                 }
             }
@@ -755,6 +865,8 @@ fun SettingsScreen(
                                     SnoozeReminderStore.clearForAccount(ctx, snoozeKey)
                                 }
                                 deleteConfirm = false
+                                // 删号：本机验证器密钥也要清掉，否则下一个账号会看到空绑定记录
+                                OtpVault.remove(ctx, session.email)
                                 session.clear()
                                 onBack()
                             }
@@ -1309,7 +1421,7 @@ internal fun SettingRow(
 }
 
 @Composable
-private fun DetailKVText(label: String, value: String) {
+internal fun DetailKVText(label: String, value: String) {
     Column(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 6.dp)) {
         Text(label, style = OT.type.caption1, color = OT.colors.label2)
         Text(value, style = OT.type.subhead, color = OT.colors.label)

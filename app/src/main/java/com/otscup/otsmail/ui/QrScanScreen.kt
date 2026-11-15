@@ -101,7 +101,12 @@ private sealed interface QrOutcome {
  * `POST /my/qr/confirm`，不会拿到 token，也不改本地会话；被登录的是网页浏览器。
  */
 @Composable
-fun QrScanScreen(session: Session, onBack: () -> Unit) {
+fun QrScanScreen(
+    session: Session,
+    onBack: () -> Unit,
+    /** 非空时进入「任意二维码」模式：只把原始文本交给调用方（用于导入 otpauth 密钥）。 */
+    rawTextSink: ((String) -> Unit)? = null,
+) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val c = OT.colors
@@ -180,10 +185,16 @@ fun QrScanScreen(session: Session, onBack: () -> Unit) {
             if (outcome == null) {
                 if (cameraActive) {
                     CameraPreview(
-                        onTicket = { id ->
+                        acceptAny = rawTextSink != null,
+                        onTicket = { text ->
                             // 命中只触发一次（分析线程已置 stopped），提示音 + 短震动
                             playScanFeedback(context)
-                            scannedId = id
+                            if (rawTextSink != null) {
+                                rawTextSink(text)
+                                onBack()
+                            } else {
+                                scannedId = text
+                            }
                         },
                         onInvalid = { reason -> scanHint = reason },
                     )
@@ -221,7 +232,7 @@ fun QrScanScreen(session: Session, onBack: () -> Unit) {
                     )
                     Spacer(Modifier.height(20.dp))
                     Text(
-                        "将网页端登录页的二维码放入框内",
+                        if (rawTextSink != null) "将验证器的 otpauth 二维码放入框内" else "将网页端登录页的二维码放入框内",
                         style = t.subhead,
                         color = Color.White,
                         textAlign = TextAlign.Center,
@@ -238,7 +249,7 @@ fun QrScanScreen(session: Session, onBack: () -> Unit) {
                 }
 
                 Text(
-                    "扫码后还需在手机上点确认，网页端才会登录",
+                    if (rawTextSink != null) "只识别本机验证器密钥，不会上传画面" else "扫码后还需在手机上点确认，网页端才会登录",
                     style = t.footnote,
                     color = Color.White.copy(alpha = 0.7f),
                     modifier = Modifier
@@ -366,7 +377,11 @@ private fun QrMessagePanel(
  */
 @androidx.annotation.OptIn(ExperimentalCamera2Interop::class)
 @Composable
-private fun CameraPreview(onTicket: (String) -> Unit, onInvalid: (String) -> Unit) {
+private fun CameraPreview(
+    acceptAny: Boolean = false,
+    onTicket: (String) -> Unit,
+    onInvalid: (String) -> Unit,
+) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     val previewView = remember {
@@ -451,6 +466,11 @@ private fun CameraPreview(onTicket: (String) -> Unit, onInvalid: (String) -> Uni
                     val text = decodeQr(proxy)
                     logFrame(proxy, frame, text)
                     if (text == null) return@setAnalyzer
+                    if (acceptAny) {
+                        stopped.set(true)
+                        main.post { onTicket(text) }
+                        return@setAnalyzer
+                    }
                     when (val r = QrPayload.parse(text)) {
                         is QrPayload.Result.Ok -> {
                             stopped.set(true)

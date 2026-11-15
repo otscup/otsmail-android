@@ -260,9 +260,15 @@ object Api {
 
     // ---- 会话 ----
 
-    suspend fun login(email: String, password: String, twoFactorCode: String = ""): String {
+    suspend fun login(
+        email: String,
+        password: String,
+        twoFactorCode: String = "",
+        backupCode: String = "",
+    ): String {
         val body = JSONObject().put("email", email).put("password", password)
         if (twoFactorCode.isNotEmpty()) body.put("twoFactorCode", twoFactorCode)
+        if (backupCode.isNotEmpty()) body.put("backupCode", backupCode)
         val data = raw("POST", "/login", body, auth = false).optJSONObject("data") ?: JSONObject()
         return data.optString("token").ifEmpty { throw ApiException(401, "服务器没有返回 token") }
     }
@@ -428,9 +434,22 @@ object Api {
         obj("PUT", "/account/setName", JSONObject().put("accountId", accountId).put("name", name))
     }
 
-    suspend fun twoFactorStatus(): Pair<Boolean, Boolean> {
+    data class TwoFactorStatus(
+        val enabled: Boolean,
+        val required: Boolean,
+        val backupRemaining: Int,
+        val backupTotal: Int,
+    )
+
+    suspend fun twoFactorStatus(): TwoFactorStatus {
         val d = obj("GET", "/my/2fa/status")
-        return d.optBoolean("enabled", false) to d.optBoolean("required", false)
+        val backup = d.optJSONObject("backupCode")
+        return TwoFactorStatus(
+            enabled = d.optBoolean("enabled", false),
+            required = d.optBoolean("required", false),
+            backupRemaining = backup?.optInt("remaining", 0) ?: 0,
+            backupTotal = backup?.optInt("total", 0) ?: 0,
+        )
     }
 
     suspend fun twoFactorSetup(): Pair<String, String> {
@@ -438,16 +457,45 @@ object Api {
         return d.optString("secret") to d.optString("otpauthUrl")
     }
 
-    suspend fun twoFactorEnable(code: String) {
-        obj("POST", "/my/2fa/enable", JSONObject().put("code", code))
+    /** 开启两步验证；服务端会返回首次生成的备用码（只此一次）。 */
+    suspend fun twoFactorEnable(code: String): List<String> {
+        val d = obj("POST", "/my/2fa/enable", JSONObject().put("code", code))
+        return jsonStringList(d.optJSONArray("backupCodes"))
     }
 
-    /** 验证码或登录密码任一即可关闭（对应网页端 /my/2fa/disable）。 */
-    suspend fun twoFactorDisable(code: String = "", password: String = "") {
+    /** 关闭两步验证：验证器验证码、备用码、当前密码任一即可（服务端侧再验证）。 */
+    suspend fun twoFactorDisable(code: String = "", password: String = "", backupCode: String = "") {
         val body = JSONObject()
         if (code.isNotEmpty()) body.put("code", code)
         if (password.isNotEmpty()) body.put("password", password)
+        if (backupCode.isNotEmpty()) body.put("backupCode", backupCode)
         obj("POST", "/my/2fa/disable", body)
+    }
+
+    /** 生成/重新生成备用码（旧码整批作废）。明文只在这次响应里返回。 */
+    suspend fun twoFactorBackupCodes(password: String = "", twoFactorCode: String = ""): List<String> {
+        val body = JSONObject()
+        if (password.isNotEmpty()) body.put("password", password)
+        if (twoFactorCode.isNotEmpty()) body.put("twoFactorCode", twoFactorCode)
+        val d = obj("POST", "/my/2fa/backup-codes", body)
+        return jsonStringList(d.optJSONArray("codes"))
+    }
+
+    /** 重新绑定第一步：验证旧验证器/备用码后，返回新密钥（旧密钥仍然有效）。 */
+    suspend fun twoFactorRebindStart(code: String): Pair<String, String> {
+        val d = obj("POST", "/my/2fa/rebind/start", JSONObject().put("code", code))
+        return d.optString("secret") to d.optString("otpauthUrl")
+    }
+
+    /** 重新绑定第二步：用新验证器验证码原子切换，旧备用码作废并返回新码。 */
+    suspend fun twoFactorRebindConfirm(code: String): List<String> {
+        val d = obj("POST", "/my/2fa/rebind/confirm", JSONObject().put("code", code))
+        return jsonStringList(d.optJSONArray("backupCodes"))
+    }
+
+    private fun jsonStringList(array: JSONArray?): List<String> {
+        if (array == null) return emptyList()
+        return (0 until array.length()).mapNotNull { array.optString(it).takeIf(String::isNotEmpty) }
     }
 
     suspend fun setTwoFactorRequired(required: Boolean) {
@@ -898,6 +946,23 @@ object Api {
     suspend fun setSetting(patch: JSONObject) {
         obj("PUT", "/setting/set", patch)
     }
+
+    // ---- 发信渠道（与网页端同一套接口）----
+
+    /** GET /setting/senderProviders：渠道配置 + 用量 + summary（已同步数/剩余额度）。 */
+    suspend fun senderProviders(): JSONObject = obj("GET", "/setting/senderProviders")
+
+    /** PUT /setting/senderProviders：提交全部渠道，返回保存后的最新 overview。 */
+    suspend fun saveSenderProviders(senderProviders: JSONObject): JSONObject =
+        obj("PUT", "/setting/senderProviders", JSONObject().put("senderProviders", senderProviders))
+
+    /** POST /setting/senderProviders/test：指定渠道发一封测试信，失败会把原始错误抛上来。 */
+    suspend fun testSenderProvider(provider: String): JSONObject =
+        obj("POST", "/setting/senderProviders/test", JSONObject().put("provider", provider), 40_000)
+
+    /** POST /setting/senderProviders/dns：用 DoH 核验 DNS，不写库，只返回状态。 */
+    suspend fun checkSenderProviderDns(): JSONObject =
+        obj("POST", "/setting/senderProviders/dns", JSONObject(), 40_000)
 
     // ---- 管理页（全部邮件 / 用户 / 权限 / 注册密钥 / 分析）----
 
