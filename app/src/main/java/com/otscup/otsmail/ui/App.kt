@@ -460,6 +460,9 @@ fun OtsApp() {
                                     go(Route.Compose("", fwdSubject(m.subject), quoted, mode = "forward"))
                             }
                         },
+                        onComposeEmail = { address ->
+                            go(Route.Compose(to = address, subject = "", quoted = ""))
+                        },
                         onToast = toast,
                     )
                 }
@@ -504,6 +507,14 @@ fun OtsApp() {
                                     ),
                                 )
                             }
+                        },
+                        onComposeEmail = { to, m, address, extAccId ->
+                            go(
+                                Route.Compose(
+                                    to = to, subject = "", quoted = "",
+                                    extId = m.extId, extAccountId = extAccId, extAddress = address,
+                                ),
+                            )
                         },
                         onToast = toast,
                     )
@@ -672,6 +683,9 @@ fun OtsApp() {
                                 ReplyAction.FORWARD ->
                                     go(Route.Compose("", fwdSubject(m.subject), quoted, mode = "forward"))
                             }
+                        },
+                        onComposeEmail = { address ->
+                            go(Route.Compose(to = address, subject = "", quoted = ""))
                         },
                         // 智能回复：点选一条候选才进写信页，收件人/主题按回复规则，不会自动发送
                         onAiReply = { m, text ->

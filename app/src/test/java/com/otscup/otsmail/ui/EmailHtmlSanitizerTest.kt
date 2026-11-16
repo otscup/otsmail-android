@@ -175,4 +175,42 @@ class EmailHtmlSanitizerTest {
         assertTrue(out.contains("width:120px"))
         assertTrue(out.contains("<pre>"))
     }
+
+    @Test
+    fun `大声明尺寸图片按自然尺寸显示小图标不变`() {
+        val out = sanitizeEmailHtml(
+            "<img width=\"600\" height=\"200\" src=\"https://e.x/logo.png\">" +
+                "<img width=\"24\" height=\"24\" src=\"https://e.x/icon.png\">" +
+                "<img style=\"width:600px\" height=\"100\" src=\"https://e.x/photo.png\">",
+        )
+        assertTrue(Regex("data-ots-natural").findAll(out).count() == 2)
+        assertFalse(Regex("<img[^>]+icon\\.png[^>]+data-ots-natural").containsMatchIn(out))
+    }
+
+    @Test
+    fun `中文日期地址设备与邮箱变成可点内容`() {
+        val out = sanitizeEmailHtml(
+            "<div>2026年11月15日 05:38</div>" +
+                "<div>美国圣何塞 (加利福尼亚州) 附近</div>" +
+                "<div>Chrome, Windows</div>" +
+                "<div>admin@otscup.com (AI、设备及其他)</div>",
+        )
+        assertTrue(out.contains("otsmail-calendar://time/"))
+        assertTrue(out.contains("geo:0,0?q="))
+        assertTrue(out.contains("mailto:admin@otscup.com"))
+        assertTrue(Regex("ots-row-icon").findAll(out).count() == 3)
+        assertTrue(out.contains("ots-smart-link"))
+    }
+
+    @Test
+    fun `智能识别不嵌套已有链接也不改样式和无效日期`() {
+        val out = sanitizeEmailHtml(
+            "<style>.x{content:\"a@b.co\"}</style>" +
+                "<a href=\"mailto:a@b.co\">a@b.co</a>" +
+                "<div>2026年13月45日 05:38</div>",
+        )
+        assertTrue(Regex("<a\\b").findAll(out).count() == 1)
+        assertTrue(out.contains("content:\"a@b.co\""))
+        assertFalse(out.contains("otsmail-calendar"))
+    }
 }

@@ -1,5 +1,6 @@
 package com.otscup.otsmail.ui
 
+import android.app.AlertDialog
 import android.app.DownloadManager
 import android.content.ClipData
 import android.content.ClipboardManager
@@ -10,6 +11,8 @@ import android.graphics.Bitmap
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
+import android.provider.CalendarContract
+import android.provider.ContactsContract
 import android.provider.MediaStore
 import android.util.Log
 import android.util.LruCache
@@ -18,6 +21,7 @@ import android.webkit.WebResourceResponse
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import android.widget.Toast
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -125,10 +129,12 @@ import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.InputStream
 import java.net.HttpURLConnection
+import java.net.URLEncoder
 import java.net.Inet4Address
 import java.net.Inet6Address
 import java.net.InetAddress
 import java.net.URL
+import java.util.Calendar
 
 /** 详情里「更多」弹出的分类（网页端 emailMoveCategory 的目标分类）。 */
 private val MOVE_TARGETS = listOf(
@@ -169,6 +175,10 @@ internal fun bodyShell(
 body{margin:0;padding:0;background:transparent;color:$fg;
 font:15px/20px -apple-system,"Noto Sans SC",sans-serif;letter-spacing:-0.24px;word-break:break-word}
 p{margin:0 0 12px}img,video{max-width:100%;height:auto}a{color:$link}
+img[data-ots-natural]{width:auto!important;height:auto!important}
+a.ots-smart-link{color:$link!important;text-decoration:underline!important}
+span.ots-row-icon{display:inline-block;width:18px;height:18px;margin-right:12px;vertical-align:-4px;color:$sys}
+span.ots-row-icon svg{display:block;width:18px;height:18px}
 /* 邮件模板（MJML/营销邮件）普遍把 table/td 写死成 600px，表格单元格不吃 max-width，
    只靠 * 规则压不住；具体像素宽度在 [normalizeFixedWidths] 里清洗成百分比/自适应，
    这里做自适应排版：超宽表格支持 touch 触摸横向平滑滑动，单元格自动折行，避免右侧被整体裁切。 */
@@ -432,6 +442,65 @@ private fun imageFailurePlaceholder(url: String, tagHtml: String): String {
         """在浏览器打开</a></div>"""
 }
 
+/** 正文链接统一出口：网页/地图交给系统，日期打开日历，邮箱进入 App 写信或系统联系人。 */
+private fun handleBodyLink(
+    context: Context,
+    request: WebResourceRequest?,
+    onComposeEmail: (String) -> Unit,
+): Boolean {
+    val uri = request?.url ?: return true
+    when (uri.scheme?.lowercase()) {
+        "http", "https", "geo" -> startBodyIntent(
+            context,
+            Intent(Intent.ACTION_VIEW, uri),
+            if (uri.scheme.equals("geo", ignoreCase = true)) "没有可打开地图的应用" else "没有可打开链接的应用",
+        )
+        "otsmail-calendar" -> {
+            val millis = uri.lastPathSegment?.toLongOrNull()
+            if (millis != null) {
+                val at = CalendarContract.CONTENT_URI.buildUpon()
+                    .appendPath("time")
+                    .appendPath(millis.toString())
+                    .build()
+                startBodyIntent(context, Intent(Intent.ACTION_VIEW, at), "没有可打开日历的应用")
+            }
+        }
+        "mailto" -> {
+            val addresses = Uri.decode(uri.schemeSpecificPart.substringBefore('?')).trim()
+            if (addresses.isNotEmpty()) {
+                AlertDialog.Builder(context)
+                    .setTitle(addresses)
+                    .setItems(arrayOf("发送邮件", "添加到联系人")) { _, which ->
+                        when (which) {
+                            0 -> onComposeEmail(addresses)
+                            1 -> startBodyIntent(
+                                context,
+                                Intent(Intent.ACTION_INSERT_OR_EDIT).apply {
+                                    type = ContactsContract.Contacts.CONTENT_ITEM_TYPE
+                                    putExtra(
+                                        ContactsContract.Intents.Insert.EMAIL,
+                                        addresses.substringBefore(',').trim(),
+                                    )
+                                },
+                                "没有可添加联系人的应用",
+                            )
+                        }
+                    }
+                    .setNegativeButton("取消", null)
+                    .show()
+            }
+        }
+    }
+    return true
+}
+
+private fun startBodyIntent(context: Context, intent: Intent, failureMessage: String) {
+    runCatching {
+        context.startActivity(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+    }.onFailure {
+        Toast.makeText(context, failureMessage, Toast.LENGTH_SHORT).show()
+    }
+}
 
 /**
  * 读信页：对标三星/Google 邮件——通栏无卡片、正文左右 16dp、HTML 图片不超出内容区。
@@ -443,6 +512,7 @@ fun DetailScreen(
     emailId: Long,
     onBack: () -> Unit,
     onReply: (MailDetail, ReplyAction) -> Unit,
+    onComposeEmail: (String) -> Unit = {},
     /** 智能回复点选后带进写信页；点选前绝不自动发出 */
     onAiReply: (MailDetail, String) -> Unit = { _, _ -> },
     onToast: (String) -> Unit = {},
@@ -1122,23 +1192,12 @@ fun DetailScreen(
                                     val webViewUa = settings.userAgentString.orEmpty()
                                     setBackgroundColor(android.graphics.Color.TRANSPARENT)
                                     webViewClient = object : WebViewClient() {
-                                        // 任何跳转都不在应用内打开：http(s) 交给系统浏览器，
-                                        // intent://、tel:、自定义 scheme 一律拦截（返回 true 即不加载）
+                                        // 网页、日历、地图和邮箱动作由统一出口处理；其它 scheme 仍拦截。
                                         override fun shouldOverrideUrlLoading(
                                             view: WebView?,
                                             request: WebResourceRequest?,
                                         ): Boolean {
-                                            val uri = request?.url ?: return true
-                                            val scheme = uri.scheme?.lowercase()
-                                            if (scheme == "http" || scheme == "https") {
-                                                runCatching {
-                                                    view?.context?.startActivity(
-                                                        Intent(Intent.ACTION_VIEW, uri)
-                                                            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
-                                                    )
-                                                }
-                                            }
-                                            return true
+                                            return handleBodyLink(context, request, onComposeEmail)
                                         }
 
                                         /**
@@ -1945,9 +2004,121 @@ internal fun sanitizeEmailHtml(raw: String, baseUrl: String = ""): String {
         .replace(Regex("(?i)\\son[a-z]+\\s*=\\s*(\"[^\"]*\"|'[^']*'|[^\\s>]+)"), "")
         .replace(Regex("(?i)javascript:"), "#")
         .replace(Regex("(?i)vbscript:"), "#")
-    val normalized = normalizeFixedWidths(cleaned)
+    val normalized = normalizeFixedWidths(markNaturalSizeImages(cleaned))
     val safe = neutralizeTrackingPixels(normalized)
-    return if (baseUrl.isBlank()) safe else absolutizeHtmlUrls(safe, baseUrl)
+    val safeUrls = if (baseUrl.isBlank()) safe else absolutizeHtmlUrls(safe, baseUrl)
+    return enhanceEmailContent(safeUrls)
+}
+
+private val IMG_STYLE_WIDTH = Regex("(?i)(?:^|[;\"'\\s])width\\s*:\\s*(\\d+)\\.?\\d*px")
+
+/** 大声明尺寸的 Logo/照片按图片原始像素显示，仍受 max-width:100% 限制，不再被放满整栏。 */
+private fun markNaturalSizeImages(html: String): String = IMG_TAG.replace(html) { match ->
+    val tag = match.value
+    val attr = IMG_WIDTH_ATTR.find(tag)?.groupValues?.getOrNull(1)?.toIntOrNull()
+    val style = IMG_STYLE_WIDTH.find(tag)?.groupValues?.getOrNull(1)?.toIntOrNull()
+    val width = attr ?: style
+    if (width == null || width < FIXED_WIDTH_MIN || tag.contains("data-ots-natural")) tag
+    else tag.replaceFirst(">", " data-ots-natural>")
+}
+
+private val HTML_TOKENS = Regex("(?s)<[^>]+>|[^<]+")
+private val ANCHOR_OPEN = Regex("(?i)^<a\\b")
+private val ANCHOR_CLOSE = Regex("(?i)^</a\\s*>")
+private val STYLE_OPEN = Regex("(?i)^<style\\b")
+private val STYLE_CLOSE = Regex("(?i)^</style\\s*>")
+private val SMART_EMAIL = Regex("(?i)\\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\\.[A-Z]{2,}\\b")
+private val SMART_DATE = Regex(
+    "(?<!\\d)(\\d{4})年(\\d{1,2})月(\\d{1,2})日" +
+        "(?:\\s+(\\d{1,2}):(\\d{2})(?::(\\d{2}))?)?",
+)
+private val ADDRESS_LINE = Regex(
+    "^[\\p{L}\\p{N}][\\p{L}\\p{N}\\s,，()（）·\\-—]{1,100}(?:附近|路|街|道|号|区|县|市|州)$",
+)
+private val DEVICE_LINE = Regex(
+    "(?i)^(?:Chrome|Chromium|Safari|Firefox|Edge|Edg|Samsung Internet|Android|iOS|Windows|macOS|Mac OS X|Linux)" +
+        "(?:[ /][\\d.]+)?[,，]\\s*(?:Windows|Android|iOS|iPadOS|macOS|Mac OS X|Linux|Chrome OS)(?:\\s*[\\d.]*)?$",
+)
+
+/** 只处理文本节点；已有链接与 style 内容保持原样，避免嵌套 <a> 或改写 CSS。 */
+private fun enhanceEmailContent(html: String): String {
+    val out = StringBuilder(html.length + 128)
+    var anchors = 0
+    var styles = 0
+    HTML_TOKENS.findAll(html).forEach { match ->
+        val token = match.value
+        if (token.startsWith("<")) {
+            out.append(token)
+            when {
+                ANCHOR_OPEN.containsMatchIn(token) -> anchors++
+                ANCHOR_CLOSE.containsMatchIn(token) -> anchors = (anchors - 1).coerceAtLeast(0)
+                STYLE_OPEN.containsMatchIn(token) -> styles++
+                STYLE_CLOSE.containsMatchIn(token) -> styles = (styles - 1).coerceAtLeast(0)
+            }
+        } else if (anchors == 0 && styles == 0) {
+            out.append(enhanceTextNode(token))
+        } else {
+            out.append(token)
+        }
+    }
+    return out.toString()
+}
+
+private fun enhanceTextNode(text: String): String {
+    val start = text.indexOfFirst { !it.isWhitespace() }
+    if (start < 0) return text
+    val end = text.indexOfLast { !it.isWhitespace() } + 1
+    val core = text.substring(start, end)
+    fun wrap(content: String): String = text.substring(0, start) + content + text.substring(end)
+
+    if (DEVICE_LINE.matches(core)) return wrap(smartIcon("device") + core)
+    if (ADDRESS_LINE.matches(core)) {
+        val query = URLEncoder.encode(core.replace("&amp;", "&").replace("&nbsp;", " "), "UTF-8")
+            .replace("+", "%20")
+        return wrap(smartIcon("pin") + smartLink("geo:0,0?q=$query", core))
+    }
+    calendarHref(core)?.let { href ->
+        return wrap(smartIcon("clock") + smartLink(href, core))
+    }
+
+    val dates = SMART_DATE.replace(text) { match ->
+        calendarHref(match.value)?.let { smartLink(it, match.value) } ?: match.value
+    }
+    return SMART_EMAIL.replace(dates) { smartLink("mailto:${it.value}", it.value) }
+}
+
+private fun calendarHref(raw: String): String? {
+    val match = SMART_DATE.matchEntire(raw) ?: return null
+    val v = match.groupValues
+    val calendar = Calendar.getInstance().apply {
+        isLenient = false
+        clear()
+        set(
+            v[1].toInt(),
+            v[2].toInt() - 1,
+            v[3].toInt(),
+            v[4].ifEmpty { "0" }.toInt(),
+            v[5].ifEmpty { "0" }.toInt(),
+            v[6].ifEmpty { "0" }.toInt(),
+        )
+    }
+    val millis = runCatching { calendar.timeInMillis }.getOrNull() ?: return null
+    return "otsmail-calendar://time/$millis"
+}
+
+private fun smartLink(href: String, label: String): String =
+    "<a class=\"ots-smart-link\" href=\"$href\">$label</a>"
+
+private fun smartIcon(kind: String): String {
+    val shape = when (kind) {
+        "clock" -> "<circle cx=\"12\" cy=\"12\" r=\"9\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\"/>" +
+            "<path d=\"M12 7v5l3 2\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\"/>"
+        "pin" -> "<path d=\"M12 21s7-6.1 7-12A7 7 0 0 0 5 9c0 5.9 7 12 7 12z\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\"/>" +
+            "<circle cx=\"12\" cy=\"9\" r=\"2.5\" fill=\"currentColor\"/>"
+        else -> "<rect x=\"3\" y=\"4\" width=\"18\" height=\"12\" rx=\"1.5\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\"/>" +
+            "<path d=\"M8 20h8M12 16v4\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\"/>"
+    }
+    return "<span class=\"ots-row-icon\" aria-hidden=\"true\"><svg viewBox=\"0 0 24 24\">$shape</svg></span>"
 }
 
 /**
@@ -2120,6 +2291,7 @@ internal fun SiteMailDetailScreen(
     emailId: Long,
     onBack: () -> Unit,
     onReply: (MailDetail, ReplyAction) -> Unit,
+    onComposeEmail: (String) -> Unit,
     onToast: (String) -> Unit,
 ) {
     val c = OT.colors
@@ -2141,7 +2313,13 @@ internal fun SiteMailDetailScreen(
             }
 
             m == null -> Box(Modifier.fillMaxSize(), Alignment.Center) { CircularProgressIndicator() }
-            else -> SiteMailBody(m, onBack = onBack, onReply = onReply, onToast = onToast)
+            else -> SiteMailBody(
+                m,
+                onBack = onBack,
+                onReply = onReply,
+                onComposeEmail = onComposeEmail,
+                onToast = onToast,
+            )
         }
     }
 }
@@ -2151,6 +2329,7 @@ private fun SiteMailBody(
     initial: SiteMail,
     onBack: () -> Unit,
     onReply: (MailDetail, ReplyAction) -> Unit,
+    onComposeEmail: (String) -> Unit,
     onToast: (String) -> Unit,
 ) {
     val c = OT.colors
@@ -2243,17 +2422,7 @@ private fun SiteMailBody(
                                 view: WebView?,
                                 request: WebResourceRequest?,
                             ): Boolean {
-                                val uri = request?.url ?: return true
-                                val scheme = uri.scheme?.lowercase()
-                                if (scheme == "http" || scheme == "https") {
-                                    runCatching {
-                                        view?.context?.startActivity(
-                                            Intent(Intent.ACTION_VIEW, uri)
-                                                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
-                                        )
-                                    }
-                                }
-                                return true
+                                return handleBodyLink(ctx, request, onComposeEmail)
                             }
 
                             // 远程图片与普通详情同一套代取：带 UA/Referer、拦内网、失败回透明图
@@ -2533,6 +2702,7 @@ internal fun ExtMailDetailScreen(
     sent: Boolean = false,
     onBack: () -> Unit,
     onReply: (ExtLocalMail, ReplyAction, String, Long) -> Unit = { _, _, _, _ -> },
+    onComposeEmail: (String, ExtLocalMail, String, Long) -> Unit = { _, _, _, _ -> },
     onToast: (String) -> Unit = {},
 ) {
     val c = OT.colors
@@ -2585,6 +2755,7 @@ internal fun ExtMailDetailScreen(
                 accountId = accountId,
                 onDeleted = onBack,
                 onReply = onReply,
+                onComposeEmail = { address -> onComposeEmail(address, m, accountAddress, accountId) },
                 onToast = onToast,
             )
         }
@@ -2599,6 +2770,7 @@ private fun ExtMailBody(
     accountId: Long = 0L,
     onDeleted: () -> Unit = {},
     onReply: (ExtLocalMail, ReplyAction, String, Long) -> Unit = { _, _, _, _ -> },
+    onComposeEmail: (String) -> Unit = {},
     onToast: (String) -> Unit = {},
 ) {
     val c = OT.colors
@@ -2802,17 +2974,7 @@ private fun ExtMailBody(
                                 view: WebView?,
                                 request: WebResourceRequest?,
                             ): Boolean {
-                                val uri = request?.url ?: return true
-                                val scheme = uri.scheme?.lowercase()
-                                if (scheme == "http" || scheme == "https") {
-                                    runCatching {
-                                        view?.context?.startActivity(
-                                            Intent(Intent.ACTION_VIEW, uri)
-                                                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
-                                        )
-                                    }
-                                }
-                                return true
+                                return handleBodyLink(ctx, request, onComposeEmail)
                             }
 
                             // 与普通详情共用一套图片代取：带 UA/Referer、拦内网、失败回透明图
