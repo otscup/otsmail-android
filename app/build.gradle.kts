@@ -60,8 +60,8 @@ android {
         return major * 10000 + minor * 100 + patch
     }
 
-    // 最后一个正式 tag 是 v0.3.11；下一个正式版是 0.3.12，发新 tag 后这里改成再下一个。
-    val nextReleaseName = "0.3.12"
+    // 最后一个正式 tag 是 v0.3.14；下一个正式版是 0.3.15，发新 tag 后这里改成再下一个。
+    val nextReleaseName = "0.3.15"
 
     val releaseVersionName = (project.findProperty("versionName") as String?)
         ?.removePrefix("v")
