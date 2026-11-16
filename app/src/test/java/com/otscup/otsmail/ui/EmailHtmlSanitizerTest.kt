@@ -55,6 +55,51 @@ class EmailHtmlSanitizerTest {
     }
 
     @Test
+    fun `服务端签名代理地址原样保留并补成绝对地址`() {
+        // 正文里的图片地址都由服务端改写成 /api/proxy/image?url=..&uid=..&exp=..&sig=..
+        // 这里只要把 query 弄丢一段（尤其是 sig/exp），代理就回 403，App 端直接显示“图片加载失败”。
+        val src = "/api/proxy/image?url=https%3A%2F%2Fcdn.x%2Fa.png&uid=7" +
+            "&exp=1795526249&sig=sUfTfwynyi3HKR98rCkk74LNspHw_16IRdNFdh12cpY"
+        val out = sanitizeEmailHtml("<img width=\"600\" src=\"$src\">", "https://mail.example.com/")
+        assertTrue(
+            out.contains(
+                "src=\"https://mail.example.com/api/proxy/image?url=https%3A%2F%2Fcdn.x%2Fa.png" +
+                    "&uid=7&exp=1795526249&sig=sUfTfwynyi3HKR98rCkk74LNspHw_16IRdNFdh12cpY\"",
+            ),
+        )
+    }
+
+    @Test
+    fun `宽版面去居中而 200px 按钮仍居中`() {
+        // 600px 版面 + 居中单元格：只去掉版面级居中，正文内容不能丢
+        val wide = sanitizeEmailHtml(
+            "<table width=\"100%\"><tr><td align=\"center\">" +
+                "<table width=\"600\" style=\"width:600px;margin:0 auto\"><tr><td>正文</td></tr></table>" +
+                "</td></tr></table>",
+        )
+        assertFalse(Regex("(?i)align=\"center\"").containsMatchIn(wide))
+        assertFalse(Regex("(?i)margin\\s*:\\s*0\\s+auto").containsMatchIn(wide))
+        assertTrue(wide.contains("正文"))
+
+        // 200px 的按钮/卡片居中不动，否则按钮会贴左
+        val button = sanitizeEmailHtml(
+            "<table width=\"600\"><tr><td align=\"center\">" +
+                "<table width=\"200\" style=\"margin:0 auto\"><tr><td>立即确认</td></tr></table>" +
+                "</td></tr></table>",
+        )
+        assertTrue(button.contains("align=\"center\""))
+        assertTrue(button.contains("margin:0 auto"))
+        assertTrue(button.contains("立即确认"))
+    }
+
+    @Test
+    fun `宽版面包装的 margin auto 被去掉而宽度保留`() {
+        val out = sanitizeEmailHtml("<div style=\"max-width:600px;margin:0 auto\"><p>x</p></div>")
+        assertFalse(Regex("(?i)\\bauto\\b").containsMatchIn(out))
+        assertTrue(out.contains("max-width:600px"))
+    }
+
+    @Test
     fun `空正文原样返回`() {
         assertTrue(sanitizeEmailHtml("  ") == "  ")
     }

@@ -341,7 +341,10 @@ private object InlineImages {
             val conn = runCatching {
                 (parsed.openConnection() as HttpURLConnection).apply {
                     connectTimeout = 5000
-                    readTimeout = 6000
+                    // 正文图片走服务端签名代理，代理自己的上游超时是 10s（外加 DoH 校验），
+                    // 客户端 6s 会比服务端更早放弃：图其实已经取到、只是比 6s 慢，
+                    // 结果被当成失败换成“图片加载失败”占位。这里的读超时要盖住服务端的预算。
+                    readTimeout = 15000
                     // 自己跟跳转：每一跳都要先过 scheme / 内网校验，不能让底层连接器替我们跳
                     instanceFollowRedirects = false
                     setRequestProperty("User-Agent", ua)
@@ -2020,7 +2023,7 @@ internal fun sanitizeEmailHtml(raw: String, baseUrl: String = "", enhanceSmartLi
         .replace(Regex("(?i)\\son[a-z]+\\s*=\\s*(\"[^\"]*\"|'[^']*'|[^\\s>]+)"), "")
         .replace(Regex("(?i)javascript:"), "#")
         .replace(Regex("(?i)vbscript:"), "#")
-    val normalized = normalizeFixedWidths(markNaturalSizeImages(cleaned))
+    val normalized = normalizeFixedWidths(markNaturalSizeImages(normalizeLayoutCentering(cleaned)))
     val safe = neutralizeTrackingPixels(normalized)
     val safeUrls = if (baseUrl.isBlank()) safe else absolutizeHtmlUrls(safe, baseUrl)
     // 译文通常是纯文本或不完整 HTML，不做智能识别，避免把半残内容结构搞坏
@@ -2162,6 +2165,57 @@ private const val CELL_WIDTH_MIN = 40
 private val CSS_PX_WIDTH = Regex("(?i)(?<![-\\w])width\\s*:\\s*(\\d{2,4})\\s*px")
 private val ATTR_PX_WIDTH = Regex("(?i)\\bwidth\\s*=\\s*[\"']?\\s*(\\d{2,4})")
 private val TABLE_LIKE_TAG = Regex("(?is)<(table|td|th)\\b[^>]*>")
+
+/**
+ * 版面级居中：营销邮件把版面写死成 600px，再用 `align="center"` 或 `margin:0 auto` 把它居中。
+ * 阅读区比版面宽时，整块正文右移 (阅读区宽 − 版面宽) / 2，而表头 logo 是整宽左对齐，看起来就错开。
+ * 这与网页端 `shadow-html/index.vue`、服务端 `html-sanitize.js` 是同一套规则，阈值和边界保持一致：
+ * 只处理声明宽度 ≥ [FIXED_WIDTH_MIN] 的版面，版面宽度本身、按钮/图标这类小尺寸居中都不动。
+ *
+ * 这里的清洗是正则式的（不建 DOM），所以用两条规则近似 DOM 版：
+ * 1) `td`/`th` 内含 ≥360px 表格时，去掉这个单元格的 align="center"（只把整版居中，内容居中不管）；
+ * 2) 自身声明 ≥360px 的 `table` 去掉 align="center"；任何宽元素去掉 margin 里的 auto。
+ */
+private val ALIGN_CENTER_ATTR = Regex("(?i)\\s+align\\s*=\\s*([\"']?)center\\1")
+private val STYLE_ATTR = Regex("(?i)(\\sstyle\\s*=\\s*)([\"'])(.*?)\\2")
+private val AUTO_MARGIN = Regex("(?i)(?:^|;)\\s*margin(?:-(?:left|right))?\\s*:[^;]*\\bauto\\b[^;]*")
+private val OPEN_TAG = Regex("(?is)<[a-z][a-z0-9]*\\b[^>]*>")
+private val TABLE_OPEN_TAG = Regex("(?is)<table\\b[^>]*>")
+private val CELL_WITH_CENTER = Regex(
+    "(?is)(<(?:td|th)\\b[^>]*?\\balign\\s*=\\s*[\"']?center[\"']?[^>]*>)(.*?)(</(?:td|th)\\s*>)",
+)
+/** 声明的版面宽度：width 属性优先，其次 style 里的 width / max-width（单位 px）。 */
+private fun declaredLayoutWidth(tag: String): Int {
+    val attr = ATTR_PX_WIDTH.find(tag)?.groupValues?.get(1)?.toIntOrNull() ?: 0
+    val style = Regex("(?i)(?<![-\\w])(?:max-)?width\\s*:\\s*(\\d{2,4})\\s*px")
+        .find(tag)?.groupValues?.get(1)?.toIntOrNull() ?: 0
+    return maxOf(attr, style)
+}
+
+internal fun normalizeLayoutCentering(html: String): String {
+    // 1) 承载宽版面的单元格：align="center" 只是把整版居中，去掉后版面贴左
+    var out = CELL_WITH_CENTER.replace(html) { m ->
+        val wideTable = TABLE_OPEN_TAG.findAll(m.groupValues[2])
+            .any { declaredLayoutWidth(it.value) >= FIXED_WIDTH_MIN }
+        if (!wideTable) m.value
+        else m.groupValues[1].replace(ALIGN_CENTER_ATTR, "") + m.groupValues[2] + m.groupValues[3]
+    }
+    // 2) 宽版面自身：table 的 align，以及任何宽元素的 margin auto
+    out = OPEN_TAG.replace(out) { m ->
+        val tag = m.value
+        if (declaredLayoutWidth(tag) < FIXED_WIDTH_MIN) return@replace tag
+        var fixed = tag
+        if (fixed.startsWith("<table", ignoreCase = true)) fixed = fixed.replace(ALIGN_CENTER_ATTR, "")
+        if (fixed.contains("auto", ignoreCase = true)) {
+            fixed = STYLE_ATTR.replace(fixed) { s ->
+                val q = s.groupValues[2]
+                s.groupValues[1] + q + AUTO_MARGIN.replace(s.groupValues[3], "") + q
+            }
+        }
+        fixed
+    }
+    return out
+}
 
 internal fun normalizeFixedWidths(html: String): String {
     val cssFixed = CSS_PX_WIDTH.replace(html) { m ->
