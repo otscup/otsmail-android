@@ -243,9 +243,21 @@ private object InlineImages {
         if (path.endsWith(".ico") || path.contains("favicon")) return false
         // WebView 一般不会给子资源带 Accept，按扩展名兜底
         if (request.requestHeaders?.get("Accept")?.contains("image/", ignoreCase = true) == true) return true
-        return path.endsWith(".png") || path.endsWith(".jpg") || path.endsWith(".jpeg") ||
+        if (path.endsWith(".png") || path.endsWith(".jpg") || path.endsWith(".jpeg") ||
             path.endsWith(".gif") || path.endsWith(".webp") || path.endsWith(".bmp") ||
             path.endsWith(".svg") || path.endsWith(".avif")
+        ) return true
+        // 无扩展名的图片 CDN URL：path 含 image/img/photo/pic/media/avatar/thumbnail/cover
+        // 或 query 参数带 w=、width=、size=、dim= 这类尺寸信号
+        val urlLower = url.lowercase()
+        if (path.contains("image") || path.contains("img") || path.contains("photo") ||
+            path.contains("pic") || path.contains("media") || path.contains("avatar") ||
+            path.contains("thumbnail") || path.contains("cover") || path.contains("cdn-cgi/imagedelivery")
+        ) return true
+        if (urlLower.contains("?w=") || urlLower.contains("&w=") || urlLower.contains("?width=") ||
+            urlLower.contains("&width=") || urlLower.contains("?size=") || urlLower.contains("&size=")
+        ) return true
+        return false
     }
 
     /**
@@ -257,7 +269,9 @@ private object InlineImages {
     fun isImageRequest(request: WebResourceRequest): Boolean {
         if (looksLikeImage(request)) return true
         if (request.isForMainFrame) return false
-        return request.url?.path.orEmpty().lowercase().endsWith("/api/proxy/image")
+        val path = request.url?.path.orEmpty().lowercase()
+        return path.endsWith("/api/proxy/image") ||
+            path.contains("/img/") || path.contains("/image/") || path.contains("/photo/")
     }
 
     fun load(url: String, webViewUa: String): Pair<String, ByteArray>? {
@@ -1061,9 +1075,11 @@ fun DetailScreen(
                 // sanitize 对长 HTML 是纯 CPU 工作：按内容 remember，避免每次重组（滚动/展开）重跑一遍。
                 val baseHtml = remember(m.content, translated, showingOriginal) {
                     // 相对地址按服务端 origin 补全：WebView 不再继承服务端 origin（见 BODY_BASE_URL）
+                    val isTranslated = translated.isNotEmpty() && !showingOriginal
                     sanitizeEmailHtml(
-                        if (translated.isNotEmpty() && !showingOriginal) translated else m.content,
+                        if (isTranslated) translated else m.content,
                         serverOrigin(),
+                        enhanceSmartLinks = !isTranslated,
                     )
                 }
                 // 取不到的图片换成占位卡片；这一步只依赖失败集合，单独缓存
@@ -1996,7 +2012,7 @@ private fun hex(color: Color): String = String.format("#%06X", 0xFFFFFF and colo
  *   正文用中性 origin 渲染，不补的话相对图片与相对链接都会指向一个不存在的主机
  * 说明：用正则做白名单式清洗，对"邮件正文"这种非对抗性场景足够；不追求完整的 HTML 解析。
  */
-internal fun sanitizeEmailHtml(raw: String, baseUrl: String = ""): String {
+internal fun sanitizeEmailHtml(raw: String, baseUrl: String = "", enhanceSmartLinks: Boolean = true): String {
     if (raw.isBlank()) return raw
     val cleaned = raw
         .replace(Regex("(?is)<(script|iframe|object|embed|form|base|link|meta)\\b[^>]*>.*?</\\1\\s*>"), "")
@@ -2007,18 +2023,21 @@ internal fun sanitizeEmailHtml(raw: String, baseUrl: String = ""): String {
     val normalized = normalizeFixedWidths(markNaturalSizeImages(cleaned))
     val safe = neutralizeTrackingPixels(normalized)
     val safeUrls = if (baseUrl.isBlank()) safe else absolutizeHtmlUrls(safe, baseUrl)
-    return enhanceEmailContent(safeUrls)
+    // 译文通常是纯文本或不完整 HTML，不做智能识别，避免把半残内容结构搞坏
+    return if (enhanceSmartLinks) enhanceEmailContent(safeUrls) else safeUrls
 }
 
 private val IMG_STYLE_WIDTH = Regex("(?i)(?:^|[;\"'\\s])width\\s*:\\s*(\\d+)\\.?\\d*px")
 
 /** 大声明尺寸的 Logo/照片按图片原始像素显示，仍受 max-width:100% 限制，不再被放满整栏。 */
+private const val IMG_NATURAL_SIZE_MIN = 48
+
 private fun markNaturalSizeImages(html: String): String = IMG_TAG.replace(html) { match ->
     val tag = match.value
     val attr = IMG_WIDTH_ATTR.find(tag)?.groupValues?.getOrNull(1)?.toIntOrNull()
     val style = IMG_STYLE_WIDTH.find(tag)?.groupValues?.getOrNull(1)?.toIntOrNull()
     val width = attr ?: style
-    if (width == null || width < FIXED_WIDTH_MIN || tag.contains("data-ots-natural")) tag
+    if (width == null || width < IMG_NATURAL_SIZE_MIN || tag.contains("data-ots-natural")) tag
     else tag.replaceFirst(">", " data-ots-natural>")
 }
 
@@ -2129,6 +2148,7 @@ private fun smartIcon(kind: String): String {
  * - `style="width:600px"` → `max-width:100%`（去掉固定宽度，交给表格自动布局）
  * - `width="600"` → `width="100%"`（对单列表格等价于铺满，多列里的像素列宽本就少见）
  */
+/** 布局里固定像素宽度的阈值：≥ 这个值的 CSS width 或 table 像素宽改自适应。 */
 private const val FIXED_WIDTH_MIN = 360
 
 /**
@@ -2346,8 +2366,9 @@ private fun SiteMailBody(
     var showingOriginal by remember { mutableStateOf(false) }
     // 正文来自全站列表，同样是外部发件人控制的 HTML：与普通详情走同一套清洗
     val html = remember(m, translated, showingOriginal) {
-        val body = if (translated.isNotEmpty() && !showingOriginal) translated else d.content
-        sanitizeEmailHtml(body, serverOrigin())
+        val isTranslated = translated.isNotEmpty() && !showingOriginal
+        val body = if (isTranslated) translated else d.content
+        sanitizeEmailHtml(body, serverOrigin(), enhanceSmartLinks = !isTranslated)
     }
     val copyText = m.plain.ifBlank {
         d.content.replace(Regex("(?is)<[^>]+>"), " ").replace(Regex("\\s+"), " ").trim()
